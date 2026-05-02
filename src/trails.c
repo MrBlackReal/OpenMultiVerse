@@ -153,6 +153,24 @@ void trails_reset_body(int body_idx)
     b->trail_prev_pos[0] = b->pos[0];
     b->trail_prev_pos[1] = b->pos[1];
     b->trail_prev_pos[2] = b->pos[2];
+    b->trail_prev_vel[0] = b->vel[0];
+    b->trail_prev_vel[1] = b->vel[1];
+    b->trail_prev_vel[2] = b->vel[2];
+    b->trail_frame_accum = 0.0;
+    b->trail_frame_head = b->trail_head;
+    b->trail_frame_count = b->trail_count;
+    b->trail_frame_pos[0] = b->pos[0];
+    b->trail_frame_pos[1] = b->pos[1];
+    b->trail_frame_pos[2] = b->pos[2];
+    b->trail_frame_vel[0] = b->vel[0];
+    b->trail_frame_vel[1] = b->vel[1];
+    b->trail_frame_vel[2] = b->vel[2];
+    b->trail_frame_prev_pos[0] = b->trail_prev_pos[0];
+    b->trail_frame_prev_pos[1] = b->trail_prev_pos[1];
+    b->trail_frame_prev_pos[2] = b->trail_prev_pos[2];
+    b->trail_frame_prev_vel[0] = b->trail_prev_vel[0];
+    b->trail_frame_prev_vel[1] = b->trail_prev_vel[1];
+    b->trail_frame_prev_vel[2] = b->trail_prev_vel[2];
 
     if (body_idx < s_n) {
         s_last_head[body_idx] = -1;

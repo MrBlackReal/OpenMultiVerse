@@ -71,6 +71,24 @@ static void alloc_trail(Body *bo)
     bo->trail_prev_pos[0] = bo->pos[0];
     bo->trail_prev_pos[1] = bo->pos[1];
     bo->trail_prev_pos[2] = bo->pos[2];
+    bo->trail_prev_vel[0] = bo->vel[0];
+    bo->trail_prev_vel[1] = bo->vel[1];
+    bo->trail_prev_vel[2] = bo->vel[2];
+    bo->trail_frame_accum = 0.0;
+    bo->trail_frame_head = 0;
+    bo->trail_frame_count = 0;
+    bo->trail_frame_pos[0] = bo->pos[0];
+    bo->trail_frame_pos[1] = bo->pos[1];
+    bo->trail_frame_pos[2] = bo->pos[2];
+    bo->trail_frame_vel[0] = bo->vel[0];
+    bo->trail_frame_vel[1] = bo->vel[1];
+    bo->trail_frame_vel[2] = bo->vel[2];
+    bo->trail_frame_prev_pos[0] = bo->trail_prev_pos[0];
+    bo->trail_frame_prev_pos[1] = bo->trail_prev_pos[1];
+    bo->trail_frame_prev_pos[2] = bo->trail_prev_pos[2];
+    bo->trail_frame_prev_vel[0] = bo->trail_prev_vel[0];
+    bo->trail_frame_prev_vel[1] = bo->trail_prev_vel[1];
+    bo->trail_frame_prev_vel[2] = bo->trail_prev_vel[2];
 }
 
 static int find_body_index(const char *name, int n)

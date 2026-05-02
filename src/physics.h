@@ -46,5 +46,8 @@ void   physics_advance_time(double dt);
 void physics_step(double dt);
 
 /* Trail helpers */
+void trails_begin_frame_snapshot(void);
 void trails_tick(double dt);
 void trails_tick_system(int root, double dt);
+void trails_cut_body_at_time(int body_idx, double hit_dt, double frame_dt,
+                             const double cut_pos[3]);

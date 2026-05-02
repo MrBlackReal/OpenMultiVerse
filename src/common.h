@@ -46,11 +46,15 @@ extern int g_win_h;
 #define TRAIL_LEN  4096   /* trail circular buffer size (per body, all bodies) */
 #define NUM_STARS          4000
 
-/* Trail sampling: acceleration-driven with hard interval clamps. */
-#define TRAIL_MIN_INTERVAL          60.0         /* sim-seconds */
-#define TRAIL_MAX_INTERVAL     (DAY * 25.0)      /* sim-seconds */
-#define TRAIL_ACCEL_SCALE        1200.0          /* interval = scale / sqrt(|a|) */
+/* Trail sampling: acceleration chooses a target spatial segment length. */
+#define TRAIL_MIN_SEGMENT_LEN       2.5e4        /* m */
+#define TRAIL_MAX_SEGMENT_LEN       6.0e8        /* m */
+#define TRAIL_SEGMENT_SCALE         1.2e7        /* segment = scale / sqrt(|a|) */
 #define TRAIL_ACCEL_EPS             1e-12        /* m/s^2, avoids div-by-zero */
+#define TRAIL_CURVE_ERROR_RATIO     0.22         /* allowed chord error vs segment length */
+#define TRAIL_CURVE_MIN_ERROR       5.0e3        /* m */
+#define TRAIL_CURVE_MAX_ERROR       2.0e7        /* m */
+#define TRAIL_CURVE_MAX_DEPTH       6
 
 /* 1 AU → 1.0 GL unit */
 #define RS  (1.0 / AU)

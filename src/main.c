@@ -415,10 +415,8 @@ int main(int argc, char **argv) {
                         effective_sim_dt = sys_cap;
                 }
 
+                trails_begin_frame_snapshot();
                 collision_snapshot_positions();
-#ifdef _OPENMP
-#pragma omp parallel for schedule(dynamic)
-#endif
                 for (int s = 0; s < sys_n; s++) {
                     double dt_outer_max = physics_system_outer_dt_limit(s);
                     double dt_inner_max = physics_system_inner_dt_limit(s);
@@ -431,12 +429,20 @@ int main(int argc, char **argv) {
                     double dt_inner = dt_outer / n_inner;
 
                     for (int o = 0; o < outer_steps; o++) {
+                        int local_encounter = collision_system_maybe_has_encounter(root, dt_outer);
+                        if (local_encounter) {
+                            trails_begin_frame_snapshot();
+                            collision_snapshot_positions();
+                        }
                         physics_respa_begin_system(root, dt_outer);
                         for (int i = 0; i < n_inner; i++) {
                             physics_respa_inner_system(root, dt_inner);
                             trails_tick_system(root, dt_inner);
                         }
                         physics_respa_end_system(root, dt_outer);
+                        if (local_encounter) {
+                            collision_step_system(root, dt_outer);
+                        }
                     }
                 }
                 physics_advance_time(effective_sim_dt);

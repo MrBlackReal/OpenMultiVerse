@@ -32,6 +32,8 @@ typedef struct {
 
 void collision_snapshot_positions(void);
 void collision_step(double dt);
+int  collision_system_maybe_has_encounter(int root, double dt);
+void collision_step_system(int root, double dt);
 int  collision_spots_for_body(int body_idx, CollisionSpot spots[COLLISION_MAX_SPOTS]);
 void collision_on_body_added(int body_idx);
 double collision_visual_radius(int body_idx, double physical_radius);

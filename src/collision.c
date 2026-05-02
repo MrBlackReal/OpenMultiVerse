@@ -18,6 +18,7 @@
 #include "collision.h"
 #include "body.h"
 #include "labels.h"
+#include "physics.h"
 #include "rings.h"
 #include "trails.h"
 #include <math.h>
@@ -118,6 +119,10 @@ static unsigned int s_perm_scar_stamp = 1u;
 static double s_pos_before[MAX_BODIES][3];
 static int s_pos_before_valid = 0;
 
+static int body_is_merge_target(int idx);
+static int body_is_merge_impactor(int idx);
+static double current_contact_radius(int body_idx);
+
 static void mark_system_dirty(int root, double hot_duration)
 {
     if (root < 0 || root >= MAX_BODIES) return;
@@ -142,6 +147,43 @@ void collision_on_body_added(int body_idx)
     if (root >= 0) mark_system_dirty(root, SYSTEM_HOT_DURATION);
 }
 
+int collision_system_maybe_has_encounter(int root, double dt)
+{
+    if (root < 0 || root >= g_nbodies || !g_bodies[root].alive) return 0;
+    if (dt <= 0.0) return 0;
+
+    for (int i = 0; i < g_nbodies; i++) {
+        if (!g_bodies[i].alive || g_bodies[i].is_star) continue;
+        if (body_root_star(i) != root) continue;
+        for (int j = i + 1; j < g_nbodies; j++) {
+            double rx, ry, rz, dist, vx, vy, vz, vr, rsum, gap;
+            if (!g_bodies[j].alive || g_bodies[j].is_star) continue;
+            if (body_root_star(j) != root) continue;
+            if (body_is_merge_impactor(i) || body_is_merge_impactor(j)) continue;
+
+            rx = g_bodies[j].pos[0] - g_bodies[i].pos[0];
+            ry = g_bodies[j].pos[1] - g_bodies[i].pos[1];
+            rz = g_bodies[j].pos[2] - g_bodies[i].pos[2];
+            dist = sqrt(rx*rx + ry*ry + rz*rz);
+            if (dist <= 1e-9) return 1;
+
+            vx = g_bodies[j].vel[0] - g_bodies[i].vel[0];
+            vy = g_bodies[j].vel[1] - g_bodies[i].vel[1];
+            vz = g_bodies[j].vel[2] - g_bodies[i].vel[2];
+            vr = -(rx*vx + ry*vy + rz*vz) / dist;
+            rsum = current_contact_radius(i) + current_contact_radius(j);
+            gap = dist - rsum;
+
+            if (gap <= rsum * 6.0) return 1;
+            if (vr > 0.0) {
+                double tau = gap / vr;
+                if (tau <= dt * 2.0) return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 /* ── § MATH — geometry helpers, body surface transforms, spin physics ── */
 
 static int body_is_descendant_of(int body_idx, int ancestor_idx)
@@ -150,6 +192,17 @@ static int body_is_descendant_of(int body_idx, int ancestor_idx)
     for (int p = g_bodies[body_idx].parent; p >= 0; p = g_bodies[p].parent)
         if (p == ancestor_idx) return 1;
     return 0;
+}
+
+static int body_is_satellite(int idx)
+{
+    if (idx < 0 || idx >= g_nbodies || !g_bodies[idx].alive) return 0;
+    return g_bodies[idx].parent >= 0 && !g_bodies[g_bodies[idx].parent].is_star;
+}
+
+static int bodies_are_in_ancestor_chain(int a, int b)
+{
+    return body_is_descendant_of(a, b) || body_is_descendant_of(b, a);
 }
 
 static double dot3d(const double a[3], const double b[3])
@@ -1182,7 +1235,8 @@ static void update_merge_events(double dt)
 
 static void begin_merge_event(int target, int impactor, double rel_speed,
                               const double dir[3], const double rel_vel[3],
-                              double old_radius)
+                              double old_radius, double collision_dt,
+                              double frame_dt)
 {
     int slot = -1;
     Body *a = &g_bodies[target];
@@ -1201,14 +1255,7 @@ static void begin_merge_event(int target, int impactor, double rel_speed,
         touch_pos[0] = a->pos[0] + dir[0] * (old_radius + b->radius);
         touch_pos[1] = a->pos[1] + dir[1] * (old_radius + b->radius);
         touch_pos[2] = a->pos[2] + dir[2] * (old_radius + b->radius);
-        b->trail[b->trail_head][0] = touch_pos[0] * RS;
-        b->trail[b->trail_head][1] = touch_pos[1] * RS;
-        b->trail[b->trail_head][2] = touch_pos[2] * RS;
-        b->trail_head = (b->trail_head + 1) % TRAIL_LEN;
-        if (b->trail_count < TRAIL_LEN) b->trail_count++;
-        b->trail_prev_pos[0] = touch_pos[0];
-        b->trail_prev_pos[1] = touch_pos[1];
-        b->trail_prev_pos[2] = touch_pos[2];
+        trails_cut_body_at_time(impactor, collision_dt, frame_dt, touch_pos);
     }
     b->trail_emitting = 0;
     b->trail_accum = 0.0;
@@ -1425,7 +1472,8 @@ static double pair_check_dt(int a, int b)
     }
 }
 
-static int swept_spheres_collide(int a, int b, double dt, double *out_speed)
+static int swept_spheres_collide(int a, int b, double dt, double *out_speed,
+                                 double *out_hit_t)
 {
     double rel_now[3] = {
         g_bodies[b].pos[0] - g_bodies[a].pos[0],
@@ -1461,6 +1509,40 @@ static int swept_spheres_collide(int a, int b, double dt, double *out_speed)
         double t = 0.0;
         double c[3];
         double r = current_contact_radius(a) + current_contact_radius(b);
+        double dist_now2 = dot3d(rel_now, rel_now);
+        double dist_prev2 = dot3d(rel_p, rel_p);
+        int satellite_pair = body_is_satellite(a) || body_is_satellite(b);
+
+        /* Parent/satellite chains move on curved, mostly tangential paths.
+         * Sweeping a single straight segment across a long frame can cut
+         * through the parent even when the true orbit never comes close.
+         * Only allow swept collision on these pairs once one endpoint is
+         * already near the contact radius. */
+        if (bodies_are_in_ancestor_chain(a, b)) {
+            double near_limit = r * 1.25;
+            double near_limit2 = near_limit * near_limit;
+            if (dist_now2 > near_limit2 && dist_prev2 > near_limit2) {
+                if (out_speed) *out_speed = sqrt(vv);
+                if (out_hit_t) *out_hit_t = 0.0;
+                return 0;
+            }
+        }
+
+        /* The same straight-line sweep also over-reports moon-related impacts
+         * between siblings or nearby satellites when a long frame spans a
+         * large orbital arc. For any pair involving a satellite, require at
+         * least one endpoint to already be reasonably close before we trust
+         * the swept test. */
+        if (satellite_pair) {
+            double near_limit = r * 2.0;
+            double near_limit2 = near_limit * near_limit;
+            if (dist_now2 > near_limit2 && dist_prev2 > near_limit2) {
+                if (out_speed) *out_speed = sqrt(vv);
+                if (out_hit_t) *out_hit_t = 0.0;
+                return 0;
+            }
+        }
+
         if (vv > MIN_COLLISION_SPEED * MIN_COLLISION_SPEED) {
             t = -dot3d(rel_p, rel_v) / vv;
             if (t < 0.0) t = 0.0;
@@ -1470,6 +1552,7 @@ static int swept_spheres_collide(int a, int b, double dt, double *out_speed)
         c[1] = rel_p[1] + rel_v[1] * t;
         c[2] = rel_p[2] + rel_v[2] * t;
         if (out_speed) *out_speed = sqrt(vv);
+        if (out_hit_t) *out_hit_t = t;
         return dot3d(c, c) <= r*r;
     }
 }
@@ -1524,7 +1607,8 @@ static void impact_dir_for_pair(int target, int impactor, double dt, double out_
     out_dir[2] = c[2] / len;
 }
 
-static void absorb_body(int target, int impactor, double rel_speed, double collision_dt)
+static void absorb_body(int target, int impactor, double rel_speed,
+                        double collision_dt, double frame_dt)
 {
     Body *a = &g_bodies[target];
     Body *b = &g_bodies[impactor];
@@ -1553,7 +1637,8 @@ static void absorb_body(int target, int impactor, double rel_speed, double colli
     }
     impact_dir_for_pair(target, impactor, collision_dt, dir);
     if (outcome == COLLISION_VIS_MERGE) {
-        begin_merge_event(target, impactor, rel_speed, dir, rel_vel, old_radius);
+        begin_merge_event(target, impactor, rel_speed, dir, rel_vel, old_radius,
+                          collision_dt, frame_dt);
         return;
     }
 
@@ -1571,6 +1656,52 @@ static void absorb_body(int target, int impactor, double rel_speed, double colli
     }
 
     finalize_absorb_body(target, impactor, rel_speed, outcome, old_radius);
+}
+
+void collision_step_system(int root, double dt)
+{
+    int resolved[MAX_BODIES] = {0};
+
+    if (dt <= 0.0) return;
+    if (root < 0 || root >= g_nbodies || !g_bodies[root].alive) return;
+
+    for (int ai = 0; ai < g_nbodies; ai++) {
+        int a = ai;
+        if (!g_bodies[a].alive || g_bodies[a].is_star || resolved[a] ||
+            body_is_merge_impactor(a) || body_root_star(a) != root)
+            continue;
+
+        for (int bi = ai + 1; bi < g_nbodies; bi++) {
+            int b = bi;
+            double speed = 0.0;
+            double hit_t = 0.0;
+            int target, impactor;
+            int a_is_merge_target, b_is_merge_target, keep_target_open;
+
+            if (!g_bodies[b].alive || g_bodies[b].is_star || resolved[b] ||
+                body_is_merge_impactor(b) || body_root_star(b) != root)
+                continue;
+
+            if (!swept_spheres_collide(a, b, dt, &speed, &hit_t))
+                continue;
+
+            a_is_merge_target = body_is_merge_target(a);
+            b_is_merge_target = body_is_merge_target(b);
+            if (a_is_merge_target && !b_is_merge_target)
+                target = a;
+            else if (b_is_merge_target && !a_is_merge_target)
+                target = b;
+            else
+                target = g_bodies[a].mass >= g_bodies[b].mass ? a : b;
+            impactor = target == a ? b : a;
+
+            absorb_body(target, impactor, speed, hit_t, dt);
+            keep_target_open = body_is_merge_target(target);
+            if (!keep_target_open) resolved[target] = 1;
+            resolved[impactor] = 1;
+            if (impactor == a) break;
+        }
+    }
 }
 
 void collision_step(double dt)
@@ -1690,6 +1821,7 @@ void collision_step(double dt)
                     int b = members[other_root][bi];
                     int lo, hi;
                     double speed = 0.0;
+                    double hit_t = 0.0;
 
                     if (same_root && bi <= ai) continue;
                     if (a == b) continue;
@@ -1706,7 +1838,7 @@ void collision_step(double dt)
                     }
 
                     {
-                        int hit = swept_spheres_collide(a, b, dt, &speed);
+                        int hit = swept_spheres_collide(a, b, dt, &speed, &hit_t);
                         if (!hit) {
                             double pdt = pair_check_dt(a, b);
                             s_pair_next[lo][hi] = pdt;
@@ -1734,7 +1866,7 @@ void collision_step(double dt)
                         else
                             target = g_bodies[a].mass >= g_bodies[b].mass ? a : b;
                         impactor = target == a ? b : a;
-                        absorb_body(target, impactor, speed, dt);
+                        absorb_body(target, impactor, speed, hit_t, dt);
                         keep_target_open = body_is_merge_target(target);
                         if (!keep_target_open)
                             resolved[target] = 1;

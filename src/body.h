@@ -33,13 +33,21 @@ typedef struct {
     float  atm_scale;       /* outer atm radius as multiple of planet radius */
 
     /* Orbital trail (circular buffer, TRAIL_LEN samples, positions in AU) */
-    double trail_accum;      /* sim-seconds accumulated toward next sample */
+    double trail_accum;      /* meters accumulated toward next sample      */
     int    trail_head;       /* index of next write slot                   */
     int    trail_count;      /* number of valid samples (0..TRAIL_LEN)     */
     double (*trail)[3];      /* heap-allocated [TRAIL_LEN][3]              */
     double trail_fade;       /* 1.0 = full alpha; fades to 0 after death   */
     int    trail_emitting;   /* 1 while the body should keep adding points */
     double trail_prev_pos[3];/* previous trail tick position for interpolation */
+    double trail_prev_vel[3];/* previous trail tick velocity for curve reconstruction */
+    double trail_frame_accum;     /* meters accumulated at frame start        */
+    int    trail_frame_head;      /* trail head snapshot at frame start       */
+    int    trail_frame_count;     /* trail count snapshot at frame start      */
+    double trail_frame_pos[3];    /* body position at frame start             */
+    double trail_frame_vel[3];    /* body velocity at frame start             */
+    double trail_frame_prev_pos[3];/* previous curve anchor at frame start    */
+    double trail_frame_prev_vel[3];/* previous curve velocity at frame start  */
 } Body;
 
 /* g_bodies is a heap-allocated array that grows via realloc.
