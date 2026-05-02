@@ -891,30 +891,6 @@ static void add_permanent_crater(int body_idx, const double world_dir[3],
 
 /* ── § MERGE — merge lifecycle: begin → update → finalize ────────────── */
 
-static double trail_interval_for_body_after_merge(int body_idx)
-{
-    Body *b;
-    double dx, dy, dz, r, gm, T, interval;
-
-    if (body_idx < 0 || body_idx >= g_nbodies) return DAY;
-    b = &g_bodies[body_idx];
-    if (b->is_star) return DAY * 25.0;
-    if (b->parent < 0 || b->parent >= g_nbodies || !g_bodies[b->parent].alive)
-        return DAY;
-
-    dx = b->pos[0] - g_bodies[b->parent].pos[0];
-    dy = b->pos[1] - g_bodies[b->parent].pos[1];
-    dz = b->pos[2] - g_bodies[b->parent].pos[2];
-    r = sqrt(dx*dx + dy*dy + dz*dz);
-    gm = G_CONST * g_bodies[b->parent].mass;
-    if (r <= 0.0 || gm <= 0.0) return DAY;
-
-    T = 2.0 * PI * sqrt(r * r * r / gm);
-    interval = T / 400.0;
-    if (interval < 60.0) interval = 60.0;
-    return interval;
-}
-
 static double merge_duration_for_bodies(int target, int impactor, double rel_speed)
 {
     double radius_scale;
@@ -962,16 +938,9 @@ static void finalize_absorb_body(int target, int impactor, double rel_speed,
     }
 
     rings_on_body_absorbed(target, impactor);
-    if (b->trail && b->trail_count > 0) {
-        b->trail[b->trail_head][0] = b->pos[0] * RS;
-        b->trail[b->trail_head][1] = b->pos[1] * RS;
-        b->trail[b->trail_head][2] = b->pos[2] * RS;
-        b->trail_head = (b->trail_head + 1) % TRAIL_LEN;
-        if (b->trail_count < TRAIL_LEN) b->trail_count++;
-    }
     b->alive = 0;
     b->mass = 0.0;
-    a->trail_interval = trail_interval_for_body_after_merge(target);
+    a->trail_emitting = 1;
     labels_add_body(target);
     labels_remove_body(impactor);
     mark_system_dirty(body_root_star(target), SYSTEM_HOT_DURATION);
@@ -1220,6 +1189,7 @@ static void begin_merge_event(int target, int impactor, double rel_speed,
     Body *b = &g_bodies[impactor];
     double total = a->mass + b->mass;
     double merged_radius;
+    double touch_pos[3];
     float local_dir[3], local_t1[3];
 
     for (int i = 0; i < MAX_MERGES; i++) {
@@ -1228,13 +1198,20 @@ static void begin_merge_event(int target, int impactor, double rel_speed,
     if (slot < 0) slot = 0;
 
     if (b->trail && b->trail_count > 0) {
-        b->trail[b->trail_head][0] = b->pos[0] * RS;
-        b->trail[b->trail_head][1] = b->pos[1] * RS;
-        b->trail[b->trail_head][2] = b->pos[2] * RS;
+        touch_pos[0] = a->pos[0] + dir[0] * (old_radius + b->radius);
+        touch_pos[1] = a->pos[1] + dir[1] * (old_radius + b->radius);
+        touch_pos[2] = a->pos[2] + dir[2] * (old_radius + b->radius);
+        b->trail[b->trail_head][0] = touch_pos[0] * RS;
+        b->trail[b->trail_head][1] = touch_pos[1] * RS;
+        b->trail[b->trail_head][2] = touch_pos[2] * RS;
         b->trail_head = (b->trail_head + 1) % TRAIL_LEN;
         if (b->trail_count < TRAIL_LEN) b->trail_count++;
+        b->trail_prev_pos[0] = touch_pos[0];
+        b->trail_prev_pos[1] = touch_pos[1];
+        b->trail_prev_pos[2] = touch_pos[2];
     }
-    b->trail_interval = 0.0;
+    b->trail_emitting = 0;
+    b->trail_accum = 0.0;
 
 
     if (total <= 0.0) return;

@@ -2,8 +2,8 @@
  * trails.c — per-body orbital trail rendering
  *
  * Each body has a fixed-size circular buffer (TRAIL_LEN samples).
- * trail_interval ≈ T/200 gives ~200 samples per orbit; at high sim speeds
- * the buffer fills faster, naturally showing more orbital history.
+ * Samples are emitted by the physics layer using acceleration-driven timing,
+ * then uploaded here for rendering.
  *
  * Render strategy:
  *   - Trail positions are stored camera-relative in the VBO (world − cam),
@@ -125,6 +125,7 @@ void trails_remove_body(int body_idx)
         g_bodies[body_idx].trail_head = 0;
         g_bodies[body_idx].trail_count = 0;
         g_bodies[body_idx].trail_accum = 0.0;
+        g_bodies[body_idx].trail_emitting = 0;
     }
 }
 
@@ -148,6 +149,10 @@ void trails_reset_body(int body_idx)
     b->trail_head = 2 % TRAIL_LEN;
     b->trail_count = 2;
     b->trail_accum = 0.0;
+    b->trail_emitting = 1;
+    b->trail_prev_pos[0] = b->pos[0];
+    b->trail_prev_pos[1] = b->pos[1];
+    b->trail_prev_pos[2] = b->pos[2];
 
     if (body_idx < s_n) {
         s_last_head[body_idx] = -1;
@@ -220,7 +225,7 @@ void trails_render(const float vp[16])
         }
 
         int draw_count;
-        if (b->alive && b->trail_interval > 0.0) {
+        if (b->alive && b->trail_emitting) {
             /* Append the live planet position as the final vertex so the
              * trail tip follows the planet every frame without a new sample.
              * Camera-relative, double-precision subtraction as above. */

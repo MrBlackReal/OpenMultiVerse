@@ -67,6 +67,10 @@ static void alloc_trail(Body *bo)
     bo->trail_count = 0;
     bo->trail_accum = 0.0;
     bo->trail_fade  = 1.0;
+    bo->trail_emitting = 1;
+    bo->trail_prev_pos[0] = bo->pos[0];
+    bo->trail_prev_pos[1] = bo->pos[1];
+    bo->trail_prev_pos[2] = bo->pos[2];
 }
 
 static int find_body_index(const char *name, int n)
@@ -90,25 +94,6 @@ static void body_defaults(Body *bo)
     bo->alive     = 1;
     bo->parent    = -1;
     bo->atm_scale = 1.0f;
-}
-
-static double trail_interval_for_body(const Body *bo)
-{
-    if (bo->is_star) return DAY * 25.0;
-    if (bo->parent >= 0 && bo->parent < g_nbodies && g_bodies[bo->parent].mass > 0.0) {
-        double dx = bo->pos[0] - g_bodies[bo->parent].pos[0];
-        double dy = bo->pos[1] - g_bodies[bo->parent].pos[1];
-        double dz = bo->pos[2] - g_bodies[bo->parent].pos[2];
-        double r = sqrt(dx*dx + dy*dy + dz*dz);
-        double gm = G_CONST * g_bodies[bo->parent].mass;
-        if (r > 0.0 && gm > 0.0) {
-            double T = 2.0 * PI * sqrt(r * r * r / gm);
-            double interval = T / 400.0;
-            if (interval < 60.0) interval = 60.0;
-            return interval;
-        }
-    }
-    return DAY;
 }
 
 static void read_rotation(const JsonNode *bn, Body *bo)
@@ -197,7 +182,6 @@ void universe_load(const char *path)
             bo->pos[0]         = px; bo->pos[1] = py; bo->pos[2] = pz;
             bo->col[0]         = col[0]; bo->col[1] = col[1]; bo->col[2] = col[2];
             bo->is_star        = 1;
-            bo->trail_interval = DAY * 25.0;
             read_rotation(bn, bo);
 
             /* Stash bulk velocity for post-processing */
@@ -261,10 +245,6 @@ void universe_load(const char *path)
             p[1] += g_bodies[par_idx].pos[1];
             p[2] += g_bodies[par_idx].pos[2];
 
-            /* Trail interval: T/400 in sim-seconds */
-            double T_days = 2.0 * PI * sqrt(a * a * a / gm_star_au2);
-            double trail_int   = (T_days / 400.0) * DAY;
-
             ensure_capacity(g_nbodies + 1);
             Body *bo = &g_bodies[g_nbodies++];
             body_defaults(bo);
@@ -275,7 +255,6 @@ void universe_load(const char *path)
             bo->vel[0]         = v[0]; bo->vel[1] = v[1]; bo->vel[2] = v[2];
             bo->col[0]         = col[0]; bo->col[1] = col[1]; bo->col[2] = col[2];
             bo->parent         = par_idx;
-            bo->trail_interval = trail_int;
             read_rotation(bn, bo);
             read_atmosphere(bn, bo);
             alloc_trail(bo);
@@ -329,15 +308,6 @@ void universe_load(const char *path)
                               M0_deg, gm_par, rel_p, rel_v);
             }
 
-            /* Trail interval: T/400, minimum 60 s */
-            double trail_int = DAY;
-            if (a_km > 0.0) {
-                double a_m = a_km * 1000.0;
-                double T   = 2.0 * PI * sqrt(a_m * a_m * a_m / gm_par);
-                trail_int = T / 400.0;
-                if (trail_int < 60.0) trail_int = 60.0;
-            }
-
             ensure_capacity(g_nbodies + 1);
             Body *bo = &g_bodies[g_nbodies++];
             body_defaults(bo);
@@ -352,7 +322,6 @@ void universe_load(const char *path)
             bo->vel[2]         = par_v[2] + rel_v[2];
             bo->col[0]         = col[0]; bo->col[1] = col[1]; bo->col[2] = col[2];
             bo->parent         = par_idx;
-            bo->trail_interval = trail_int;
             read_rotation(bn, bo);
             read_atmosphere(bn, bo);
             alloc_trail(bo);
@@ -446,7 +415,6 @@ int universe_add_body(const BodyCreateSpec *spec)
     bo->atm_color[2] = spec->atm_color[2];
     bo->atm_intensity = spec->atm_intensity;
     bo->atm_scale = spec->atm_scale > 0.0f ? spec->atm_scale : 1.0f;
-    bo->trail_interval = trail_interval_for_body(bo);
     alloc_trail(bo);
 
     return idx;

@@ -398,10 +398,8 @@ int main(int argc, char **argv) {
          * lag-spiral).  At extreme sim speeds the simulation runs at a
          * reduced rate rather than making the UI unresponsive.
          *
-         * trails_tick is called once per outer step (not every inner step).
-         * The distance-based accumulator in trails_tick sums |v|*dt, so the
-         * total distance is identical whether we call it N×(dt/N) or 1×dt —
-         * this gives ~50× fewer sqrt calls with no change in sample spacing. */
+         * trails_tick is called every inner step so the acceleration-driven
+         * sampler sees the same local dynamics as the integrator itself. */
         if (!g_paused && g_sim_speed > 0.0) {
             const int    MAX_OUTER_STEPS = 120;   /* per system cap */
             physics_refresh_timestep_model();

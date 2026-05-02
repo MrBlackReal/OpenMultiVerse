@@ -428,36 +428,72 @@ void physics_step(double dt) {
 }
 
 /* ── trail helpers ───────────────────────────────────────────────────── */
-static void sample_body(Body *b) {
-    b->trail[b->trail_head][0] = b->pos[0] * RS;
-    b->trail[b->trail_head][1] = b->pos[1] * RS;
-    b->trail[b->trail_head][2] = b->pos[2] * RS;
+static void sample_body_pos(Body *b, const double pos[3]) {
+    b->trail[b->trail_head][0] = pos[0] * RS;
+    b->trail[b->trail_head][1] = pos[1] * RS;
+    b->trail[b->trail_head][2] = pos[2] * RS;
     b->trail_head = (b->trail_head + 1) % TRAIL_LEN;
     if (b->trail_count < TRAIL_LEN) b->trail_count++;
 }
 
-/*
- * trails_tick — time-based trail sampling.
- *
- * Each body accumulates sim-time; once trail_interval is exceeded a sample
- * is recorded.  The while-loop handles multiple samples per tick (fast
- * moons or high sim speeds).  trail_interval ≈ T/200 gives ~200 evenly
- * spaced samples per orbit regardless of sim speed — the trail fills the
- * buffer faster at high speeds, naturally showing more orbital history.
- */
+static double trail_interval_for_accel(const Body *b)
+{
+    double ax = b->acc[0] + b->fast_acc[0];
+    double ay = b->acc[1] + b->fast_acc[1];
+    double az = b->acc[2] + b->fast_acc[2];
+    double amag = sqrt(ax*ax + ay*ay + az*az);
+    double interval = TRAIL_ACCEL_SCALE / sqrt(amag + TRAIL_ACCEL_EPS);
+
+    if (interval < TRAIL_MIN_INTERVAL) interval = TRAIL_MIN_INTERVAL;
+    if (interval > TRAIL_MAX_INTERVAL) interval = TRAIL_MAX_INTERVAL;
+    return interval;
+}
+
 void trails_tick(double dt) {
     trails_tick_system(-1, dt);
 }
 
 void trails_tick_system(int root, double dt) {
     int i;
+    if (dt <= 0.0) return;
+
     for (i = 0; i < g_nbodies; i++) {
         Body *b = &g_bodies[i];
-        if (!b->alive || !in_system(i, root) || !b->trail || b->trail_interval <= 0.0) continue;
-        b->trail_accum += dt;
-        while (b->trail_accum >= b->trail_interval) {
-            b->trail_accum -= b->trail_interval;
-            sample_body(b);
+        double interval, elapsed, start[3], end[3];
+
+        if (!b->alive || !in_system(i, root) || !b->trail || !b->trail_emitting) {
+            continue;
         }
+        interval = trail_interval_for_accel(b);
+        start[0] = b->trail_prev_pos[0];
+        start[1] = b->trail_prev_pos[1];
+        start[2] = b->trail_prev_pos[2];
+        end[0] = b->pos[0];
+        end[1] = b->pos[1];
+        end[2] = b->pos[2];
+        elapsed = 0.0;
+
+        while (b->trail_accum + (dt - elapsed) >= interval) {
+            double need = interval - b->trail_accum;
+            double t;
+            double sample_pos[3];
+
+            if (need < 0.0) need = 0.0;
+            t = (elapsed + need) / dt;
+            if (t < 0.0) t = 0.0;
+            if (t > 1.0) t = 1.0;
+            sample_pos[0] = start[0] + (end[0] - start[0]) * t;
+            sample_pos[1] = start[1] + (end[1] - start[1]) * t;
+            sample_pos[2] = start[2] + (end[2] - start[2]) * t;
+            sample_body_pos(b, sample_pos);
+            elapsed += need;
+            if (elapsed > dt) elapsed = dt;
+            b->trail_accum = 0.0;
+        }
+
+        b->trail_accum += dt - elapsed;
+        b->trail_prev_pos[0] = end[0];
+        b->trail_prev_pos[1] = end[1];
+        b->trail_prev_pos[2] = end[2];
     }
 }

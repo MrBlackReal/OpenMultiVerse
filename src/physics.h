@@ -13,7 +13,7 @@
  *       physics_respa_begin(dt_outer);
  *       for each inner step:
  *           physics_respa_inner(dt_inner);
- *           trails_tick(dt_inner);
+ *           trails_tick(dt_inner);   // acceleration-driven trail sampling
  *       physics_respa_end(dt_outer);
  */
 #pragma once
@@ -46,6 +46,5 @@ void   physics_advance_time(double dt);
 void physics_step(double dt);
 
 /* Trail helpers */
-void trails_sample(void);
 void trails_tick(double dt);
 void trails_tick_system(int root, double dt);

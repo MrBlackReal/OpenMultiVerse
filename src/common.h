@@ -46,6 +46,12 @@ extern int g_win_h;
 #define TRAIL_LEN  4096   /* trail circular buffer size (per body, all bodies) */
 #define NUM_STARS          4000
 
+/* Trail sampling: acceleration-driven with hard interval clamps. */
+#define TRAIL_MIN_INTERVAL          60.0         /* sim-seconds */
+#define TRAIL_MAX_INTERVAL     (DAY * 25.0)      /* sim-seconds */
+#define TRAIL_ACCEL_SCALE        1200.0          /* interval = scale / sqrt(|a|) */
+#define TRAIL_ACCEL_EPS             1e-12        /* m/s^2, avoids div-by-zero */
+
 /* 1 AU → 1.0 GL unit */
 #define RS  (1.0 / AU)
 
