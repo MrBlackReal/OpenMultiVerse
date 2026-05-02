@@ -497,6 +497,10 @@ static double trail_segment_len_for_accel(const Body *b)
     double az = b->acc[2] + b->fast_acc[2];
     double amag = sqrt(ax*ax + ay*ay + az*az);
     double segment_len = TRAIL_SEGMENT_SCALE / sqrt(amag + TRAIL_ACCEL_EPS);
+    int body_idx = (int)(b - g_bodies);
+
+    if (body_idx >= 0 && body_idx < g_nbodies && is_satellite(body_idx))
+        segment_len *= (1.0 / 3.0);
 
     if (segment_len < TRAIL_MIN_SEGMENT_LEN) segment_len = TRAIL_MIN_SEGMENT_LEN;
     if (segment_len > TRAIL_MAX_SEGMENT_LEN) segment_len = TRAIL_MAX_SEGMENT_LEN;

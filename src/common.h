@@ -47,9 +47,9 @@ extern int g_win_h;
 #define NUM_STARS          4000
 
 /* Trail sampling: acceleration chooses a target spatial segment length. */
-#define TRAIL_MIN_SEGMENT_LEN       2.5e4        /* m */
-#define TRAIL_MAX_SEGMENT_LEN       6.0e8        /* m */
-#define TRAIL_SEGMENT_SCALE         1.2e7        /* segment = scale / sqrt(|a|) */
+#define TRAIL_MIN_SEGMENT_LEN       2.0e4        /* m */
+#define TRAIL_MAX_SEGMENT_LEN       4.5e8        /* m */
+#define TRAIL_SEGMENT_SCALE         9.0e6        /* segment = scale / sqrt(|a|) */
 #define TRAIL_ACCEL_EPS             1e-12        /* m/s^2, avoids div-by-zero */
 #define TRAIL_CURVE_ERROR_RATIO     0.22         /* allowed chord error vs segment length */
 #define TRAIL_CURVE_MIN_ERROR       5.0e3        /* m */

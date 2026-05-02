@@ -122,6 +122,7 @@ static int s_pos_before_valid = 0;
 static int body_is_merge_target(int idx);
 static int body_is_merge_impactor(int idx);
 static double current_contact_radius(int body_idx);
+static int body_is_primary(int idx);
 
 static void mark_system_dirty(int root, double hot_duration)
 {
@@ -153,11 +154,11 @@ int collision_system_maybe_has_encounter(int root, double dt)
     if (dt <= 0.0) return 0;
 
     for (int i = 0; i < g_nbodies; i++) {
-        if (!g_bodies[i].alive || g_bodies[i].is_star) continue;
+        if (!body_is_primary(i)) continue;
         if (body_root_star(i) != root) continue;
         for (int j = i + 1; j < g_nbodies; j++) {
             double rx, ry, rz, dist, vx, vy, vz, vr, rsum, gap;
-            if (!g_bodies[j].alive || g_bodies[j].is_star) continue;
+            if (!body_is_primary(j)) continue;
             if (body_root_star(j) != root) continue;
             if (body_is_merge_impactor(i) || body_is_merge_impactor(j)) continue;
 
@@ -174,10 +175,10 @@ int collision_system_maybe_has_encounter(int root, double dt)
             rsum = current_contact_radius(i) + current_contact_radius(j);
             gap = dist - rsum;
 
-            if (gap <= rsum * 6.0) return 1;
-            if (vr > 0.0) {
+            if (gap <= rsum * 3.0) return 1;
+            if (vr > 10.0) {
                 double tau = gap / vr;
-                if (tau <= dt * 2.0) return 1;
+                if (tau <= dt) return 1;
             }
         }
     }
@@ -198,6 +199,13 @@ static int body_is_satellite(int idx)
 {
     if (idx < 0 || idx >= g_nbodies || !g_bodies[idx].alive) return 0;
     return g_bodies[idx].parent >= 0 && !g_bodies[g_bodies[idx].parent].is_star;
+}
+
+static int body_is_primary(int idx)
+{
+    if (idx < 0 || idx >= g_nbodies || !g_bodies[idx].alive) return 0;
+    if (g_bodies[idx].is_star) return 0;
+    return !body_is_satellite(idx);
 }
 
 static int bodies_are_in_ancestor_chain(int a, int b)
@@ -1667,7 +1675,7 @@ void collision_step_system(int root, double dt)
 
     for (int ai = 0; ai < g_nbodies; ai++) {
         int a = ai;
-        if (!g_bodies[a].alive || g_bodies[a].is_star || resolved[a] ||
+        if (!body_is_primary(a) || resolved[a] ||
             body_is_merge_impactor(a) || body_root_star(a) != root)
             continue;
 
@@ -1678,7 +1686,7 @@ void collision_step_system(int root, double dt)
             int target, impactor;
             int a_is_merge_target, b_is_merge_target, keep_target_open;
 
-            if (!g_bodies[b].alive || g_bodies[b].is_star || resolved[b] ||
+            if (!body_is_primary(b) || resolved[b] ||
                 body_is_merge_impactor(b) || body_root_star(b) != root)
                 continue;
 
