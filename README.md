@@ -65,7 +65,7 @@ make
 | Key / Input | Action |
 |---|---|
 | Left-click | Enter free-look (captures mouse) |
-| Escape | Exit free-look |
+| Escape | Open system menu / release mouse from free-look |
 | W / S | Move forward / backward |
 | A / D | Strafe left / right |
 | Q / E | Move down / up |

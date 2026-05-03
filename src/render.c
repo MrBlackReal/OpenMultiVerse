@@ -17,8 +17,10 @@
 #include "asteroids.h"
 #include "labels.h"
 #include "build.h"
+#include "collision.h"
 #include "gl_utils.h"
 #include "math3d.h"
+#include "ui_theme.h"
 #include <math.h>
 #include <string.h>
 
@@ -47,6 +49,15 @@ static GLint  s_sp_sun_world   = -1;
 static GLint  s_sp_rotation    = -1;
 static GLint  s_sp_obliquity   = -1;
 static GLint  s_sp_ptype       = -1;
+static GLint  s_sp_star_heat   = -1;
+static GLint  s_sp_impact_count = -1;
+static GLint  s_sp_impact_dir   = -1;
+static GLint  s_sp_impact_t1    = -1;
+static GLint  s_sp_impact_rad   = -1;
+static GLint  s_sp_impact_heat  = -1;
+static GLint  s_sp_impact_prog  = -1;
+static GLint  s_sp_impact_seed  = -1;
+static GLint  s_sp_impact_kind  = -1;
 
 /* Planet-type lookup by body name — robust against loader order changes.
  * 0=rocky(default)  1=Earth  2=Mars  3=Venus  4=Jupiter  5=Saturn
@@ -60,6 +71,11 @@ static int get_planet_type(const char *name)
         { "Europa",  9 }, { NULL,      0 }
     };
     int k;
+    if (!name) return 0;
+    if (strncmp(name, "Rocky Planet", 12) == 0) return 10;
+    if (strncmp(name, "Gas Giant", 9) == 0) return 11;
+    if (strncmp(name, "Ice Planet", 10) == 0) return 12;
+    if (strncmp(name, "Dwarf Planet", 12) == 0) return 0;
     for (k = 0; tbl[k].name; k++)
         if (strcmp(name, tbl[k].name) == 0) return tbl[k].ptype;
     return 0;   /* rocky / default for everything else */
@@ -90,6 +106,12 @@ static GLuint s_dot_shader  = 0;
 static GLuint s_dot_vao     = 0;
 static GLuint s_dot_vbo     = 0;
 static GLint  s_dot_vp      = -1;
+static GLuint s_impact_particle_shader = 0;
+static GLint  s_impact_particle_vp = -1;
+static GLuint s_impact_particle_vao = 0;
+static GLuint s_impact_particle_vbo = 0;
+
+#define RENDER_MAX_COLLISION_PARTICLES 768
 
 /* ------------------------------------------------------------------ star glare */
 static GLuint s_glare_shader = 0;
@@ -121,7 +143,7 @@ static GLint  s_build_ui_use_tex = -1;
 static GLint  s_build_ui_tex = -1;
 static TTF_Font *s_build_font = NULL;
 
-#define BUILD_UI_FONT_SIZE 14.0f
+#define BUILD_UI_FONT_SIZE 16.0f
 
 typedef struct {
     GLuint tex;
@@ -134,21 +156,6 @@ static BuildTextCache s_build_dist_text[3];
 /* ------------------------------------------------------------------ helpers */
 static float half_fov_tan(void) {
     return tanf(FOV * 0.5f * (float)(PI / 180.0));
-}
-
-static TTF_Font *build_find_font(int size) {
-    static const char *paths[] = {
-        "C:/Windows/Fonts/segoeui.ttf",
-        "C:/Windows/Fonts/arial.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/TTF/DejaVuSans.ttf",
-        NULL
-    };
-    for (int i = 0; paths[i]; i++) {
-        TTF_Font *f = TTF_OpenFont(paths[i], size);
-        if (f) return f;
-    }
-    return NULL;
 }
 
 static GLuint build_surface_to_tex(SDL_Surface *surf, int *w, int *h) {
@@ -225,7 +232,7 @@ static float clampf_local(float v, float lo, float hi)
  * Bodies too small to see as a disc are rendered as dots instead. */
 static float visual_radius(int i, float dcam) {
     (void)dcam;
-    return (float)(g_bodies[i].radius * RS);
+    return (float)(collision_visual_radius(i, g_bodies[i].radius) * RS);
 }
 
 static double smoothstepd(double edge0, double edge1, double x) {
@@ -253,7 +260,7 @@ static float body_point_star_glare_visibility(int body_idx) {
     for (int i = 0; i < g_nbodies; i++) {
         if (i == body_idx) continue;
         Body *s = &g_bodies[i];
-        if (!s->is_star) continue;
+        if (!s->alive || !s->is_star) continue;
 
         double sx = s->pos[0] * RS - g_cam.pos[0];
         double sy = s->pos[1] * RS - g_cam.pos[1];
@@ -280,6 +287,44 @@ static float body_point_star_glare_visibility(int body_idx) {
     return (float)visibility;
 }
 
+static float system_dot_fade_for_body(int body_idx)
+{
+    int ref_star;
+    double sdx, sdy, sdz, dist_star;
+    float dot_fade;
+    const double FREE_DOT_FADE_START = 400.0;
+    const double FREE_DOT_FADE_END = 800.0;
+
+    if (body_idx < 0 || body_idx >= g_nbodies) return 1.0f;
+    if (g_bodies[body_idx].is_star) return 1.0f;
+
+    ref_star = body_root_star(body_idx);
+    if (ref_star < 0 || ref_star >= g_nbodies ||
+        !g_bodies[ref_star].alive || !g_bodies[ref_star].is_star) {
+        double bx = g_bodies[body_idx].pos[0] * RS - g_cam.pos[0];
+        double by = g_bodies[body_idx].pos[1] * RS - g_cam.pos[1];
+        double bz = g_bodies[body_idx].pos[2] * RS - g_cam.pos[2];
+        double dist_body = sqrt(bx*bx + by*by + bz*bz);
+
+        dot_fade = 1.0f - (float)((dist_body - FREE_DOT_FADE_START)
+                                / (FREE_DOT_FADE_END - FREE_DOT_FADE_START));
+        if (dot_fade > 1.0f) dot_fade = 1.0f;
+        if (dot_fade < 0.0f) dot_fade = 0.0f;
+        return dot_fade;
+    }
+
+    sdx = g_cam.pos[0] - g_bodies[ref_star].pos[0] * RS;
+    sdy = g_cam.pos[1] - g_bodies[ref_star].pos[1] * RS;
+    sdz = g_cam.pos[2] - g_bodies[ref_star].pos[2] * RS;
+    dist_star = sqrt(sdx*sdx + sdy*sdy + sdz*sdz);
+
+    dot_fade = 1.0f - (float)((dist_star - SYS_DOT_FADE_START)
+                            / (SYS_DOT_FADE_END - SYS_DOT_FADE_START));
+    if (dot_fade > 1.0f) dot_fade = 1.0f;
+    if (dot_fade < 0.0f) dot_fade = 0.0f;
+    return dot_fade;
+}
+
 static int body_point_occluded_by_body(int body_idx, const BodyRenderInfo info[]) {
     double bx = g_bodies[body_idx].pos[0] * RS - g_cam.pos[0];
     double by = g_bodies[body_idx].pos[1] * RS - g_cam.pos[1];
@@ -294,7 +339,7 @@ static int body_point_occluded_by_body(int body_idx, const BodyRenderInfo info[]
 
     for (int i = 0; i < g_nbodies; i++) {
         if (i == body_idx) continue;
-        if (g_bodies[i].is_star || info[i].show) continue;
+        if (!g_bodies[i].alive || g_bodies[i].is_star || info[i].show) continue;
 
         double sx = g_bodies[i].pos[0] * RS - g_cam.pos[0];
         double sy = g_bodies[i].pos[1] * RS - g_cam.pos[1];
@@ -344,6 +389,15 @@ void render_init(void) {
     s_sp_rotation  = glGetUniformLocation(s_sphere_shader, "u_rotation");
     s_sp_obliquity = glGetUniformLocation(s_sphere_shader, "u_obliquity");
     s_sp_ptype     = glGetUniformLocation(s_sphere_shader, "u_planet_type");
+    s_sp_star_heat = glGetUniformLocation(s_sphere_shader, "u_star_heat");
+    s_sp_impact_count = glGetUniformLocation(s_sphere_shader, "u_impact_count");
+    s_sp_impact_dir   = glGetUniformLocation(s_sphere_shader, "u_impact_dir[0]");
+    s_sp_impact_t1    = glGetUniformLocation(s_sphere_shader, "u_impact_tangent1[0]");
+    s_sp_impact_rad   = glGetUniformLocation(s_sphere_shader, "u_impact_radius[0]");
+    s_sp_impact_heat  = glGetUniformLocation(s_sphere_shader, "u_impact_heat[0]");
+    s_sp_impact_prog  = glGetUniformLocation(s_sphere_shader, "u_impact_progress[0]");
+    s_sp_impact_seed  = glGetUniformLocation(s_sphere_shader, "u_impact_seed[0]");
+    s_sp_impact_kind  = glGetUniformLocation(s_sphere_shader, "u_impact_kind[0]");
 
     /* Frame-constant camera parameters */
     glUseProgram(s_sphere_shader);
@@ -419,6 +473,14 @@ void render_init(void) {
     }
     s_dot_vp = glGetUniformLocation(s_dot_shader, "u_vp");
 
+    s_impact_particle_shader = gl_shader_load("assets/shaders/impact_particle.vert",
+                                              "assets/shaders/impact_particle.frag");
+    if (!s_impact_particle_shader) {
+        fprintf(stderr, "[Render] impact particle shader failed\n");
+        return;
+    }
+    s_impact_particle_vp = glGetUniformLocation(s_impact_particle_shader, "u_vp");
+
     /* Dynamic VBO for dot positions + colors */
     s_dot_vao = gl_vao_create();
     s_dot_vbo = gl_vbo_create(MAX_BODIES * 7 * sizeof(float),
@@ -428,6 +490,19 @@ void render_init(void) {
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 7*sizeof(float),
                           (void*)(3*sizeof(float)));
+    glBindVertexArray(0);
+
+    s_impact_particle_vao = gl_vao_create();
+    s_impact_particle_vbo = gl_vbo_create(RENDER_MAX_COLLISION_PARTICLES * 8 * sizeof(float),
+                                          NULL, GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8*sizeof(float), (void*)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 8*sizeof(float),
+                          (void*)(3*sizeof(float)));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, 8*sizeof(float),
+                          (void*)(7*sizeof(float)));
     glBindVertexArray(0);
 
     /* --- Build-mode preview lines --- */
@@ -468,7 +543,7 @@ void render_init(void) {
         glUseProgram(0);
     }
     TTF_Init();
-    s_build_font = build_find_font((int)BUILD_UI_FONT_SIZE);
+    s_build_font = ui_theme_open_font((int)BUILD_UI_FONT_SIZE);
 }
 
 static void render_build_preview(const float vp_camrel[16])
@@ -754,6 +829,11 @@ void render_frame(const float view[16], const float proj[16],
 
     for (int i = 0; i < g_nbodies; i++) {
         Body *b = &g_bodies[i];
+        if (!b->alive) {
+            memset(&info[i], 0, sizeof(info[i]));
+            info[i].show = 1;
+            continue;
+        }
 
         float wx = (float)(b->pos[0] * RS);
         float wy = (float)(b->pos[1] * RS);
@@ -796,7 +876,7 @@ void render_frame(const float view[16], const float proj[16],
         info[i].show = (px < BODY_SPHERE_APPEAR_PX) ? 1 : 0;
 
         /* Sub-pixel bodies are shown as dots only — skip billboard render. */
-        if (info[i].show) continue;
+        if (!g_bodies[i].alive || info[i].show) continue;
         if (b->is_star) continue;
 
         /* Compute oc = cam - center in double to avoid float cancellation. */
@@ -828,9 +908,42 @@ void render_frame(const float view[16], const float proj[16],
         glUniform1f(s_sp_ambient,  b->is_star ? 1.0f : 0.05f);
 
         /* Procedural surface texture — name-based lookup, index-independent */
-        glUniform1f(s_sp_rotation,  (float)b->rotation_angle);
+        glUniform1f(s_sp_rotation,  (float)fmod(b->rotation_angle, 2.0 * PI));
         glUniform1f(s_sp_obliquity, (float)(b->obliquity * (PI / 180.0)));
         glUniform1i(s_sp_ptype,     get_planet_type(b->name));
+        glUniform1f(s_sp_star_heat, collision_body_star_heat(i));
+        {
+            CollisionSpot spots[COLLISION_MAX_SPOTS];
+            float dirs[COLLISION_MAX_SPOTS * 3] = {0};
+            float tangents[COLLISION_MAX_SPOTS * 3] = {0};
+            float radii[COLLISION_MAX_SPOTS] = {0};
+            float heats[COLLISION_MAX_SPOTS] = {0};
+            float progress[COLLISION_MAX_SPOTS] = {0};
+            float seeds[COLLISION_MAX_SPOTS] = {0};
+            int kinds[COLLISION_MAX_SPOTS] = {0};
+            int nspots = collision_spots_for_body(i, spots);
+            for (int k = 0; k < nspots; k++) {
+                dirs[k*3+0] = spots[k].dir[0];
+                dirs[k*3+1] = spots[k].dir[1];
+                dirs[k*3+2] = spots[k].dir[2];
+                tangents[k*3+0] = spots[k].tangent1[0];
+                tangents[k*3+1] = spots[k].tangent1[1];
+                tangents[k*3+2] = spots[k].tangent1[2];
+                radii[k] = spots[k].angular_radius;
+                heats[k] = spots[k].heat;
+                progress[k] = spots[k].progress;
+                seeds[k] = spots[k].seed;
+                kinds[k] = spots[k].kind;
+            }
+            glUniform1i(s_sp_impact_count, nspots);
+            glUniform3fv(s_sp_impact_dir, nspots, dirs);
+            glUniform3fv(s_sp_impact_t1, nspots, tangents);
+            glUniform1fv(s_sp_impact_rad, nspots, radii);
+            glUniform1fv(s_sp_impact_heat, nspots, heats);
+            glUniform1fv(s_sp_impact_prog, nspots, progress);
+            glUniform1fv(s_sp_impact_seed, nspots, seeds);
+            glUniform1iv(s_sp_impact_kind, nspots, kinds);
+        }
 
         glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
     }
@@ -855,10 +968,29 @@ void render_frame(const float view[16], const float proj[16],
         glBindVertexArray(s_sphere_vao);
 
         for (int i = 0; i < g_nbodies; i++) {
+            if (!g_bodies[i].alive) continue;
             if (info[i].show) continue;     /* sub-pixel body — skip */
             float intensity = g_bodies[i].atm_intensity;
             float scale     = g_bodies[i].atm_scale;
-            if (intensity <= 0.0f) continue;
+            float glow_color[3];
+            float glow_intensity = 0.0f;
+            float glow_scale = 1.0f;
+            float final_color[3];
+            float final_intensity;
+            float final_scale;
+            collision_body_heat_glow(i, glow_color, &glow_intensity, &glow_scale);
+            final_intensity = intensity + glow_intensity;
+            final_scale = glow_scale > scale ? glow_scale : scale;
+            if (final_intensity <= 0.0f) continue;
+            {
+                float base_w = intensity;
+                float glow_w = glow_intensity;
+                float sum_w = base_w + glow_w;
+                if (sum_w <= 1e-6f) sum_w = 1.0f;
+                final_color[0] = (g_bodies[i].atm_color[0] * base_w + glow_color[0] * glow_w) / sum_w;
+                final_color[1] = (g_bodies[i].atm_color[1] * base_w + glow_color[1] * glow_w) / sum_w;
+                final_color[2] = (g_bodies[i].atm_color[2] * base_w + glow_color[2] * glow_w) / sum_w;
+            }
 
             Body *b = &g_bodies[i];
             double cam_mx = (double)g_cam.pos[0] * AU;
@@ -878,21 +1010,59 @@ void render_frame(const float view[16], const float proj[16],
             }
 
             float planet_r = info[i].dr;
-            float atm_r    = planet_r * scale;
+            float atm_r    = planet_r * final_scale;
 
             glUniform3f(s_at_center,   -oc_x, -oc_y, -oc_z);
             glUniform1f(s_at_radius,    atm_r);
             glUniform1f(s_at_planet_r,  planet_r);
             glUniform3f(s_at_oc,        oc_x, oc_y, oc_z);
             glUniform3f(s_at_sun_rel,   sr_x, sr_y, sr_z);
-            glUniform3f(s_at_color,     g_bodies[i].atm_color[0], g_bodies[i].atm_color[1], g_bodies[i].atm_color[2]);
-            glUniform1f(s_at_intensity, intensity);
+            glUniform3f(s_at_color,     final_color[0], final_color[1], final_color[2]);
+            glUniform1f(s_at_intensity, final_intensity);
             glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
         }
 
         glBindVertexArray(0);
         glDepthMask(GL_TRUE);
         glDisable(GL_BLEND);
+    }
+
+    /* ------------------------------------------------------------------ 3. Collision particles */
+    {
+        CollisionParticle particles[RENDER_MAX_COLLISION_PARTICLES];
+        float particle_data[RENDER_MAX_COLLISION_PARTICLES * 8];
+        int particle_count = collision_particles(particles, RENDER_MAX_COLLISION_PARTICLES,
+                                                 g_cam.pos);
+
+        for (int i = 0; i < particle_count; i++) {
+            particle_data[i*8+0] = particles[i].pos[0];
+            particle_data[i*8+1] = particles[i].pos[1];
+            particle_data[i*8+2] = particles[i].pos[2];
+            particle_data[i*8+3] = particles[i].color[0];
+            particle_data[i*8+4] = particles[i].color[1];
+            particle_data[i*8+5] = particles[i].color[2];
+            particle_data[i*8+6] = particles[i].color[3];
+            particle_data[i*8+7] = particles[i].size;
+        }
+
+        if (particle_count > 0) {
+            glUseProgram(s_impact_particle_shader);
+            glUniformMatrix4fv(s_impact_particle_vp, 1, GL_FALSE, vp_camrel);
+            glBindVertexArray(s_impact_particle_vao);
+            glBindBuffer(GL_ARRAY_BUFFER, s_impact_particle_vbo);
+            glBufferSubData(GL_ARRAY_BUFFER, 0,
+                            particle_count * 8 * sizeof(float), particle_data);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+            glDepthMask(GL_FALSE);
+            glEnable(GL_DEPTH_TEST);
+            glEnable(GL_PROGRAM_POINT_SIZE);
+            glDrawArrays(GL_POINTS, 0, particle_count);
+            glDisable(GL_PROGRAM_POINT_SIZE);
+            glDepthMask(GL_TRUE);
+            glDisable(GL_BLEND);
+            glBindVertexArray(0);
+        }
     }
 
     /* ------------------------------------------------------------------ 3. Center dots
@@ -911,6 +1081,7 @@ void render_frame(const float view[16], const float proj[16],
     int dot_ns = 0, dot_np = 0, dot_nm = 0;
     int dot_stars[MAX_BODIES], dot_planets[MAX_BODIES], dot_moons[MAX_BODIES];
     for (int i = 0; i < g_nbodies; i++) {
+        if (!g_bodies[i].alive) continue;
         if      (g_bodies[i].is_star)       dot_stars  [dot_ns++] = i;
         /* planet: no parent, or parent is a star (not a moon of a planet) */
         else if (g_bodies[i].parent < 0 ||
@@ -938,6 +1109,7 @@ void render_frame(const float view[16], const float proj[16],
     for (int i = 0; i < dot_ns; i++) dot_order[i]                  = dot_stars[i];
     for (int i = 0; i < dot_np; i++) dot_order[dot_ns + i]          = dot_planets[i];
     for (int i = 0; i < dot_nm; i++) dot_order[dot_ns + dot_np + i] = dot_moons[i];
+    int dot_total = dot_ns + dot_np + dot_nm;
 
     /* Project to screen, greedy overlap removal, collect surviving dots.
      *
@@ -962,8 +1134,9 @@ void render_frame(const float view[16], const float proj[16],
         double cy2 = g_cam.pos[1];
         double cz2 = g_cam.pos[2];
 
-        for (int oi = 0; oi < g_nbodies; oi++) {
+        for (int oi = 0; oi < dot_total; oi++) {
             int i = dot_order[oi];
+            if (!g_bodies[i].alive) continue;
             if (body_point_star_glare_visibility(i) <= 0.02f) continue;
             if (g_bodies[i].is_star &&
                 body_px[i] * STAR_GLARE_BILL_SCALE >= STAR_DOT_FADE_START_GLARE_PX) continue;
@@ -1016,25 +1189,6 @@ void render_frame(const float view[16], const float proj[16],
         }
     }
 
-    /* Distance from camera to nearest star — used for LOD dot fade.
-     * Non-star dots fade from opaque at SYS_DOT_FADE_START to transparent
-     * at SYS_DOT_FADE_END.  The star dot is handled by its own glare fade.
-     * Subtraction is done in double BEFORE casting to float to avoid the
-     * catastrophic float cancellation that occurs at 4+ ly (camera and star
-     * both at ~250,000 AU → float32 difference is meaningless).               */
-    float dot_fade = 1.0f;
-    {
-        int ref_star = nearest_star_idx();
-        float sdx = (float)(g_cam.pos[0] - g_bodies[ref_star].pos[0] * RS);
-        float sdy = (float)(g_cam.pos[1] - g_bodies[ref_star].pos[1] * RS);
-        float sdz = (float)(g_cam.pos[2] - g_bodies[ref_star].pos[2] * RS);
-        float dist_star = sqrtf(sdx*sdx + sdy*sdy + sdz*sdz);
-        dot_fade = 1.0f - (dist_star - SYS_DOT_FADE_START)
-                        / (SYS_DOT_FADE_END - SYS_DOT_FADE_START);
-        if (dot_fade > 1.0f) dot_fade = 1.0f;
-        if (dot_fade < 0.0f) dot_fade = 0.0f;
-    }
-
     /* Upload and draw surviving dots.
      * Positions are camera-relative (world_AU - cam_AU), matching the
      * convention used for trails and labels.  The dot shader is given
@@ -1057,13 +1211,14 @@ void render_frame(const float view[16], const float proj[16],
          * even at warp distances (far beyond the 2000 AU far plane).          */
         const float DOT_CLAMP_DIST = 1500.0f;
 
-        for (int oi = 0; oi < g_nbodies; oi++) {
+        for (int oi = 0; oi < dot_total; oi++) {
             int i = dot_order[oi];
+            if (!g_bodies[i].alive) continue;
             if (!dot_candidate[i] || dot_overlap_alpha[i] <= 0.001f) continue;
             Body *b = &g_bodies[i];
 
             /* LOD fade: star always full; planets/moons fade in interstellar space */
-            float f = b->is_star ? 1.0f : dot_fade;
+            float f = b->is_star ? 1.0f : system_dot_fade_for_body(i);
             f *= dot_overlap_alpha[i];
             f *= body_point_star_glare_visibility(i);
 
@@ -1155,6 +1310,7 @@ void render_frame(const float view[16], const float proj[16],
         glBindVertexArray(s_sphere_vao);
 
         for (int i = 0; i < g_nbodies; i++) {
+            if (!g_bodies[i].alive) continue;
             if (!g_bodies[i].is_star) continue;
 
             float rx = (float)(g_bodies[i].pos[0] * RS - g_cam.pos[0]);
@@ -1196,9 +1352,11 @@ void render_shutdown(void) {
     for (int i = 0; i < 3; i++)
         if (s_build_dist_text[i].tex) glDeleteTextures(1, &s_build_dist_text[i].tex);
     if (s_build_font) TTF_CloseFont(s_build_font);
+    TTF_Quit();
     glDeleteProgram(s_sphere_shader);
     glDeleteProgram(s_atm_shader);
     glDeleteProgram(s_dot_shader);
+    glDeleteProgram(s_impact_particle_shader);
     glDeleteProgram(s_glare_shader);
     glDeleteProgram(s_build_line_shader);
     glDeleteProgram(s_build_ui_shader);
@@ -1207,11 +1365,14 @@ void render_shutdown(void) {
     glDeleteVertexArrays(1, &s_sphere_vao);
     glDeleteBuffers(1, &s_dot_vbo);
     glDeleteVertexArrays(1, &s_dot_vao);
+    glDeleteBuffers(1, &s_impact_particle_vbo);
+    glDeleteVertexArrays(1, &s_impact_particle_vao);
     glDeleteBuffers(1, &s_build_line_vbo);
     glDeleteVertexArrays(1, &s_build_line_vao);
     glDeleteBuffers(1, &s_build_ui_vbo);
     glDeleteVertexArrays(1, &s_build_ui_vao);
     s_sphere_shader = s_dot_shader = 0;
+    s_impact_particle_shader = 0;
     s_build_line_shader = s_build_ui_shader = 0;
     s_build_font = NULL;
 }

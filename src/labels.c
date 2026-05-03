@@ -15,6 +15,7 @@
 #include "camera.h"
 #include "gl_utils.h"
 #include "math3d.h"
+#include "ui_theme.h"
 
 #define MAX_LABEL_DIST   55.0f  /* AU — hard far cutoff for non-star labels    */
 /* Hide label once camera is closer than this many body-radii to the centre.
@@ -53,23 +54,6 @@ static int   s_active[MAX_BODIES];       /* current visible state (0/1)        *
 /* anchor is recomputed from g_bodies[i].pos each frame — no float32 cache needed */
 
 static TTF_Font *s_font = NULL;
-
-/* ------------------------------------------------------------------ font */
-static const char *FONT_PATHS[] = {
-    "C:/Windows/Fonts/segoeui.ttf",
-    "C:/Windows/Fonts/arial.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/TTF/DejaVuSans.ttf",
-    NULL
-};
-
-static TTF_Font *find_font(int size) {
-    for (int i = 0; FONT_PATHS[i]; i++) {
-        TTF_Font *f = TTF_OpenFont(FONT_PATHS[i], size);
-        if (f) return f;
-    }
-    return NULL;
-}
 
 /* ------------------------------------------------------------------ texture */
 static GLuint surface_to_texture(SDL_Surface *surf, int *w, int *h) {
@@ -149,7 +133,7 @@ void labels_init(void) {
         fprintf(stderr, "[Labels] TTF_Init: %s\n", TTF_GetError());
         return;
     }
-    s_font = find_font(16);
+    s_font = ui_theme_open_font(16);
     if (!s_font) {
         fprintf(stderr, "[Labels] no usable font found — labels disabled\n");
         return;
@@ -163,7 +147,7 @@ void labels_init(void) {
     memset(s_hide_accum, 0, sizeof(s_hide_accum));
     memset(s_active,     0, sizeof(s_active));
     for (int i = 0; i < g_nbodies; i++)
-        build_label_texture(i);
+        if (g_bodies[i].alive) build_label_texture(i);
 }
 
 void labels_add_body(int body_idx)
@@ -173,6 +157,20 @@ void labels_add_body(int body_idx)
     s_hide_accum[body_idx] = 0.0f;
     s_active[body_idx] = 0;
     build_label_texture(body_idx);
+}
+
+void labels_remove_body(int body_idx)
+{
+    if (body_idx < 0 || body_idx >= MAX_BODIES) return;
+    s_show_accum[body_idx] = 0.0f;
+    s_hide_accum[body_idx] = 0.0f;
+    s_active[body_idx] = 0;
+    if (s_tex[body_idx]) {
+        glDeleteTextures(1, &s_tex[body_idx]);
+        s_tex[body_idx] = 0;
+    }
+    s_tex_w[body_idx] = 0;
+    s_tex_h[body_idx] = 0;
 }
 
 void labels_render(const float view[16], const float proj[16],
@@ -199,6 +197,7 @@ void labels_render(const float view[16], const float proj[16],
     for (int i = 0; i < g_nbodies; i++) {
         order[i]   = i;
         lvis[i]    = 0;
+        if (!g_bodies[i].alive) continue;
         if (!s_tex[i]) continue;
         /* Far cutoff: non-star labels are local-system annotations. */
         if (!g_bodies[i].is_star && info[i].dcam > MAX_LABEL_DIST) continue;
@@ -247,6 +246,7 @@ void labels_render(const float view[16], const float proj[16],
         int ns = 0, np = 0, nm = 0;
         int stars[MAX_BODIES], planets[MAX_BODIES], moons[MAX_BODIES];
         for (int i = 0; i < g_nbodies; i++) {
+            if (!g_bodies[i].alive) continue;
             if      (g_bodies[i].is_star)       stars  [ns++] = i;
             /* planet: no parent, or parent is a star (not a moon of a planet) */
             else if (g_bodies[i].parent < 0 ||
@@ -275,14 +275,17 @@ void labels_render(const float view[16], const float proj[16],
         for (int i = 0; i < ns; i++) order[i]              = stars[i];
         for (int i = 0; i < np; i++) order[ns + i]          = planets[i];
         for (int i = 0; i < nm; i++) order[ns + np + i]     = moons[i];
+        for (int i = ns + np + nm; i < g_nbodies; i++) order[i] = -1;
     }
 
     /* ---- Step 3: greedy AABB overlap removal ---- */
     for (int i = 0; i < g_nbodies; i++) {
         int idx = order[i];
+        if (idx < 0) continue;
         if (!lvis[idx]) continue;
         for (int j = 0; j < i; j++) {
             int jdx = order[j];
+            if (jdx < 0) continue;
             if (!lvis[jdx]) continue;
             if (lsx[idx]          < lsx[jdx]+lsw[jdx] &&
                 lsx[idx]+lsw[idx] > lsx[jdx]           &&
@@ -295,6 +298,7 @@ void labels_render(const float view[16], const float proj[16],
 
     /* ---- Step 4: hysteresis — debounce lvis into s_active ---- */
     for (int i = 0; i < g_nbodies; i++) {
+        if (!g_bodies[i].alive) continue;
         if (lvis[i]) {
             s_show_accum[i] += dt;
             s_hide_accum[i]  = 0.0f;
@@ -322,6 +326,7 @@ void labels_render(const float view[16], const float proj[16],
     glBindVertexArray(s_vao);
 
     for (int i = 0; i < g_nbodies; i++) {
+        if (!g_bodies[i].alive) continue;
         if (!s_active[i]) continue;
         if (!s_tex[i])    continue;
 

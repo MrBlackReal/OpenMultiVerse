@@ -62,10 +62,39 @@ static void ensure_capacity(int needed)
 static void alloc_trail(Body *bo)
 {
     bo->trail = (double(*)[3])calloc(TRAIL_LEN, 3 * sizeof(double));
-    if (!bo->trail) { fprintf(stderr, "[universe] trail alloc failed\n"); exit(1); }
+    bo->trail_seg_len = (double*)calloc(TRAIL_LEN, sizeof(double));
+    if (!bo->trail || !bo->trail_seg_len) {
+        fprintf(stderr, "[universe] trail alloc failed\n");
+        exit(1);
+    }
     bo->trail_head  = 0;
     bo->trail_count = 0;
     bo->trail_accum = 0.0;
+    bo->trail_total_len = 0.0;
+    bo->trail_fade  = 1.0;
+    bo->trail_emitting = 1;
+    bo->trail_prev_pos[0] = bo->pos[0];
+    bo->trail_prev_pos[1] = bo->pos[1];
+    bo->trail_prev_pos[2] = bo->pos[2];
+    bo->trail_prev_vel[0] = bo->vel[0];
+    bo->trail_prev_vel[1] = bo->vel[1];
+    bo->trail_prev_vel[2] = bo->vel[2];
+    bo->trail_frame_accum = 0.0;
+    bo->trail_frame_head = 0;
+    bo->trail_frame_count = 0;
+    bo->trail_frame_total_len = 0.0;
+    bo->trail_frame_pos[0] = bo->pos[0];
+    bo->trail_frame_pos[1] = bo->pos[1];
+    bo->trail_frame_pos[2] = bo->pos[2];
+    bo->trail_frame_vel[0] = bo->vel[0];
+    bo->trail_frame_vel[1] = bo->vel[1];
+    bo->trail_frame_vel[2] = bo->vel[2];
+    bo->trail_frame_prev_pos[0] = bo->trail_prev_pos[0];
+    bo->trail_frame_prev_pos[1] = bo->trail_prev_pos[1];
+    bo->trail_frame_prev_pos[2] = bo->trail_prev_pos[2];
+    bo->trail_frame_prev_vel[0] = bo->trail_prev_vel[0];
+    bo->trail_frame_prev_vel[1] = bo->trail_prev_vel[1];
+    bo->trail_frame_prev_vel[2] = bo->trail_prev_vel[2];
 }
 
 static int find_body_index(const char *name, int n)
@@ -86,27 +115,9 @@ static void read_color(const JsonNode *arr, float col[3])
 static void body_defaults(Body *bo)
 {
     memset(bo, 0, sizeof(*bo));
+    bo->alive     = 1;
     bo->parent    = -1;
     bo->atm_scale = 1.0f;
-}
-
-static double trail_interval_for_body(const Body *bo)
-{
-    if (bo->is_star) return DAY * 25.0;
-    if (bo->parent >= 0 && bo->parent < g_nbodies && g_bodies[bo->parent].mass > 0.0) {
-        double dx = bo->pos[0] - g_bodies[bo->parent].pos[0];
-        double dy = bo->pos[1] - g_bodies[bo->parent].pos[1];
-        double dz = bo->pos[2] - g_bodies[bo->parent].pos[2];
-        double r = sqrt(dx*dx + dy*dy + dz*dz);
-        double gm = G_CONST * g_bodies[bo->parent].mass;
-        if (r > 0.0 && gm > 0.0) {
-            double T = 2.0 * PI * sqrt(r * r * r / gm);
-            double interval = T / 400.0;
-            if (interval < 60.0) interval = 60.0;
-            return interval;
-        }
-    }
-    return DAY;
 }
 
 static void read_rotation(const JsonNode *bn, Body *bo)
@@ -136,18 +147,15 @@ static void read_atmosphere(const JsonNode *bn, Body *bo)
  *   Planets (parent=star) return the star in one hop.
  *   Moons  (parent=planet, parent=star) return the star in two hops.
  */
-static int root_star_of(int i)
-{
-    while (g_bodies[i].parent >= 0)
-        i = g_bodies[i].parent;
-    return i;
-}
+static int root_star_of(int i) { return body_root_star(i); }
 
 /* ------------------------------------------------------------------ public */
 
 void universe_load(const char *path)
 {
     int i, s;
+    fprintf(stdout, "[Boot] Loading universe data from %s\n", path);
+    fflush(stdout);
     JsonNode *root = json_parse_file(path);
     if (!root) {
         fprintf(stderr, "[universe] failed to open or parse '%s'\n", path);
@@ -171,6 +179,8 @@ void universe_load(const char *path)
      * Placed at their absolute position (pos_ly → metres).
      * Bulk velocity stashed in bv[]; applied in post-processing.
      * ================================================================ */
+    fprintf(stdout, "[Boot] Universe pass 1/3: stars\n");
+    fflush(stdout);
     {
         JsonNode *bn;
         for (bn = bodies_arr->first_child; bn; bn = bn->next) {
@@ -200,7 +210,6 @@ void universe_load(const char *path)
             bo->pos[0]         = px; bo->pos[1] = py; bo->pos[2] = pz;
             bo->col[0]         = col[0]; bo->col[1] = col[1]; bo->col[2] = col[2];
             bo->is_star        = 1;
-            bo->trail_interval = DAY * 25.0;
             read_rotation(bn, bo);
 
             /* Stash bulk velocity for post-processing */
@@ -222,6 +231,8 @@ void universe_load(const char *path)
      * Body.parent is set to the star's index so root_star_of() works
      * and the physics engine correctly skips planet–star fast forces.
      * ================================================================ */
+    fprintf(stdout, "[Boot] Universe pass 2/3: planets and dwarf planets\n");
+    fflush(stdout);
     {
         JsonNode *bn;
         for (bn = bodies_arr->first_child; bn; bn = bn->next) {
@@ -264,10 +275,6 @@ void universe_load(const char *path)
             p[1] += g_bodies[par_idx].pos[1];
             p[2] += g_bodies[par_idx].pos[2];
 
-            /* Trail interval: T/400 in sim-seconds */
-            double T_days = 2.0 * PI * sqrt(a * a * a / gm_star_au2);
-            double trail_int   = (T_days / 400.0) * DAY;
-
             ensure_capacity(g_nbodies + 1);
             Body *bo = &g_bodies[g_nbodies++];
             body_defaults(bo);
@@ -278,7 +285,6 @@ void universe_load(const char *path)
             bo->vel[0]         = v[0]; bo->vel[1] = v[1]; bo->vel[2] = v[2];
             bo->col[0]         = col[0]; bo->col[1] = col[1]; bo->col[2] = col[2];
             bo->parent         = par_idx;
-            bo->trail_interval = trail_int;
             read_rotation(bn, bo);
             read_atmosphere(bn, bo);
             alloc_trail(bo);
@@ -289,6 +295,8 @@ void universe_load(const char *path)
      * Pass 3 — Moons
      * Parent-relative orbit; parent must be a planet already loaded.
      * ================================================================ */
+    fprintf(stdout, "[Boot] Universe pass 3/3: moons\n");
+    fflush(stdout);
     {
         JsonNode *bn;
         for (bn = bodies_arr->first_child; bn; bn = bn->next) {
@@ -332,15 +340,6 @@ void universe_load(const char *path)
                               M0_deg, gm_par, rel_p, rel_v);
             }
 
-            /* Trail interval: T/400, minimum 60 s */
-            double trail_int = DAY;
-            if (a_km > 0.0) {
-                double a_m = a_km * 1000.0;
-                double T   = 2.0 * PI * sqrt(a_m * a_m * a_m / gm_par);
-                trail_int = T / 400.0;
-                if (trail_int < 60.0) trail_int = 60.0;
-            }
-
             ensure_capacity(g_nbodies + 1);
             Body *bo = &g_bodies[g_nbodies++];
             body_defaults(bo);
@@ -355,7 +354,6 @@ void universe_load(const char *path)
             bo->vel[2]         = par_v[2] + rel_v[2];
             bo->col[0]         = col[0]; bo->col[1] = col[1]; bo->col[2] = col[2];
             bo->parent         = par_idx;
-            bo->trail_interval = trail_int;
             read_rotation(bn, bo);
             read_atmosphere(bn, bo);
             alloc_trail(bo);
@@ -367,6 +365,8 @@ void universe_load(const char *path)
      *   1. Centre-of-mass velocity correction (zero internal momentum).
      *   2. Apply bulk velocity (proper motion) to all bodies in system.
      * ================================================================ */
+    fprintf(stdout, "[Boot] Universe post-processing: system velocities\n");
+    fflush(stdout);
     int n_stars = 0;
     for (s = 0; s < g_nbodies; s++) {
         if (!g_bodies[s].is_star) continue;
@@ -399,7 +399,7 @@ void universe_load(const char *path)
         for (i = 0; i < g_nbodies; i++)
             if (root_star_of(i) == s) cnt++;
         fprintf(stdout,
-                "[universe] '%s' at (%.3g, %.3g, %.3g) ly  —  %d bod%s\n",
+                "[universe] '%s' at (%.3g, %.3g, %.3g) ly  -  %d bod%s\n",
                 g_bodies[s].name,
                 g_bodies[s].pos[0] / LY,
                 g_bodies[s].pos[1] / LY,
@@ -409,6 +409,7 @@ void universe_load(const char *path)
 
     fprintf(stdout, "[universe] total: %d bodies across %d star%s\n",
             g_nbodies, n_stars, n_stars == 1 ? "" : "s");
+    fflush(stdout);
 
     json_free(root);
 }
@@ -449,10 +450,37 @@ int universe_add_body(const BodyCreateSpec *spec)
     bo->atm_color[2] = spec->atm_color[2];
     bo->atm_intensity = spec->atm_intensity;
     bo->atm_scale = spec->atm_scale > 0.0f ? spec->atm_scale : 1.0f;
-    bo->trail_interval = trail_interval_for_body(bo);
     alloc_trail(bo);
 
     return idx;
+}
+
+void universe_rebind_to_nearest_stars(void)
+{
+    for (int i = 0; i < g_nbodies; i++) {
+        int best_star = -1;
+        double best_d2 = 1e300;
+
+        if (!g_bodies[i].alive || g_bodies[i].is_star) continue;
+        if (g_bodies[i].parent >= 0 && !g_bodies[g_bodies[i].parent].is_star)
+            continue;
+
+        for (int s = 0; s < g_nbodies; s++) {
+            double dx, dy, dz, d2;
+            if (!g_bodies[s].alive || !g_bodies[s].is_star) continue;
+            dx = g_bodies[s].pos[0] - g_bodies[i].pos[0];
+            dy = g_bodies[s].pos[1] - g_bodies[i].pos[1];
+            dz = g_bodies[s].pos[2] - g_bodies[i].pos[2];
+            d2 = dx*dx + dy*dy + dz*dz;
+            if (d2 < best_d2) {
+                best_d2 = d2;
+                best_star = s;
+            }
+        }
+
+        if (best_star >= 0)
+            g_bodies[i].parent = best_star;
+    }
 }
 
 void universe_shutdown(void)
@@ -461,9 +489,12 @@ void universe_shutdown(void)
     for (i = 0; i < g_nbodies; i++) {
         free(g_bodies[i].trail);
         g_bodies[i].trail = NULL;
+        free(g_bodies[i].trail_seg_len);
+        g_bodies[i].trail_seg_len = NULL;
     }
     free(g_bodies);
     g_bodies     = NULL;
     g_nbodies    = 0;
     g_bodies_cap = 0;
 }
+

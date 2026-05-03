@@ -1,5 +1,5 @@
 /*
- * main.c — application entry point
+ * main.c - application entry point
  *
  * Responsibilities:
  *   - SDL2 window + OpenGL 3.3 Core context
@@ -8,14 +8,14 @@
  *   - Main loop: event handling, physics step, camera update, render
  *
  * Camera controls:
- *   W/S        — move forward / backward
- *   A/D        — strafe left / right
- *   Q/E        — move down / up
- *   Mouse drag — look (yaw/pitch)
- *   Scroll     — speed multiplier
- *   Space      — pause / resume simulation
- *   R          — reset camera
- *   +/-        — simulation speed × 2 / ÷ 2
+ *   W/S        - move forward / backward
+ *   A/D        - strafe left / right
+ *   Q/E        - move down / up
+ *   Mouse drag - look (yaw/pitch)
+ *   Scroll     - speed multiplier
+ *   Space      - pause / resume simulation
+ *   R          - reset camera
+ *   +/-        - simulation speed up / down
  */
 #include "common.h"
 #include "math3d.h"
@@ -31,6 +31,10 @@
 #include "asteroids.h"
 #include "ui.h"
 #include "build.h"
+#include "collision.h"
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 /* ------------------------------------------------------------------ globals */
 static SDL_Window   *s_win = NULL;
@@ -40,30 +44,191 @@ int g_win_h = DEFAULT_WIN_H;
 static int s_fullscreen = 0;
 
 /* Mouse state */
-static int   s_freelook   = 0;       /* 1 = Tab toggled free-look, mouse captured */
+static int   s_freelook   = 0;       /* 1 = free-look active, mouse captured */
 static float s_mouse_sens = 0.25f;   /* degrees per pixel */
+static int   s_vsync_enabled = 0;
+
+static int s_pause_menu_open = 0;
+static int s_pause_menu_selected = 0;
+static int s_pause_menu_prev_paused = 0;
+
+enum {
+    PAUSE_MENU_CONTINUE = 0,
+    PAUSE_MENU_RESET_UNIVERSE,
+    PAUSE_MENU_TOGGLE_VSYNC,
+    PAUSE_MENU_LEAVE,
+    PAUSE_MENU_COUNT
+};
 
 /* Movement keys held */
 static int s_key_w, s_key_s, s_key_a, s_key_d, s_key_q, s_key_e;
 
-/* Sim-speed table — clean display values, 0.1 days/s as first non-zero step */
+/* Sim-speed table - clean display values, 0.1 days/s as first non-zero step */
 static const double SPEED_TABLE[] = {
     0.0,
     0.1, 0.25, 0.5,
     1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 100.0,
-    365.0, 730.0, 1825.0, 3650.0
+    365.0
 };
 #define SPEED_TABLE_LEN (int)(sizeof(SPEED_TABLE)/sizeof(SPEED_TABLE[0]))
 static int s_speed_idx = 4;   /* start at 1.0 days/s */
 
-/* Warp mode (T key) — variable interstellar speed, adjustable via scroll wheel.
+/* Warp mode (T key) - variable interstellar speed, adjustable via scroll wheel.
  * The speed range shifts from the normal [0.00001, 200] AU/s to the warp
  * range [200, 63241] AU/s (= [0.0032 ly/s, 1 ly/s]).                        */
-#define WARP_SPEED_MIN_AU    200.0f   /* AU/s — lowest warp speed  (normal max) */
-#define WARP_SPEED_MAX_AU  63241.0f   /* AU/s — highest warp speed (1 ly/s)     */
-int s_warp = 0;            /* 0 = normal, 1 = warp engaged */
-int g_warp = 0;            /* public mirror of s_warp for UI/other modules */
+#define WARP_SPEED_MIN_AU    200.0f
+#define WARP_SPEED_MAX_AU  63241.0f
+int s_warp = 0;
+int g_warp = 0;
 
+static void boot_log(const char *msg) {
+    fprintf(stdout, "[Boot] %s\n", msg);
+    fflush(stdout);
+}
+
+static void clear_movement_keys(void) {
+    s_key_w = s_key_s = s_key_a = s_key_d = s_key_q = s_key_e = 0;
+}
+
+static int set_vsync(int enabled) {
+    int interval = enabled ? 1 : 0;
+    if (SDL_GL_SetSwapInterval(interval) != 0) {
+        fprintf(stderr, "[Main] vsync toggle: %s\n", SDL_GetError());
+        return 0;
+    }
+    s_vsync_enabled = enabled ? 1 : 0;
+    fprintf(stdout, "[Main] V-Sync %s\n", s_vsync_enabled ? "ON" : "OFF");
+    return 1;
+}
+
+static void sync_pause_menu_ui(void) {
+    ui_set_pause_menu(s_pause_menu_open, s_pause_menu_selected, s_vsync_enabled);
+}
+
+static void close_pause_menu(int resume_freelook) {
+    s_pause_menu_open = 0;
+    g_paused = s_pause_menu_prev_paused;
+    if (resume_freelook) {
+        s_freelook = 1;
+        SDL_SetRelativeMouseMode(SDL_TRUE);
+    } else {
+        s_freelook = 0;
+        SDL_SetRelativeMouseMode(SDL_FALSE);
+    }
+    sync_pause_menu_ui();
+}
+
+static void open_pause_menu(void) {
+    s_pause_menu_prev_paused = g_paused;
+    s_pause_menu_open = 1;
+    s_pause_menu_selected = PAUSE_MENU_CONTINUE;
+    g_paused = 1;
+    s_freelook = 0;
+    SDL_SetRelativeMouseMode(SDL_FALSE);
+    clear_movement_keys();
+    sync_pause_menu_ui();
+}
+
+static void move_pause_menu_selection(int delta) {
+    s_pause_menu_selected += delta;
+    while (s_pause_menu_selected < 0) s_pause_menu_selected += PAUSE_MENU_COUNT;
+    while (s_pause_menu_selected >= PAUSE_MENU_COUNT) s_pause_menu_selected -= PAUSE_MENU_COUNT;
+    sync_pause_menu_ui();
+}
+
+static void warmup_universe(void) {
+    const double WARMUP_DT = 365.0 * 2.0 * DAY;
+    int sys_n = physics_system_count();
+    int completed = 0;
+    fprintf(stdout, "[Boot] Warm-up: pre-simulating %.0f days across %d system%s\n",
+            WARMUP_DT / DAY, sys_n, sys_n == 1 ? "" : "s");
+    fflush(stdout);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic)
+#endif
+    for (int s = 0; s < sys_n; s++) {
+        double step_outer = physics_system_outer_dt_limit(s);
+        double step_inner = physics_system_inner_dt_limit(s);
+        int n_inner = (int)(step_outer / step_inner) + 1;
+        int outer_total = (int)(WARMUP_DT / step_outer);
+        int root = physics_system_root(s);
+        for (int o = 0; o < outer_total; o++) {
+            double dt_outer = WARMUP_DT / outer_total;
+            double dt_inner = dt_outer / n_inner;
+            physics_respa_begin_system(root, dt_outer);
+            for (int i = 0; i < n_inner; i++) {
+                physics_respa_inner_system(root, dt_inner);
+            }
+            physics_respa_end_system(root, dt_outer);
+            trails_tick_system(root, dt_outer);
+        }
+#ifdef _OPENMP
+#pragma omp critical
+#endif
+        {
+            completed++;
+            fprintf(stdout, "[Boot] Warm-up progress: %d/%d systems (%s)\n",
+                    completed, sys_n, g_bodies[root].name);
+            fflush(stdout);
+        }
+    }
+    physics_advance_time(WARMUP_DT);
+    boot_log("Warm-up complete");
+}
+
+static void init_runtime_world(void) {
+    boot_log("Preparing runtime world");
+    universe_load("assets/universe.json");
+    boot_log("Resetting camera");
+    cam_reset();
+    boot_log("Initializing starfield");
+    starfield_init();
+    boot_log("Initializing trails");
+    trails_gl_init();
+    boot_log("Initializing renderer");
+    render_init();
+    boot_log("Initializing rings");
+    rings_init("assets/universe.json");
+    boot_log("Initializing asteroid belts");
+    asteroids_init("assets/universe.json");
+    boot_log("Initializing labels");
+    labels_init();
+    boot_log("Initializing build mode");
+    build_init();
+    boot_log("Refreshing physics timestep model");
+    physics_refresh_timestep_model();
+    warmup_universe();
+    boot_log("Runtime world ready");
+}
+
+static void shutdown_runtime_world(void) {
+    asteroids_shutdown();
+    rings_shutdown();
+    render_shutdown();
+    labels_shutdown();
+    trails_gl_shutdown();
+    starfield_shutdown();
+    universe_shutdown();
+}
+
+static void reset_universe_state(void) {
+    shutdown_runtime_world();
+    collision_reset();
+    clear_movement_keys();
+    s_freelook = 0;
+    s_warp = 0;
+    g_warp = 0;
+    s_speed_idx = 4;
+    g_sim_time = 0.0;
+    g_sim_speed = SPEED_TABLE[s_speed_idx] * DAY;
+    g_paused = 0;
+    s_pause_menu_open = 0;
+    s_pause_menu_selected = PAUSE_MENU_CONTINUE;
+    s_pause_menu_prev_paused = 0;
+    SDL_SetRelativeMouseMode(SDL_FALSE);
+    sync_pause_menu_ui();
+    init_runtime_world();
+}
 
 /* ------------------------------------------------------------------ init / quit */
 static void update_viewport_size(void) {
@@ -88,6 +253,7 @@ static void toggle_fullscreen(void) {
 }
 
 static int app_init(void) {
+    boot_log("Initializing SDL");
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
         fprintf(stderr, "[Main] SDL_Init: %s\n", SDL_GetError());
         return 0;
@@ -117,9 +283,11 @@ static int app_init(void) {
         return 0;
     }
 
-    SDL_GL_SetSwapInterval(0);   /* vsync deactivated for debugging purpose - activate for production*/
+    boot_log("Configuring swap interval");
+    set_vsync(0);
 
     /* GLEW */
+    boot_log("Initializing GLEW");
     glewExperimental = GL_TRUE;
     GLenum err = glewInit();
     if (err != GLEW_OK) {
@@ -136,26 +304,101 @@ static int app_init(void) {
     glEnable(GL_MULTISAMPLE);
     glClearColor(0.0f, 0.0f, 0.02f, 1.0f);
     update_viewport_size();
+    boot_log("OpenGL context ready");
 
     return 1;
 }
 
 static void app_quit(void) {
     ui_shutdown();
-    asteroids_shutdown();
-    rings_shutdown();
-    render_shutdown();
-    labels_shutdown();
-    trails_gl_shutdown();
-    starfield_shutdown();
-    universe_shutdown();
+    shutdown_runtime_world();
     SDL_GL_DeleteContext(s_ctx);
     SDL_DestroyWindow(s_win);
     SDL_Quit();
 }
 
 /* ------------------------------------------------------------------ event handling */
-static void handle_event(const SDL_Event *e, float dt) {
+static void activate_pause_menu_action(int *running) {
+    switch (s_pause_menu_selected) {
+    case PAUSE_MENU_CONTINUE:
+        close_pause_menu(1);
+        break;
+    case PAUSE_MENU_RESET_UNIVERSE:
+        reset_universe_state();
+        break;
+    case PAUSE_MENU_TOGGLE_VSYNC:
+        set_vsync(!s_vsync_enabled);
+        sync_pause_menu_ui();
+        break;
+    case PAUSE_MENU_LEAVE:
+        *running = 0;
+        break;
+    }
+}
+
+static void handle_event(const SDL_Event *e, float dt, int *running) {
+    if (s_pause_menu_open) {
+        switch (e->type) {
+        case SDL_QUIT:
+            break;
+
+        case SDL_KEYDOWN:
+            switch (e->key.keysym.sym) {
+            case SDLK_ESCAPE:
+                close_pause_menu(1);
+                break;
+            case SDLK_UP:
+            case SDLK_w:
+                if (!e->key.repeat) move_pause_menu_selection(-1);
+                break;
+            case SDLK_DOWN:
+            case SDLK_s:
+                if (!e->key.repeat) move_pause_menu_selection(1);
+                break;
+            case SDLK_RETURN:
+            case SDLK_KP_ENTER:
+            case SDLK_SPACE:
+                if (!e->key.repeat) activate_pause_menu_action(running);
+                break;
+            default:
+                break;
+            }
+            break;
+
+        case SDL_MOUSEMOTION:
+        {
+            int hover = ui_pause_menu_hit_test(e->motion.x, e->motion.y);
+            if (hover != s_pause_menu_selected) {
+                s_pause_menu_selected = hover;
+                sync_pause_menu_ui();
+            }
+        }   break;
+
+        case SDL_MOUSEBUTTONDOWN:
+            if (e->button.button == SDL_BUTTON_LEFT) {
+                int hover = ui_pause_menu_hit_test(e->button.x, e->button.y);
+                if (hover >= 0) {
+                    s_pause_menu_selected = hover;
+                    sync_pause_menu_ui();
+                    activate_pause_menu_action(running);
+                }
+            }
+            break;
+
+        case SDL_WINDOWEVENT:
+            if (e->window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
+                e->window.event == SDL_WINDOWEVENT_RESIZED) {
+                update_viewport_size();
+            }
+            break;
+
+        default:
+            break;
+        }
+        (void)dt;
+        return;
+    }
+
     switch (e->type) {
     case SDL_QUIT:
         /* handled in main loop */
@@ -187,11 +430,9 @@ static void handle_event(const SDL_Event *e, float dt) {
             s_warp = !s_warp;
             g_warp = s_warp;
             if (s_warp) {
-                /* Entering warp: clamp speed into the warp range */
                 if (g_cam.speed < WARP_SPEED_MIN_AU) g_cam.speed = WARP_SPEED_MIN_AU;
                 if (g_cam.speed > WARP_SPEED_MAX_AU) g_cam.speed = WARP_SPEED_MAX_AU;
             } else {
-                /* Leaving warp: clamp back to normal range */
                 if (g_cam.speed > WARP_SPEED_MIN_AU) g_cam.speed = WARP_SPEED_MIN_AU;
             }
             fprintf(stdout, "[Cam] warp %s (%.0f AU/s = %.4f ly/s)\n",
@@ -199,18 +440,19 @@ static void handle_event(const SDL_Event *e, float dt) {
                     (double)g_cam.speed,
                     (double)(g_cam.speed / WARP_SPEED_MAX_AU));
             break;
-        case SDLK_SPACE: g_paused = !g_paused; break;
+        case SDLK_SPACE:
+            g_paused = !g_paused;
+            break;
         case SDLK_ESCAPE:
             if (g_build_mode) {
                 build_toggle();
                 break;
             }
             if (s_freelook) {
-                s_freelook = 0;
-                SDL_SetRelativeMouseMode(SDL_FALSE);
+                open_pause_menu();
             }
             break;
-        case SDLK_EQUALS: /* + key */
+        case SDLK_EQUALS:
         case SDLK_PLUS:
             if (s_speed_idx < SPEED_TABLE_LEN - 1) s_speed_idx++;
             g_sim_speed = SPEED_TABLE[s_speed_idx] * DAY;
@@ -251,8 +493,6 @@ static void handle_event(const SDL_Event *e, float dt) {
 
     case SDL_MOUSEMOTION:
         if (s_freelook) {
-            /* xrel>0 = Maus nach rechts  → Kamera nach rechts → yaw steigt  */
-            /* yrel>0 = Maus nach unten   → Kamera nach unten  → pitch sinkt  */
             g_cam.yaw   += e->motion.xrel * s_mouse_sens;
             g_cam.pitch -= e->motion.yrel * s_mouse_sens;
             if (g_cam.pitch >  89.0f) g_cam.pitch =  89.0f;
@@ -267,7 +507,6 @@ static void handle_event(const SDL_Event *e, float dt) {
         }
         g_cam.speed *= (e->wheel.y > 0) ? 1.3f : (1.0f / 1.3f);
         if (s_warp) {
-            /* Warp range: 200 AU/s (0.003 ly/s) … 63 241 AU/s (1 ly/s) */
             if (g_cam.speed < WARP_SPEED_MIN_AU) g_cam.speed = WARP_SPEED_MIN_AU;
             if (g_cam.speed > WARP_SPEED_MAX_AU) g_cam.speed = WARP_SPEED_MAX_AU;
         } else {
@@ -319,36 +558,12 @@ int main(int argc, char **argv) {
 
     if (!app_init()) return 1;
 
-    /* Module initialisation */
-    universe_load("assets/universe.json");
-    cam_reset();
-    starfield_init();
-    trails_gl_init();
-    render_init();
-    rings_init("assets/universe.json");
-    asteroids_init("assets/universe.json");
-    labels_init();
+    boot_log("Resetting collision state");
+    collision_reset();
+    boot_log("Initializing UI");
     ui_init();
-    build_init();
-
-    /* Trail warm-up: pre-simulate 2 years using RESPA.
-     * 730 outer steps × 50 inner steps = 36 500 inner steps total —
-     * identical resolution to the old 0.02-day loop but ~20× faster
-     * because slow forces are only evaluated at the outer (1-day) rate. */
-    {
-        const double STEP_OUTER  = DAY * 1.0;
-        const double STEP_INNER  = DAY * 0.02;
-        const int    N_INNER     = 50;
-        const int    OUTER_TOTAL = (int)(365.0 * 2.0 / 1.0);
-        for (int o = 0; o < OUTER_TOTAL; o++) {
-            physics_respa_begin(STEP_OUTER);
-            for (int i = 0; i < N_INNER; i++) {
-                physics_respa_inner(STEP_INNER);
-                trails_tick(STEP_INNER);
-            }
-            physics_respa_end(STEP_OUTER);
-        }
-    }
+    sync_pause_menu_ui();
+    init_runtime_world();
 
     /* Timing */
     Uint64 freq    = SDL_GetPerformanceFrequency();
@@ -356,60 +571,74 @@ int main(int argc, char **argv) {
     int    running = 1;
 
     while (running) {
-        /* Delta time */
         Uint64 now = SDL_GetPerformanceCounter();
         float  dt  = (float)((double)(now - prev) / (double)freq);
-        if (dt > 0.1f) dt = 0.1f;   /* clamp huge frames on breakpoint */
+        if (dt > 0.1f) dt = 0.1f;
         prev = now;
 
-        /* Events */
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) running = 0;
-            handle_event(&e, dt);
+            handle_event(&e, dt, &running);
         }
 
-        /* Camera */
-        camera_move(dt);
+        if (!s_pause_menu_open)
+            camera_move(dt);
 
-        /* Physics — RESPA hierarchical integrator
-         * Outer step ~1 day: slow forces (primary-primary + tidal).
-         * Inner step 0.02 days: fast forces (parent-satellite dominant).
-         * ~32× fewer pair evaluations than uniform 0.02-day stepping.
-         *
-         * sim_dt is capped to MAX_OUTER_STEPS outer steps so that a slow
-         * frame cannot snowball into even-slower subsequent frames (the
-         * lag-spiral).  At extreme sim speeds the simulation runs at a
-         * reduced rate rather than making the UI unresponsive.
-         *
-         * trails_tick is called once per outer step (not every inner step).
-         * The distance-based accumulator in trails_tick sums |v|*dt, so the
-         * total distance is identical whether we call it N×(dt/N) or 1×dt —
-         * this gives ~50× fewer sqrt calls with no change in sample spacing. */
+        /* Physics - RESPA hierarchical integrator */
         if (!g_paused && g_sim_speed > 0.0) {
-            const double DT_OUTER     = DAY * 1.0;
-            const double DT_INNER_MAX = DAY * 0.02;
-            const int    MAX_OUTER_STEPS = 120;   /* cap: ~120 sim-days / frame */
+            const int MAX_OUTER_STEPS = 120;
+            physics_refresh_timestep_model();
+            {
+                int sys_n = physics_system_count();
+                double sim_dt = g_sim_speed * dt;
+                double effective_sim_dt = sim_dt;
 
-            double sim_dt = g_sim_speed * dt;
-            if (sim_dt > DT_OUTER * MAX_OUTER_STEPS)
-                sim_dt = DT_OUTER * MAX_OUTER_STEPS;
-
-            int    outer_steps = (int)(sim_dt / DT_OUTER) + 1;
-            double dt_outer    = sim_dt / outer_steps;
-            int    n_inner     = (int)(dt_outer / DT_INNER_MAX) + 1;
-            double dt_inner    = dt_outer / n_inner;
-
-            for (int o = 0; o < outer_steps; o++) {
-                physics_respa_begin(dt_outer);
-                for (int i = 0; i < n_inner; i++) {
-                    physics_respa_inner(dt_inner);
-                    trails_tick(dt_inner);   /* per inner step: captures intermediate positions */
+                for (int s = 0; s < sys_n; s++) {
+                    double dt_outer_max = physics_system_outer_dt_limit(s);
+                    double sys_cap = dt_outer_max * MAX_OUTER_STEPS;
+                    if (effective_sim_dt > sys_cap)
+                        effective_sim_dt = sys_cap;
                 }
-                physics_respa_end(dt_outer);
-                asteroids_step(dt_outer);   /* test-particle gravity */
+
+                trails_begin_frame_snapshot();
+                collision_snapshot_positions();
+                for (int s = 0; s < sys_n; s++) {
+                    double dt_outer_max = physics_system_outer_dt_limit(s);
+                    double dt_inner_max = physics_system_inner_dt_limit(s);
+                    int root = physics_system_root(s);
+                    double sys_dt = effective_sim_dt;
+
+                    int outer_steps = (int)(sys_dt / dt_outer_max) + 1;
+                    double dt_outer = sys_dt / outer_steps;
+                    int ca_factor = collision_system_close_approach_subdivide(root, dt_outer);
+                    outer_steps *= ca_factor;
+                    dt_outer    /= ca_factor;
+                    int n_inner = (int)(dt_outer / dt_inner_max) + 1;
+                    double dt_inner = dt_outer / n_inner;
+
+                    for (int o = 0; o < outer_steps; o++) {
+                        int local_encounter = collision_system_maybe_has_encounter(root, dt_outer);
+                        if (local_encounter) {
+                            trails_begin_frame_snapshot();
+                            collision_snapshot_positions();
+                        }
+                        physics_respa_begin_system(root, dt_outer);
+                        for (int i = 0; i < n_inner; i++) {
+                            physics_respa_inner_system(root, dt_inner);
+                        }
+                        physics_respa_end_system(root, dt_outer);
+                        trails_tick_system(root, dt_outer);
+                        if (local_encounter) {
+                            collision_step_system(root, dt_outer);
+                        }
+                    }
+                }
+                physics_advance_time(effective_sim_dt);
+                collision_step(effective_sim_dt);
+                asteroids_step(effective_sim_dt);
+                rings_tick(effective_sim_dt);
             }
-            rings_tick(sim_dt);
         }
 
         /* Build matrices */
@@ -422,32 +651,17 @@ int main(int argc, char **argv) {
         cam_get_dir(&fdx, &fdy, &fdz);
 
         float up[3] = { 0.0f, 1.0f, 0.0f };
-
-        /* Rotation-only view matrix built with a ZERO origin.
-         *
-         * The naive approach (eye = (float)g_cam.pos, ctr = eye + dir) suffers
-         * catastrophic cancellation at interstellar distances: at Barnard's Star
-         * eye[1] ≈ −365 000 AU and the float32 ULP is 0.031 AU, larger than the
-         * small direction component fdy = sin(1°) = 0.017.  The addition
-         * fl32(−365 000 + 0.017) rounds back to −365 000, so (ctr − eye).y = 0
-         * for several mouse pixels, then jumps a full ULP → stepwise rotation
-         * jitter in ALL axes wherever the camera offset is large.
-         *
-         * Fix: use eye = [0,0,0] so the forward vector is computed directly from
-         * [fdx, fdy, fdz] without any large-offset subtraction.  All body
-         * rendering is already camera-relative (body_pos − g_cam.pos in double),
-         * so no translation term is needed in this VP matrix anyway. */
         float dir[3]  = { fdx, fdy, fdz };
         float zero3[3] = { 0.0f, 0.0f, 0.0f };
         mat4_lookAt(view_rot, zero3, dir, up);
 
-        /* Full view matrix with float eye — kept for ring rendering.
-         * Rings are always near Sol so float32 is accurate enough there. */
-        float eye[3] = { (float)g_cam.pos[0], (float)g_cam.pos[1], (float)g_cam.pos[2] };
-        float ctr[3] = { eye[0]+fdx,          eye[1]+fdy,          eye[2]+fdz          };
-        mat4_lookAt(view, eye, ctr, up);
+        /* Full view matrix with float eye - kept for ring rendering. */
+        {
+            float eye[3] = { (float)g_cam.pos[0], (float)g_cam.pos[1], (float)g_cam.pos[2] };
+            float ctr[3] = { eye[0]+fdx,          eye[1]+fdy,          eye[2]+fdz          };
+            mat4_lookAt(view, eye, ctr, up);
+        }
 
-        /* Render */
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         render_frame(view, proj, view_rot, dt);
         ui_render();

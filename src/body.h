@@ -14,8 +14,13 @@ typedef struct {
     double fast_acc[3];    /* m/s^2 dominant parent force, RESPA inner step */
     float  col[3];         /* RGB display colour              */
     int    is_star;
+    int    alive;           /* 0 = removed/absorbed; index kept stable */
     int    parent;         /* index of parent body (-1 = none)                  */
                            /* stars: -1; planets: star idx; moons: planet idx   */
+    double dyn_period;     /* s, estimated local orbital/dynamical period       */
+    double dyn_dt_outer;   /* s, recommended slow-force timestep ceiling         */
+    double dyn_dt_inner;   /* s, recommended parent-force timestep ceiling       */
+    int    dyn_bucket;     /* 0=slow .. 3=very fast                             */
 
     /* Rotation */
     double obliquity;       /* axial tilt in degrees (from ecliptic north)  */
@@ -28,11 +33,24 @@ typedef struct {
     float  atm_scale;       /* outer atm radius as multiple of planet radius */
 
     /* Orbital trail (circular buffer, TRAIL_LEN samples, positions in AU) */
-    double trail_interval;   /* sim-seconds between samples (≈ T/200)     */
-    double trail_accum;      /* accumulator toward next sample             */
+    double trail_accum;      /* meters accumulated toward next sample      */
     int    trail_head;       /* index of next write slot                   */
     int    trail_count;      /* number of valid samples (0..TRAIL_LEN)     */
     double (*trail)[3];      /* heap-allocated [TRAIL_LEN][3]              */
+    double *trail_seg_len;   /* segment length ending at each sample index */
+    double trail_total_len;  /* retained trail length in world meters      */
+    double trail_fade;       /* 1.0 = full alpha; fades to 0 after death   */
+    int    trail_emitting;   /* 1 while the body should keep adding points */
+    double trail_prev_pos[3];/* previous trail tick position for interpolation */
+    double trail_prev_vel[3];/* previous trail tick velocity for curve reconstruction */
+    double trail_frame_accum;     /* meters accumulated at frame start        */
+    int    trail_frame_head;      /* trail head snapshot at frame start       */
+    int    trail_frame_count;     /* trail count snapshot at frame start      */
+    double trail_frame_total_len; /* retained trail length at frame start     */
+    double trail_frame_pos[3];    /* body position at frame start             */
+    double trail_frame_vel[3];    /* body velocity at frame start             */
+    double trail_frame_prev_pos[3];/* previous curve anchor at frame start    */
+    double trail_frame_prev_vel[3];/* previous curve velocity at frame start  */
 } Body;
 
 /* g_bodies is a heap-allocated array that grows via realloc.
@@ -53,6 +71,14 @@ void keplerian_to_state(
 
 /* Index of the star body nearest to the camera (camera.h must be included first). */
 int nearest_star_idx(void);
+
+/* Walk parent links to find the owning root star for a body. */
+int body_root_star(int i);
+
+/* Convert a world-space direction into the body's surface-local frame.
+ * This matches the local-space convention used by the planet shader. */
+void body_world_to_local_surface_dir(int body_idx, const double world_dir[3],
+                                     float out[3]);
 
 /* Planetocentric state from simple moon elements (a in km, angles in degrees). */
 void moon_to_state(
