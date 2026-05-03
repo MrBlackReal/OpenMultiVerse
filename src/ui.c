@@ -107,9 +107,14 @@ typedef struct {
     float panel_h;
 } BuildBarLayout;
 
+/* ------------------------------------------------------------------ build slide-in animation */
+static float  s_build_anim_t    = 0.0f;
+static Uint64 s_build_anim_ts   = 0;
+static int    s_build_prev_mode = 0;
+
 /* ------------------------------------------------------------------ FPS smoothing */
 /* Exponential moving average over ~30 frames, updated every UI frame.
- * We measure time internally so the ui_render() signature stays unchanged. */
+ * We manage time internally so the ui_render() signature stays unchanged. */
 static Uint64 s_fps_prev  = 0;
 static float  s_fps_smooth = 0.0f;
 
@@ -304,9 +309,35 @@ static void draw_tex(TextCache *tc, float x, float y, float h) {
 
 static void draw_build_bar(float W)
 {
-    if (!g_build_mode) return;
+    if (!g_build_mode) {
+        s_build_anim_t    = 0.0f;
+        s_build_prev_mode = 0;
+        return;
+    }
+
+    /* Slide-in animation ------------------------------------------------ */
+    if (!s_build_prev_mode) {
+        s_build_anim_t  = 0.0f;
+        s_build_anim_ts = SDL_GetPerformanceCounter();
+    }
+    s_build_prev_mode = 1;
+
+    if (s_build_anim_t < 1.0f) {
+        Uint64 now = SDL_GetPerformanceCounter();
+        float dt = (float)(now - s_build_anim_ts) / (float)SDL_GetPerformanceFrequency();
+        s_build_anim_ts = now;
+        s_build_anim_t += dt / 0.22f;
+        if (s_build_anim_t > 1.0f) s_build_anim_t = 1.0f;
+    }
+
+    /* Ease-out cubic: starts fast, settles smoothly */
+    float inv  = 1.0f - s_build_anim_t;
+    float ease = 1.0f - inv * inv * inv;
 
     BuildBarLayout layout = build_bar_layout(W);
+
+    /* Shift everything left by (1-ease) × full panel width+margin */
+    float ox = (ease - 1.0f) * (layout.panel_x + layout.panel_w);
 
     SDL_Color title_col = {255, 255, 255, 235};
     SDL_Color hint_col  = {255, 255, 255, 170};
@@ -317,14 +348,14 @@ static void draw_build_bar(float W)
                           g_build_tab_held ? "scroll to select" : "hold TAB and scroll",
                           hint_col);
 
-    draw_rect(layout.panel_x, layout.panel_y, layout.panel_w, layout.panel_h,
+    draw_rect(layout.panel_x + ox, layout.panel_y, layout.panel_w, layout.panel_h,
               UI_ACCENT_R, UI_ACCENT_G, UI_ACCENT_B, 1.0f);
-    draw_rect(layout.panel_x, layout.panel_y, layout.panel_w, 5.0f, 1.0f, 1.0f, 1.0f, 1.0f);
+    draw_rect(layout.panel_x + ox, layout.panel_y, layout.panel_w, 5.0f, 1.0f, 1.0f, 1.0f, 1.0f);
 
     if (s_tc_build_title.tex) {
         float tw = (float)MENU_TITLE_SIZE * (float)s_tc_build_title.w / (float)s_tc_build_title.h;
         draw_tex(&s_tc_build_title,
-                 layout.panel_x + (layout.panel_w - tw) * 0.5f,
+                 layout.panel_x + ox + (layout.panel_w - tw) * 0.5f,
                  layout.title_y,
                  (float)MENU_TITLE_SIZE);
     }
@@ -335,11 +366,11 @@ static void draw_build_bar(float W)
         const BuildPreset *p = build_preset_at(i);
         if (!p) continue;
         int active = (i == selected);
-        float item_y   = layout.items_y + (layout.item_h + layout.gap) * (float)i;
+        float item_y  = layout.items_y + (layout.item_h + layout.gap) * (float)i;
         float sw      = active ? layout.strip_active_w : layout.strip_w;
-        float strip_x = layout.item_x - layout.strip_w;
+        float strip_x = layout.item_x - layout.strip_w + ox;
 
-        draw_rect(layout.item_x, item_y, layout.item_w, layout.item_h,
+        draw_rect(layout.item_x + ox, item_y, layout.item_w, layout.item_h,
                   1.0f, 1.0f, 1.0f, active ? 1.0f : 0.72f);
         draw_rect(strip_x, item_y, sw, layout.item_h,
                   p->col[0], p->col[1], p->col[2], 1.0f);
@@ -350,7 +381,7 @@ static void draw_build_bar(float W)
             float tw     = (float)BUILD_ITEM_FONT_SIZE * (float)s_tc_build_items[i].w / (float)s_tc_build_items[i].h;
             float text_y = item_y + (layout.item_h - (float)BUILD_ITEM_FONT_SIZE) * 0.5f;
             draw_tex(&s_tc_build_items[i],
-                     layout.item_x + (layout.item_w - tw) * 0.5f,
+                     layout.item_x + ox + (layout.item_w - tw) * 0.5f,
                      text_y,
                      (float)BUILD_ITEM_FONT_SIZE);
         }
@@ -359,7 +390,7 @@ static void draw_build_bar(float W)
     if (s_tc_build_hint.tex) {
         float tw = (float)FONT_SIZE * (float)s_tc_build_hint.w / (float)s_tc_build_hint.h;
         draw_tex(&s_tc_build_hint,
-                 layout.panel_x + (layout.panel_w - tw) * 0.5f,
+                 layout.panel_x + ox + (layout.panel_w - tw) * 0.5f,
                  layout.hint_y,
                  (float)FONT_SIZE);
     }
