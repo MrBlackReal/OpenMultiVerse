@@ -62,10 +62,15 @@ static void ensure_capacity(int needed)
 static void alloc_trail(Body *bo)
 {
     bo->trail = (double(*)[3])calloc(TRAIL_LEN, 3 * sizeof(double));
-    if (!bo->trail) { fprintf(stderr, "[universe] trail alloc failed\n"); exit(1); }
+    bo->trail_seg_len = (double*)calloc(TRAIL_LEN, sizeof(double));
+    if (!bo->trail || !bo->trail_seg_len) {
+        fprintf(stderr, "[universe] trail alloc failed\n");
+        exit(1);
+    }
     bo->trail_head  = 0;
     bo->trail_count = 0;
     bo->trail_accum = 0.0;
+    bo->trail_total_len = 0.0;
     bo->trail_fade  = 1.0;
     bo->trail_emitting = 1;
     bo->trail_prev_pos[0] = bo->pos[0];
@@ -77,6 +82,7 @@ static void alloc_trail(Body *bo)
     bo->trail_frame_accum = 0.0;
     bo->trail_frame_head = 0;
     bo->trail_frame_count = 0;
+    bo->trail_frame_total_len = 0.0;
     bo->trail_frame_pos[0] = bo->pos[0];
     bo->trail_frame_pos[1] = bo->pos[1];
     bo->trail_frame_pos[2] = bo->pos[2];
@@ -472,6 +478,8 @@ void universe_shutdown(void)
     for (i = 0; i < g_nbodies; i++) {
         free(g_bodies[i].trail);
         g_bodies[i].trail = NULL;
+        free(g_bodies[i].trail_seg_len);
+        g_bodies[i].trail_seg_len = NULL;
     }
     free(g_bodies);
     g_bodies     = NULL;

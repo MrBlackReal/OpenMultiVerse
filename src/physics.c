@@ -483,24 +483,53 @@ void physics_step(double dt) {
 
 /* ── trail helpers ───────────────────────────────────────────────────── */
 static void sample_body_pos(Body *b, const double pos[3]) {
+    int write_idx = b->trail_head;
+    double seg_len = 0.0;
+    double target_world_len = TRAIL_TARGET_WORLD_LEN;
+    int body_idx = (int)(b - g_bodies);
+
+    if (body_idx >= 0 && body_idx < g_nbodies && is_satellite(body_idx))
+        target_world_len = TRAIL_SATELLITE_WORLD_LEN;
+
+    if (b->trail_count > 0) {
+        int prev_idx = (b->trail_head - 1 + TRAIL_LEN) % TRAIL_LEN;
+        double dx = pos[0] * RS - b->trail[prev_idx][0];
+        double dy = pos[1] * RS - b->trail[prev_idx][1];
+        double dz = pos[2] * RS - b->trail[prev_idx][2];
+        seg_len = sqrt(dx*dx + dy*dy + dz*dz) * AU;
+    }
+
     b->trail[b->trail_head][0] = pos[0] * RS;
     b->trail[b->trail_head][1] = pos[1] * RS;
     b->trail[b->trail_head][2] = pos[2] * RS;
+    if (b->trail_seg_len) b->trail_seg_len[write_idx] = seg_len;
     b->trail_head = (b->trail_head + 1) % TRAIL_LEN;
-    if (b->trail_count < TRAIL_LEN) b->trail_count++;
+    if (b->trail_count < TRAIL_LEN) {
+        b->trail_count++;
+        b->trail_total_len += seg_len;
+    } else {
+        int oldest_idx = b->trail_head;
+        int next_oldest_idx = (oldest_idx + 1) % TRAIL_LEN;
+        if (b->trail_seg_len)
+            b->trail_total_len += seg_len - b->trail_seg_len[next_oldest_idx];
+        else
+            b->trail_total_len += seg_len;
+    }
+
+    while (b->trail_count > 2 && b->trail_total_len > target_world_len) {
+        int oldest_idx = (b->trail_head - b->trail_count + TRAIL_LEN) % TRAIL_LEN;
+        int next_oldest_idx = (oldest_idx + 1) % TRAIL_LEN;
+        double drop_len = b->trail_seg_len ? b->trail_seg_len[next_oldest_idx] : 0.0;
+        b->trail_total_len -= drop_len;
+        if (b->trail_total_len < 0.0) b->trail_total_len = 0.0;
+        b->trail_count--;
+    }
 }
 
 static double trail_segment_len_for_accel(const Body *b)
 {
-    double ax = b->acc[0] + b->fast_acc[0];
-    double ay = b->acc[1] + b->fast_acc[1];
-    double az = b->acc[2] + b->fast_acc[2];
-    double amag = sqrt(ax*ax + ay*ay + az*az);
-    double segment_len = TRAIL_SEGMENT_SCALE / sqrt(amag + TRAIL_ACCEL_EPS);
-    int body_idx = (int)(b - g_bodies);
-
-    if (body_idx >= 0 && body_idx < g_nbodies && is_satellite(body_idx))
-        segment_len *= (1.0 / 3.0);
+    double segment_len = TRAIL_BASE_SEGMENT_LEN;
+    (void)b;
 
     if (segment_len < TRAIL_MIN_SEGMENT_LEN) segment_len = TRAIL_MIN_SEGMENT_LEN;
     if (segment_len > TRAIL_MAX_SEGMENT_LEN) segment_len = TRAIL_MAX_SEGMENT_LEN;
@@ -641,6 +670,7 @@ void trails_begin_frame_snapshot(void)
         b->trail_frame_accum = b->trail_accum;
         b->trail_frame_head = b->trail_head;
         b->trail_frame_count = b->trail_count;
+        b->trail_frame_total_len = b->trail_total_len;
         b->trail_frame_pos[0] = b->pos[0];
         b->trail_frame_pos[1] = b->pos[1];
         b->trail_frame_pos[2] = b->pos[2];
@@ -670,6 +700,7 @@ void trails_cut_body_at_time(int body_idx, double hit_dt, double frame_dt,
     b->trail_head = b->trail_frame_head;
     b->trail_count = b->trail_frame_count;
     b->trail_accum = b->trail_frame_accum;
+    b->trail_total_len = b->trail_frame_total_len;
     b->trail_prev_pos[0] = b->trail_frame_prev_pos[0];
     b->trail_prev_pos[1] = b->trail_frame_prev_pos[1];
     b->trail_prev_pos[2] = b->trail_frame_prev_pos[2];

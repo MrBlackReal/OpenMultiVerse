@@ -37,6 +37,8 @@ typedef struct {
     int    trail_head;       /* index of next write slot                   */
     int    trail_count;      /* number of valid samples (0..TRAIL_LEN)     */
     double (*trail)[3];      /* heap-allocated [TRAIL_LEN][3]              */
+    double *trail_seg_len;   /* segment length ending at each sample index */
+    double trail_total_len;  /* retained trail length in world meters      */
     double trail_fade;       /* 1.0 = full alpha; fades to 0 after death   */
     int    trail_emitting;   /* 1 while the body should keep adding points */
     double trail_prev_pos[3];/* previous trail tick position for interpolation */
@@ -44,6 +46,7 @@ typedef struct {
     double trail_frame_accum;     /* meters accumulated at frame start        */
     int    trail_frame_head;      /* trail head snapshot at frame start       */
     int    trail_frame_count;     /* trail count snapshot at frame start      */
+    double trail_frame_total_len; /* retained trail length at frame start     */
     double trail_frame_pos[3];    /* body position at frame start             */
     double trail_frame_vel[3];    /* body velocity at frame start             */
     double trail_frame_prev_pos[3];/* previous curve anchor at frame start    */

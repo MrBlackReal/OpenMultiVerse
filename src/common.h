@@ -43,14 +43,15 @@ extern int g_win_h;
 
 /* ------------------------------------------------------------------ sim */
 #define MAX_BODIES         128
-#define TRAIL_LEN  4096   /* trail circular buffer size (per body, all bodies) */
+#define TRAIL_LEN          16384   /* trail circular buffer size (per body, all bodies) */
 #define NUM_STARS          4000
 
-/* Trail sampling: acceleration chooses a target spatial segment length. */
+/* Trail sampling: fixed global spatial resolution. */
 #define TRAIL_MIN_SEGMENT_LEN       2.0e4        /* m */
 #define TRAIL_MAX_SEGMENT_LEN       4.5e8        /* m */
-#define TRAIL_SEGMENT_SCALE         9.0e6        /* segment = scale / sqrt(|a|) */
-#define TRAIL_ACCEL_EPS             1e-12        /* m/s^2, avoids div-by-zero */
+#define TRAIL_BASE_SEGMENT_LEN      1.0e8        /* m */
+#define TRAIL_TARGET_WORLD_LEN     (128.0 * AU)  /* fixed retained trail length */
+#define TRAIL_SATELLITE_WORLD_LEN   (0.3 * AU)
 #define TRAIL_CURVE_ERROR_RATIO     0.22         /* allowed chord error vs segment length */
 #define TRAIL_CURVE_MIN_ERROR       5.0e3        /* m */
 #define TRAIL_CURVE_MAX_ERROR       2.0e7        /* m */

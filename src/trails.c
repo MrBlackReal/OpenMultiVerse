@@ -33,14 +33,13 @@ static int *s_last_count = NULL;
 static GLuint s_shader    = 0;
 static GLint  s_loc_vp    = -1;
 static GLint  s_loc_color = -1;
-static GLint  s_loc_count = -1;
 
 /* Last camera position — used to detect when a re-upload is needed even if no
  * new trail samples were recorded (camera moved → camera-relative VBO is stale) */
 static double s_last_cam[3] = {0.0, 0.0, 0.0};
 
-/* Scratch: linearised trail + live position, (TRAIL_LEN+1) × 3 floats */
-static float s_scratch[(TRAIL_LEN + 1) * 3];
+/* Scratch: linearised trail + live position, interleaved xyz + alpha. */
+static float s_scratch[(TRAIL_LEN + 1) * 4];
 
 /* ---------------------------------------------------------------- public */
 
@@ -52,8 +51,6 @@ void trails_gl_init(void)
 
     s_loc_vp    = glGetUniformLocation(s_shader, "u_vp");
     s_loc_color = glGetUniformLocation(s_shader, "u_color");
-    s_loc_count = glGetUniformLocation(s_shader, "u_count");
-
     s_n          = g_nbodies;
     s_vao        = (GLuint*)malloc(s_n * sizeof(GLuint));
     s_vbo        = (GLuint*)malloc(s_n * sizeof(GLuint));
@@ -66,11 +63,14 @@ void trails_gl_init(void)
         s_last_count[i] = 0;
 
         s_vao[i] = gl_vao_create();
-        s_vbo[i] = gl_vbo_create((TRAIL_LEN + 1) * 3 * sizeof(float),
+        s_vbo[i] = gl_vbo_create((TRAIL_LEN + 1) * 4 * sizeof(float),
                                  NULL, GL_DYNAMIC_DRAW);
         glEnableVertexAttribArray(0);
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE,
-                              3 * sizeof(float), (void*)0);
+                              4 * sizeof(float), (void*)0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE,
+                              4 * sizeof(float), (void*)(3 * sizeof(float)));
         glBindVertexArray(0);
     }
 }
@@ -105,11 +105,14 @@ void trails_add_body(int body_idx)
         s_last_head[i] = 0;
         s_last_count[i] = 0;
         s_vao[i] = gl_vao_create();
-        s_vbo[i] = gl_vbo_create((TRAIL_LEN + 1) * 3 * sizeof(float),
+        s_vbo[i] = gl_vbo_create((TRAIL_LEN + 1) * 4 * sizeof(float),
                                  NULL, GL_DYNAMIC_DRAW);
         glEnableVertexAttribArray(0);
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE,
-                              3 * sizeof(float), (void*)0);
+                              4 * sizeof(float), (void*)0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE,
+                              4 * sizeof(float), (void*)(3 * sizeof(float)));
         glBindVertexArray(0);
     }
 
@@ -125,6 +128,7 @@ void trails_remove_body(int body_idx)
         g_bodies[body_idx].trail_head = 0;
         g_bodies[body_idx].trail_count = 0;
         g_bodies[body_idx].trail_accum = 0.0;
+        g_bodies[body_idx].trail_total_len = 0.0;
         g_bodies[body_idx].trail_emitting = 0;
     }
 }
@@ -149,6 +153,10 @@ void trails_reset_body(int body_idx)
     b->trail_head = 2 % TRAIL_LEN;
     b->trail_count = 2;
     b->trail_accum = 0.0;
+    if (b->trail_seg_len) {
+        for (int i = 0; i < TRAIL_LEN; i++) b->trail_seg_len[i] = 0.0;
+    }
+    b->trail_total_len = 0.0;
     b->trail_emitting = 1;
     b->trail_prev_pos[0] = b->pos[0];
     b->trail_prev_pos[1] = b->pos[1];
@@ -159,6 +167,7 @@ void trails_reset_body(int body_idx)
     b->trail_frame_accum = 0.0;
     b->trail_frame_head = b->trail_head;
     b->trail_frame_count = b->trail_count;
+    b->trail_frame_total_len = b->trail_total_len;
     b->trail_frame_pos[0] = b->pos[0];
     b->trail_frame_pos[1] = b->pos[1];
     b->trail_frame_pos[2] = b->pos[2];
@@ -229,15 +238,27 @@ void trails_render(const float vp[16])
          * shader only ever receives small residual floats, eliminating the
          * cancellation jitter that appears when WASD moves the camera. */
         if (cam_moved || head != s_last_head[i] || count != s_last_count[i]) {
-            /* Linearise circular buffer: oldest → newest, camera-relative */
+            /* Linearise circular buffer: oldest → newest, camera-relative.
+             * Alpha follows cumulative world length, not vertex index. */
+            double total_len = b->trail_total_len;
+            double cumulative_len = 0.0;
+            int oldest_idx = (head - count + TRAIL_LEN) % TRAIL_LEN;
             for (int k = 0; k < count; k++) {
                 int idx = (head - count + k + TRAIL_LEN) % TRAIL_LEN;
-                s_scratch[k*3+0] = (float)(b->trail[idx][0] - g_cam.pos[0]);
-                s_scratch[k*3+1] = (float)(b->trail[idx][1] - g_cam.pos[1]);
-                s_scratch[k*3+2] = (float)(b->trail[idx][2] - g_cam.pos[2]);
+                float alpha_t;
+                if (idx != oldest_idx && b->trail_seg_len) {
+                    cumulative_len += b->trail_seg_len[idx];
+                    if (cumulative_len > total_len) cumulative_len = total_len;
+                }
+                if (total_len > 0.0) alpha_t = (float)(cumulative_len / total_len);
+                else alpha_t = (k == count - 1) ? 1.0f : 0.0f;
+                s_scratch[k*4+0] = (float)(b->trail[idx][0] - g_cam.pos[0]);
+                s_scratch[k*4+1] = (float)(b->trail[idx][1] - g_cam.pos[1]);
+                s_scratch[k*4+2] = (float)(b->trail[idx][2] - g_cam.pos[2]);
+                s_scratch[k*4+3] = alpha_t * alpha_t;
             }
             glBufferSubData(GL_ARRAY_BUFFER, 0,
-                            count * 3 * sizeof(float), s_scratch);
+                            count * 4 * sizeof(float), s_scratch);
             s_last_head[i]  = head;
             s_last_count[i] = count;
         }
@@ -247,13 +268,14 @@ void trails_render(const float vp[16])
             /* Append the live planet position as the final vertex so the
              * trail tip follows the planet every frame without a new sample.
              * Camera-relative, double-precision subtraction as above. */
-            float live[3] = {
+            float live[4] = {
                 (float)(b->pos[0] * RS - g_cam.pos[0]),
                 (float)(b->pos[1] * RS - g_cam.pos[1]),
-                (float)(b->pos[2] * RS - g_cam.pos[2])
+                (float)(b->pos[2] * RS - g_cam.pos[2]),
+                1.0f
             };
             glBufferSubData(GL_ARRAY_BUFFER,
-                            count * 3 * sizeof(float), sizeof(live), live);
+                            count * 4 * sizeof(float), sizeof(live), live);
             draw_count = count + 1;
         } else {
             draw_count = count;
@@ -261,7 +283,6 @@ void trails_render(const float vp[16])
 
         float alpha = 0.6f * (float)b->trail_fade * trail_fade;
         glUniform4f(s_loc_color, b->col[0], b->col[1], b->col[2], alpha);
-        glUniform1i(s_loc_count, draw_count);
         glDrawArrays(GL_LINE_STRIP, 0, draw_count);
     }
 
