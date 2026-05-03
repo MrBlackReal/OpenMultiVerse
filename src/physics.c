@@ -23,7 +23,9 @@ int    g_paused    = 0;
 
 #define OUTER_PERIOD_DIVISOR 24.0
 #define INNER_PERIOD_DIVISOR 96.0
-#define OUTER_DT_MIN 60.0
+/* Keep a reasonably large outer-step floor so one very short-period moon does
+ * not throttle the global sim-speed cap for every system in the scene. */
+#define OUTER_DT_MIN (DAY * 0.05)
 #define INNER_DT_MIN 60.0
 #define INNER_DT_MAX (DAY * 0.02)
 #define OUTER_DT_DEFAULT DAY
