@@ -611,6 +611,9 @@ int main(int argc, char **argv) {
 
                     int outer_steps = (int)(sys_dt / dt_outer_max) + 1;
                     double dt_outer = sys_dt / outer_steps;
+                    int ca_factor = collision_system_close_approach_subdivide(root, dt_outer);
+                    outer_steps *= ca_factor;
+                    dt_outer    /= ca_factor;
                     int n_inner = (int)(dt_outer / dt_inner_max) + 1;
                     double dt_inner = dt_outer / n_inner;
 

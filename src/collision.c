@@ -226,6 +226,87 @@ int collision_system_maybe_has_encounter(int root, double dt)
     return 0;
 }
 
+/* Returns a power-of-2 subdivision factor for the outer timestep.
+ * Checks time-to-closest-approach (tau) for all approaching primary pairs
+ * and for bodies approaching the star.  When tau falls below 8×dt_outer the
+ * integrator would take too coarse a step through the encounter curvature, so
+ * we request more, smaller steps:
+ *   tau > 8×dt  → 1   (no change)
+ *   tau > 4×dt  → 2
+ *   tau > 2×dt  → 4
+ *   tau ≤ 2×dt  → 8
+ */
+int collision_system_close_approach_subdivide(int root, double dt_outer)
+{
+    if (root < 0 || root >= g_nbodies || !g_bodies[root].alive) return 1;
+    if (dt_outer <= 0.0) return 1;
+
+    double min_tau = 1e30;
+
+    /* Primary–primary pairs */
+    for (int i = 0; i < g_nbodies; i++) {
+        if (!body_is_primary(i)) continue;
+        if (body_root_star(i) != root) continue;
+        for (int j = i + 1; j < g_nbodies; j++) {
+            if (!body_is_primary(j)) continue;
+            if (body_root_star(j) != root) continue;
+            if (body_is_merge_impactor(i) || body_is_merge_impactor(j)) continue;
+
+            double rx = g_bodies[j].pos[0] - g_bodies[i].pos[0];
+            double ry = g_bodies[j].pos[1] - g_bodies[i].pos[1];
+            double rz = g_bodies[j].pos[2] - g_bodies[i].pos[2];
+            double dist = sqrt(rx*rx + ry*ry + rz*rz);
+            if (dist <= 1e-9) return 8;
+
+            double vx = g_bodies[j].vel[0] - g_bodies[i].vel[0];
+            double vy = g_bodies[j].vel[1] - g_bodies[i].vel[1];
+            double vz = g_bodies[j].vel[2] - g_bodies[i].vel[2];
+            double vr = -(rx*vx + ry*vy + rz*vz) / dist; /* positive = approaching */
+            if (vr < 10.0) continue;
+
+            double rsum = current_contact_radius(i) + current_contact_radius(j);
+            double gap = dist - rsum;
+            if (gap <= 0.0) return 8;
+
+            double tau = gap / vr;
+            if (tau < min_tau) min_tau = tau;
+        }
+    }
+
+    /* Body approaching the star */
+    if (g_bodies[root].is_star) {
+        for (int i = 0; i < g_nbodies; i++) {
+            if (i == root) continue;
+            if (!g_bodies[i].alive || g_bodies[i].is_star) continue;
+            if (body_root_star(i) != root) continue;
+            if (body_is_in_merge(i)) continue;
+
+            double rx = g_bodies[i].pos[0] - g_bodies[root].pos[0];
+            double ry = g_bodies[i].pos[1] - g_bodies[root].pos[1];
+            double rz = g_bodies[i].pos[2] - g_bodies[root].pos[2];
+            double dist = sqrt(rx*rx + ry*ry + rz*rz);
+            if (dist <= 1e-9) return 8;
+
+            double vx = g_bodies[i].vel[0] - g_bodies[root].vel[0];
+            double vy = g_bodies[i].vel[1] - g_bodies[root].vel[1];
+            double vz = g_bodies[i].vel[2] - g_bodies[root].vel[2];
+            double vr = -(rx*vx + ry*vy + rz*vz) / dist;
+            if (vr < 10.0) continue;
+
+            double gap = dist - (g_bodies[root].radius + current_contact_radius(i));
+            if (gap <= 0.0) return 8;
+
+            double tau = gap / vr;
+            if (tau < min_tau) min_tau = tau;
+        }
+    }
+
+    if (min_tau > 8.0 * dt_outer) return 1;
+    if (min_tau > 4.0 * dt_outer) return 2;
+    if (min_tau > 2.0 * dt_outer) return 4;
+    return 8;
+}
+
 /* ── § MATH — geometry helpers, body surface transforms, spin physics ── */
 
 static int body_is_descendant_of(int body_idx, int ancestor_idx)
