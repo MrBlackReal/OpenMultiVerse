@@ -15,6 +15,7 @@
 #include "camera.h"
 #include "gl_utils.h"
 #include "math3d.h"
+#include "ui_theme.h"
 
 #define MAX_LABEL_DIST   55.0f  /* AU — hard far cutoff for non-star labels    */
 /* Hide label once camera is closer than this many body-radii to the centre.
@@ -53,23 +54,6 @@ static int   s_active[MAX_BODIES];       /* current visible state (0/1)        *
 /* anchor is recomputed from g_bodies[i].pos each frame — no float32 cache needed */
 
 static TTF_Font *s_font = NULL;
-
-/* ------------------------------------------------------------------ font */
-static const char *FONT_PATHS[] = {
-    "C:/Windows/Fonts/segoeui.ttf",
-    "C:/Windows/Fonts/arial.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/TTF/DejaVuSans.ttf",
-    NULL
-};
-
-static TTF_Font *find_font(int size) {
-    for (int i = 0; FONT_PATHS[i]; i++) {
-        TTF_Font *f = TTF_OpenFont(FONT_PATHS[i], size);
-        if (f) return f;
-    }
-    return NULL;
-}
 
 /* ------------------------------------------------------------------ texture */
 static GLuint surface_to_texture(SDL_Surface *surf, int *w, int *h) {
@@ -149,7 +133,7 @@ void labels_init(void) {
         fprintf(stderr, "[Labels] TTF_Init: %s\n", TTF_GetError());
         return;
     }
-    s_font = find_font(16);
+    s_font = ui_theme_open_font(16);
     if (!s_font) {
         fprintf(stderr, "[Labels] no usable font found — labels disabled\n");
         return;

@@ -20,6 +20,7 @@
 #include "collision.h"
 #include "gl_utils.h"
 #include "math3d.h"
+#include "ui_theme.h"
 #include <math.h>
 #include <string.h>
 
@@ -142,7 +143,7 @@ static GLint  s_build_ui_use_tex = -1;
 static GLint  s_build_ui_tex = -1;
 static TTF_Font *s_build_font = NULL;
 
-#define BUILD_UI_FONT_SIZE 14.0f
+#define BUILD_UI_FONT_SIZE 16.0f
 
 typedef struct {
     GLuint tex;
@@ -155,21 +156,6 @@ static BuildTextCache s_build_dist_text[3];
 /* ------------------------------------------------------------------ helpers */
 static float half_fov_tan(void) {
     return tanf(FOV * 0.5f * (float)(PI / 180.0));
-}
-
-static TTF_Font *build_find_font(int size) {
-    static const char *paths[] = {
-        "C:/Windows/Fonts/segoeui.ttf",
-        "C:/Windows/Fonts/arial.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/TTF/DejaVuSans.ttf",
-        NULL
-    };
-    for (int i = 0; paths[i]; i++) {
-        TTF_Font *f = TTF_OpenFont(paths[i], size);
-        if (f) return f;
-    }
-    return NULL;
 }
 
 static GLuint build_surface_to_tex(SDL_Surface *surf, int *w, int *h) {
@@ -557,7 +543,7 @@ void render_init(void) {
         glUseProgram(0);
     }
     TTF_Init();
-    s_build_font = build_find_font((int)BUILD_UI_FONT_SIZE);
+    s_build_font = ui_theme_open_font((int)BUILD_UI_FONT_SIZE);
 }
 
 static void render_build_preview(const float vp_camrel[16])

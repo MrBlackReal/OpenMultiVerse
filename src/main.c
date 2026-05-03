@@ -368,7 +368,7 @@ static void handle_event(const SDL_Event *e, float dt, int *running) {
         case SDL_MOUSEMOTION:
         {
             int hover = ui_pause_menu_hit_test(e->motion.x, e->motion.y);
-            if (hover >= 0 && hover != s_pause_menu_selected) {
+            if (hover != s_pause_menu_selected) {
                 s_pause_menu_selected = hover;
                 sync_pause_menu_ui();
             }

@@ -13,6 +13,7 @@
 #include "build.h"
 #include "body.h"
 #include "gl_utils.h"
+#include "ui_theme.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -22,15 +23,16 @@
 #define BAR_W_FRAC    0.5f    /* fraction of screen width           */
 #define BAR_TOP       12.0f   /* distance from top of screen        */
 #define TEXT_GAP      6.0f    /* gap between bar bottom and text    */
-#define FONT_SIZE     14
-#define MENU_TITLE_SIZE 20
+#define FONT_SIZE     16
+#define BUILD_ITEM_FONT_SIZE 18
+#define MENU_TITLE_SIZE 24
 #define MENU_TEXT_SIZE  18
-#define MENU_HINT_SIZE  14
+#define MENU_HINT_SIZE  16
 #define PAUSE_MENU_PANEL_W 360.0f
 #define PAUSE_MENU_PANEL_H 312.0f
 #define PAUSE_MENU_ITEM_W (PAUSE_MENU_PANEL_W - 36.0f)
 #define PAUSE_MENU_ITEM_H 42.0f
-#define PAUSE_MENU_ITEM_ACTIVE_H 50.0f
+#define PAUSE_MENU_ITEM_ACTIVE_H 42.0f
 #define PAUSE_MENU_ITEM_GAP 10.0f
 
 /* Camera speed range (AU / real-second) */
@@ -48,6 +50,7 @@ static GLint  s_loc_use_tex = -1;
 static GLint  s_loc_tex     = -1;
 
 static TTF_Font *s_font = NULL;
+static TTF_Font *s_build_item_font = NULL;
 static TTF_Font *s_menu_font = NULL;
 static TTF_Font *s_menu_title_font = NULL;
 
@@ -72,6 +75,34 @@ static int s_pause_menu_visible = 0;
 static int s_pause_menu_selected = 0;
 static int s_pause_menu_vsync = 0;
 
+typedef struct {
+    int n;
+    float item_w;
+    float item_h;
+    float item_active_h;
+    float gap;
+    float first_item_y;
+    float item_x;
+    float panel_x;
+    float panel_y;
+    float panel_w;
+    float panel_h;
+} PauseMenuLayout;
+
+typedef struct {
+    int n;
+    float item_w;
+    float item_h;
+    float item_active_h;
+    float gap;
+    float items_x;
+    float item_y_base;
+    float panel_x;
+    float panel_y;
+    float panel_w;
+    float panel_h;
+} BuildBarLayout;
+
 /* ------------------------------------------------------------------ FPS smoothing */
 /* Exponential moving average over ~30 frames, updated every UI frame.
  * We measure time internally so the ui_render() signature stays unchanged. */
@@ -79,20 +110,46 @@ static Uint64 s_fps_prev  = 0;
 static float  s_fps_smooth = 0.0f;
 
 /* ------------------------------------------------------------------ helpers */
-static const char *s_font_paths[] = {
-    "C:/Windows/Fonts/segoeui.ttf",
-    "C:/Windows/Fonts/arial.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/TTF/DejaVuSans.ttf",
-    NULL
-};
 
-static TTF_Font *find_font(int size) {
-    for (int i = 0; s_font_paths[i]; i++) {
-        TTF_Font *f = TTF_OpenFont(s_font_paths[i], size);
-        if (f) return f;
+static PauseMenuLayout pause_menu_layout(float W, float H)
+{
+    PauseMenuLayout layout;
+    layout.n = 4;
+    layout.item_w = PAUSE_MENU_ITEM_W;
+    layout.item_h = PAUSE_MENU_ITEM_H;
+    layout.item_active_h = PAUSE_MENU_ITEM_ACTIVE_H;
+    layout.gap = PAUSE_MENU_ITEM_GAP;
+    layout.panel_x = (W - PAUSE_MENU_PANEL_W) * 0.5f;
+    layout.panel_y = (H - PAUSE_MENU_PANEL_H) * 0.5f;
+    layout.panel_w = PAUSE_MENU_PANEL_W;
+    layout.panel_h = PAUSE_MENU_PANEL_H;
+    layout.item_x = layout.panel_x + 18.0f;
+    layout.first_item_y = layout.panel_y + 72.0f;
+    return layout;
+}
+
+static BuildBarLayout build_bar_layout(float W)
+{
+    BuildBarLayout layout;
+    layout.n = build_preset_count();
+    if (layout.n > 8) layout.n = 8;
+    layout.item_w = 112.0f;
+    layout.item_h = 48.0f;
+    layout.item_active_h = 56.0f;
+    layout.gap = 8.0f;
+    layout.item_y_base = (float)WIN_H - 88.0f + 24.0f;
+
+    {
+        float total_w = layout.n * layout.item_w + (layout.n - 1) * layout.gap;
+        float panel_pad = (float)WIN_H - (layout.item_y_base + layout.item_h);
+        layout.items_x = (W - total_w) * 0.5f;
+        layout.panel_x = layout.items_x - panel_pad;
+        layout.panel_y = layout.item_y_base - panel_pad;
+        layout.panel_w = total_w + panel_pad * 2.0f;
+        layout.panel_h = (float)WIN_H - layout.panel_y;
     }
-    return NULL;
+
+    return layout;
 }
 
 static GLuint surf_to_tex(SDL_Surface *surf, int *w, int *h) {
@@ -134,16 +191,17 @@ static void update_text(TextCache *tc, const char *str, SDL_Color col) {
 
 static int pause_menu_item_at(float mx, float my)
 {
-    const float px = ((float)WIN_W - PAUSE_MENU_PANEL_W) * 0.5f;
-    const float py = ((float)WIN_H - PAUSE_MENU_PANEL_H) * 0.5f;
-    const float item_x = px + 18.0f;
-    const float first_item_y = py + 72.0f;
+    PauseMenuLayout layout = pause_menu_layout((float)WIN_W, (float)WIN_H);
 
-    if (mx < item_x || mx > item_x + PAUSE_MENU_ITEM_W) return -1;
+    if (mx < layout.item_x || mx > layout.item_x + layout.item_w) return -1;
 
-    for (int i = 0; i < 4; i++) {
-        float slot_y = first_item_y + (float)i * (PAUSE_MENU_ITEM_H + PAUSE_MENU_ITEM_GAP);
-        if (my >= slot_y && my <= slot_y + PAUSE_MENU_ITEM_ACTIVE_H)
+    for (int i = 0; i < layout.n; i++) {
+        int active = (i == s_pause_menu_selected);
+        float item_h = active ? layout.item_active_h : layout.item_h;
+        float item_y = layout.first_item_y
+                     + (float)i * (layout.item_h + layout.gap)
+                     + (layout.item_h - item_h);
+        if (my >= item_y && my <= item_y + item_h)
             return i;
     }
     return -1;
@@ -238,44 +296,41 @@ static void draw_build_bar(float W)
 {
     if (!g_build_mode) return;
 
-    const float H = 72.0f;
-    const float Y = (float)WIN_H - H;
     const float PAD = 14.0f;
-    const float ITEM_W = 112.0f;
-    const float ITEM_H = 42.0f;
-    const float ITEM_RAISED_H = 56.0f;
-    const float GAP = 8.0f;
-    int n = build_preset_count();
-    if (n > 8) n = 8;
+    BuildBarLayout layout = build_bar_layout(W);
 
     SDL_Color white = {255, 255, 255, 230};
     update_text(&s_tc_build_title,
                 g_build_tab_held ? "BUILD MODE  |  scroll to select" : "BUILD MODE  |  hold TAB and scroll",
                 white);
     draw_tex(&s_tc_build_title, PAD, (float)WIN_H - (FONT_SIZE + 6.0f), (float)FONT_SIZE);
+    draw_rect(layout.panel_x, layout.panel_y, layout.panel_w, layout.panel_h,
+              UI_ACCENT_R, UI_ACCENT_G, UI_ACCENT_B, 1.0f);
 
-    float total_w = n * ITEM_W + (n - 1) * GAP;
-    float x = (W - total_w) * 0.5f;
     int selected = build_selected_index();
 
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < layout.n; i++) {
         const BuildPreset *p = build_preset_at(i);
         if (!p) continue;
         int active = (i == selected);
-        float item_h = active ? ITEM_RAISED_H : ITEM_H;
-        float item_y = Y + 24.0f + (ITEM_H - item_h);
+        float item_h = active ? layout.item_active_h : layout.item_h;
+        float item_y = layout.item_y_base + (layout.item_h - item_h);
+        float item_x = layout.items_x + (layout.item_w + layout.gap) * (float)i;
         float strip_h = active ? 8.0f : 6.0f;
-        draw_rect(x, item_y, ITEM_W, item_h, 1.0f, 1.0f, 1.0f,
-                  active ? 1.0f : 0.85f);
-        draw_rect(x, item_y, ITEM_W, strip_h, p->col[0], p->col[1], p->col[2], 1.0f);
+        draw_rect(item_x, item_y, layout.item_w, item_h,
+                  1.0f, 1.0f, 1.0f,
+                  active ? 1.0f : 0.84f);
+        draw_rect(item_x, item_y, layout.item_w, strip_h, p->col[0], p->col[1], p->col[2], 1.0f);
         SDL_Color item_col = {0, 0, 0, 255};
-        update_text(&s_tc_build_items[i], p->name, item_col);
+        update_text_with_font(&s_tc_build_items[i], s_build_item_font ? s_build_item_font : s_font,
+                              p->name, item_col);
         if (s_tc_build_items[i].tex) {
-            float tw = (float)FONT_SIZE * (float)s_tc_build_items[i].w / (float)s_tc_build_items[i].h;
-            float text_y = item_y + strip_h + (item_h - strip_h - (float)FONT_SIZE) * 0.5f;
-            draw_tex(&s_tc_build_items[i], x + (ITEM_W - tw) * 0.5f, text_y, (float)FONT_SIZE);
+            float tw = (float)BUILD_ITEM_FONT_SIZE * (float)s_tc_build_items[i].w / (float)s_tc_build_items[i].h;
+            float text_y = item_y + strip_h + (item_h - strip_h - (float)BUILD_ITEM_FONT_SIZE) * 0.5f;
+            draw_tex(&s_tc_build_items[i],
+                     item_x + (layout.item_w - tw) * 0.5f, text_y,
+                     (float)BUILD_ITEM_FONT_SIZE);
         }
-        x += ITEM_W + GAP;
     }
 }
 
@@ -283,10 +338,7 @@ static void draw_pause_menu(float W, float H)
 {
     if (!s_pause_menu_visible) return;
 
-    const float px = (W - PAUSE_MENU_PANEL_W) * 0.5f;
-    const float py = (H - PAUSE_MENU_PANEL_H) * 0.5f;
-    const float item_x = px + 18.0f;
-    const float first_item_y = py + 72.0f;
+    PauseMenuLayout layout = pause_menu_layout(W, H);
     const char *labels[4] = {
         "Continue",
         "Reset Universe",
@@ -298,44 +350,48 @@ static void draw_pause_menu(float W, float H)
     SDL_Color item_col = {0, 0, 0, 255};
     SDL_Color hint_col = {255, 255, 255, 170};
 
-    update_text_with_font(&s_tc_pause_title, s_menu_title_font, "SYSTEM MENU", title_col);
+    update_text_with_font(&s_tc_pause_title, s_menu_title_font, "MENU", title_col);
     update_text_with_font(&s_tc_pause_hint, s_font, "ENTER select  |  ESC continue", hint_col);
     for (int i = 0; i < 4; i++)
         update_text_with_font(&s_tc_pause_items[i], s_menu_font, labels[i], item_col);
 
     draw_rect(0.0f, 0.0f, W, H, 0.0f, 0.0f, 0.0f, 0.38f);
-    draw_rect(px, py, PAUSE_MENU_PANEL_W, PAUSE_MENU_PANEL_H, 0.03f, 0.04f, 0.07f, 0.90f);
-    draw_rect(px, py, PAUSE_MENU_PANEL_W, 5.0f, 1.0f, 1.0f, 1.0f, 0.95f);
+    draw_rect(layout.panel_x, layout.panel_y, layout.panel_w, layout.panel_h,
+              UI_ACCENT_R, UI_ACCENT_G, UI_ACCENT_B, 1.0f);
+    draw_rect(layout.panel_x, layout.panel_y, layout.panel_w, 5.0f, 1.0f, 1.0f, 1.0f, 1.0f);
 
     if (s_tc_pause_title.tex) {
         float tw = (float)MENU_TITLE_SIZE * (float)s_tc_pause_title.w / (float)s_tc_pause_title.h;
-        draw_tex(&s_tc_pause_title, px + (PAUSE_MENU_PANEL_W - tw) * 0.5f, py + 24.0f, (float)MENU_TITLE_SIZE);
+        draw_tex(&s_tc_pause_title,
+                 layout.panel_x + (layout.panel_w - tw) * 0.5f,
+                 layout.panel_y + 24.0f,
+                 (float)MENU_TITLE_SIZE);
     }
 
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < layout.n; i++) {
         int active = (i == s_pause_menu_selected);
-        float item_h = active ? PAUSE_MENU_ITEM_ACTIVE_H : PAUSE_MENU_ITEM_H;
-        float item_y = first_item_y + i * (PAUSE_MENU_ITEM_H + PAUSE_MENU_ITEM_GAP) + (PAUSE_MENU_ITEM_H - item_h);
-        float strip_h = active ? 7.0f : 5.0f;
+        float item_h = active ? layout.item_active_h : layout.item_h;
+        float item_y = layout.first_item_y + i * (layout.item_h + layout.gap) + (layout.item_h - item_h);
 
-        draw_rect(item_x, item_y, PAUSE_MENU_ITEM_W, item_h, 1.0f, 1.0f, 1.0f,
+        draw_rect(layout.item_x, item_y, layout.item_w, item_h, 1.0f, 1.0f, 1.0f,
                   active ? 1.0f : 0.84f);
-        draw_rect(item_x, item_y, PAUSE_MENU_ITEM_W, strip_h,
-                  active ? 0.07f : 0.82f,
-                  active ? 0.09f : 0.82f,
-                  active ? 0.13f : 0.82f,
-                  1.0f);
 
         if (s_tc_pause_items[i].tex) {
             float tw = (float)MENU_TEXT_SIZE * (float)s_tc_pause_items[i].w / (float)s_tc_pause_items[i].h;
-            float text_y = item_y + strip_h + (item_h - strip_h - (float)MENU_TEXT_SIZE) * 0.5f;
-            draw_tex(&s_tc_pause_items[i], item_x + (PAUSE_MENU_ITEM_W - tw) * 0.5f, text_y, (float)MENU_TEXT_SIZE);
+            float text_y = item_y + (item_h - (float)MENU_TEXT_SIZE) * 0.5f;
+            draw_tex(&s_tc_pause_items[i],
+                     layout.item_x + (layout.item_w - tw) * 0.5f,
+                     text_y,
+                     (float)MENU_TEXT_SIZE);
         }
     }
 
     if (s_tc_pause_hint.tex) {
         float tw = (float)MENU_HINT_SIZE * (float)s_tc_pause_hint.w / (float)s_tc_pause_hint.h;
-        draw_tex(&s_tc_pause_hint, px + (PAUSE_MENU_PANEL_W - tw) * 0.5f, py + PAUSE_MENU_PANEL_H - 28.0f, (float)MENU_HINT_SIZE);
+        draw_tex(&s_tc_pause_hint,
+                 layout.panel_x + (layout.panel_w - tw) * 0.5f,
+                 layout.panel_y + layout.panel_h - 28.0f,
+                 (float)MENU_HINT_SIZE);
     }
 }
 
@@ -366,12 +422,16 @@ void ui_init(void) {
     glUseProgram(0);
 
     TTF_Init();
-    s_font = find_font(FONT_SIZE);
-    s_menu_font = find_font(MENU_TEXT_SIZE);
-    s_menu_title_font = find_font(MENU_TITLE_SIZE);
+    s_font = ui_theme_open_font(FONT_SIZE);
+    s_build_item_font = ui_theme_open_font(BUILD_ITEM_FONT_SIZE);
+    s_menu_font = ui_theme_open_font(MENU_TEXT_SIZE);
+    s_menu_title_font = ui_theme_open_font(MENU_TITLE_SIZE);
     if (!s_font) fprintf(stderr, "[UI] no font found\n");
+    if (!s_build_item_font) s_build_item_font = s_font;
     if (!s_menu_font) s_menu_font = s_font;
     if (!s_menu_title_font) s_menu_title_font = s_menu_font;
+    if (s_menu_title_font && s_menu_title_font != s_menu_font && s_menu_title_font != s_font)
+        TTF_SetFontStyle(s_menu_title_font, TTF_STYLE_BOLD);
 }
 
 void ui_set_pause_menu(int visible, int selected, int vsync_enabled)
@@ -530,12 +590,15 @@ void ui_shutdown(void) {
     if (s_shader) glDeleteProgram(s_shader);
     if (s_menu_title_font && s_menu_title_font != s_menu_font && s_menu_title_font != s_font)
         TTF_CloseFont(s_menu_title_font);
+    if (s_build_item_font && s_build_item_font != s_font)
+        TTF_CloseFont(s_build_item_font);
     if (s_menu_font && s_menu_font != s_font)
         TTF_CloseFont(s_menu_font);
     if (s_font)   TTF_CloseFont(s_font);
     TTF_Quit();
     s_shader = s_vao = s_vbo = 0;
     s_font = NULL;
+    s_build_item_font = NULL;
     s_menu_font = NULL;
     s_menu_title_font = NULL;
 }
