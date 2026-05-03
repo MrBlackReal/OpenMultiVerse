@@ -30,7 +30,7 @@ cp -r assets/ "${DIST}/"
 # Bundle shared libraries (SDL2, SDL2_ttf, GLEW and their deps)
 echo ">>> Collecting shared libraries via ldd..."
 ldd verse \
-    | grep -v "linux-vdso\|ld-linux\|libGL\|libEGL\|/lib/x86_64" \
+    | grep -v "linux-vdso\|ld-linux\|libc\.so\|libpthread\|libdl\.so\|libm\.so\|librt\.so\|libGL\|libEGL" \
     | awk '{print $3}' \
     | grep "^/" \
     | while read lib; do
