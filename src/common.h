@@ -50,6 +50,7 @@ extern int g_win_h;
 #define TRAIL_MIN_SEGMENT_LEN       2.0e4        /* m */
 #define TRAIL_MAX_SEGMENT_LEN       4.5e8        /* m */
 #define TRAIL_BASE_SEGMENT_LEN      1.0e8        /* m */
+#define TRAIL_SATELLITE_SEGMENT_LEN  1.0e6       /* m */
 #define TRAIL_TARGET_WORLD_LEN     (128.0 * AU)  /* fixed retained trail length */
 #define TRAIL_SATELLITE_WORLD_LEN   (0.3 * AU)
 #define TRAIL_CURVE_ERROR_RATIO     0.22         /* allowed chord error vs segment length */

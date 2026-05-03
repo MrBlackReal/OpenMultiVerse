@@ -529,7 +529,10 @@ static void sample_body_pos(Body *b, const double pos[3]) {
 static double trail_segment_len_for_accel(const Body *b)
 {
     double segment_len = TRAIL_BASE_SEGMENT_LEN;
-    (void)b;
+    int body_idx = (int)(b - g_bodies);
+
+    if (body_idx >= 0 && body_idx < g_nbodies && is_satellite(body_idx))
+        segment_len = TRAIL_SATELLITE_SEGMENT_LEN;
 
     if (segment_len < TRAIL_MIN_SEGMENT_LEN) segment_len = TRAIL_MIN_SEGMENT_LEN;
     if (segment_len > TRAIL_MAX_SEGMENT_LEN) segment_len = TRAIL_MAX_SEGMENT_LEN;
