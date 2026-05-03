@@ -66,6 +66,7 @@ static TextCache s_tc_sim  = {0};
 static TextCache s_tc_fps  = {0};
 static TextCache s_tc_nearest = {0};
 static TextCache s_tc_build_title = {0};
+static TextCache s_tc_build_hint  = {0};
 static TextCache s_tc_build_items[8];
 static TextCache s_tc_pause_title = {0};
 static TextCache s_tc_pause_hint = {0};
@@ -91,12 +92,15 @@ typedef struct {
 
 typedef struct {
     int n;
+    float item_x;         /* x of item body (fixed) */
     float item_w;
     float item_h;
-    float item_active_h;
+    float strip_w;        /* inactive strip width (strip right-edge = item_x) */
+    float strip_active_w; /* active strip width (expands left) */
     float gap;
-    float items_x;
-    float item_y_base;
+    float items_y;        /* y of first item */
+    float title_y;        /* y of "BUILD" title text */
+    float hint_y;         /* y of hint text below panel */
     float panel_x;
     float panel_y;
     float panel_w;
@@ -130,24 +134,30 @@ static PauseMenuLayout pause_menu_layout(float W, float H)
 
 static BuildBarLayout build_bar_layout(float W)
 {
+    (void)W;
     BuildBarLayout layout;
     layout.n = build_preset_count();
     if (layout.n > 8) layout.n = 8;
-    layout.item_w = 112.0f;
-    layout.item_h = 48.0f;
-    layout.item_active_h = 56.0f;
-    layout.gap = 8.0f;
-    layout.item_y_base = (float)WIN_H - 88.0f + 24.0f;
 
-    {
-        float total_w = layout.n * layout.item_w + (layout.n - 1) * layout.gap;
-        float panel_pad = (float)WIN_H - (layout.item_y_base + layout.item_h);
-        layout.items_x = (W - total_w) * 0.5f;
-        layout.panel_x = layout.items_x - panel_pad;
-        layout.panel_y = layout.item_y_base - panel_pad;
-        layout.panel_w = total_w + panel_pad * 2.0f;
-        layout.panel_h = (float)WIN_H - layout.panel_y;
-    }
+    const float PANEL_PAD    = 12.0f;
+    const float LEFT_MARGIN  = PANEL_PAD;
+    const float TITLE_AREA_H = 72.0f;
+    const float BOTTOM_AREA_H = 42.0f;
+    layout.strip_w        = 8.0f;
+    layout.strip_active_w = 14.0f;
+    layout.item_h         = PAUSE_MENU_ITEM_H;
+    layout.item_w         = 112.0f;
+    layout.gap            = PAUSE_MENU_ITEM_GAP;
+    layout.panel_x        = LEFT_MARGIN;
+    layout.item_x         = layout.panel_x + PANEL_PAD + layout.strip_w;
+    layout.panel_w        = PANEL_PAD + layout.strip_w + layout.item_w + PANEL_PAD;
+
+    float total_h    = layout.n * layout.item_h + (layout.n - 1) * layout.gap;
+    layout.panel_h   = TITLE_AREA_H + total_h + BOTTOM_AREA_H;
+    layout.panel_y   = ((float)WIN_H - layout.panel_h) * 0.5f;
+    layout.items_y   = layout.panel_y + TITLE_AREA_H;
+    layout.title_y   = layout.panel_y + 24.0f;
+    layout.hint_y    = layout.panel_y + layout.panel_h - 28.0f;
 
     return layout;
 }
@@ -296,16 +306,28 @@ static void draw_build_bar(float W)
 {
     if (!g_build_mode) return;
 
-    const float PAD = 14.0f;
     BuildBarLayout layout = build_bar_layout(W);
 
-    SDL_Color white = {255, 255, 255, 230};
-    update_text(&s_tc_build_title,
-                g_build_tab_held ? "BUILD MODE  |  scroll to select" : "BUILD MODE  |  hold TAB and scroll",
-                white);
-    draw_tex(&s_tc_build_title, PAD, (float)WIN_H - (FONT_SIZE + 6.0f), (float)FONT_SIZE);
+    SDL_Color title_col = {255, 255, 255, 235};
+    SDL_Color hint_col  = {255, 255, 255, 170};
+    SDL_Color item_col  = {0, 0, 0, 255};
+
+    update_text_with_font(&s_tc_build_title, s_menu_title_font, "BUILD", title_col);
+    update_text_with_font(&s_tc_build_hint, s_font,
+                          g_build_tab_held ? "scroll to select" : "hold TAB and scroll",
+                          hint_col);
+
     draw_rect(layout.panel_x, layout.panel_y, layout.panel_w, layout.panel_h,
               UI_ACCENT_R, UI_ACCENT_G, UI_ACCENT_B, 1.0f);
+    draw_rect(layout.panel_x, layout.panel_y, layout.panel_w, 5.0f, 1.0f, 1.0f, 1.0f, 1.0f);
+
+    if (s_tc_build_title.tex) {
+        float tw = (float)MENU_TITLE_SIZE * (float)s_tc_build_title.w / (float)s_tc_build_title.h;
+        draw_tex(&s_tc_build_title,
+                 layout.panel_x + (layout.panel_w - tw) * 0.5f,
+                 layout.title_y,
+                 (float)MENU_TITLE_SIZE);
+    }
 
     int selected = build_selected_index();
 
@@ -313,24 +335,33 @@ static void draw_build_bar(float W)
         const BuildPreset *p = build_preset_at(i);
         if (!p) continue;
         int active = (i == selected);
-        float item_h = active ? layout.item_active_h : layout.item_h;
-        float item_y = layout.item_y_base + (layout.item_h - item_h);
-        float item_x = layout.items_x + (layout.item_w + layout.gap) * (float)i;
-        float strip_h = active ? 8.0f : 6.0f;
-        draw_rect(item_x, item_y, layout.item_w, item_h,
-                  1.0f, 1.0f, 1.0f,
-                  active ? 1.0f : 0.84f);
-        draw_rect(item_x, item_y, layout.item_w, strip_h, p->col[0], p->col[1], p->col[2], 1.0f);
-        SDL_Color item_col = {0, 0, 0, 255};
+        float item_y   = layout.items_y + (layout.item_h + layout.gap) * (float)i;
+        float sw      = active ? layout.strip_active_w : layout.strip_w;
+        float strip_x = layout.item_x - layout.strip_w;
+
+        draw_rect(layout.item_x, item_y, layout.item_w, layout.item_h,
+                  1.0f, 1.0f, 1.0f, active ? 1.0f : 0.72f);
+        draw_rect(strip_x, item_y, sw, layout.item_h,
+                  p->col[0], p->col[1], p->col[2], 1.0f);
+
         update_text_with_font(&s_tc_build_items[i], s_build_item_font ? s_build_item_font : s_font,
                               p->name, item_col);
         if (s_tc_build_items[i].tex) {
-            float tw = (float)BUILD_ITEM_FONT_SIZE * (float)s_tc_build_items[i].w / (float)s_tc_build_items[i].h;
-            float text_y = item_y + strip_h + (item_h - strip_h - (float)BUILD_ITEM_FONT_SIZE) * 0.5f;
+            float tw     = (float)BUILD_ITEM_FONT_SIZE * (float)s_tc_build_items[i].w / (float)s_tc_build_items[i].h;
+            float text_y = item_y + (layout.item_h - (float)BUILD_ITEM_FONT_SIZE) * 0.5f;
             draw_tex(&s_tc_build_items[i],
-                     item_x + (layout.item_w - tw) * 0.5f, text_y,
+                     layout.item_x + (layout.item_w - tw) * 0.5f,
+                     text_y,
                      (float)BUILD_ITEM_FONT_SIZE);
         }
+    }
+
+    if (s_tc_build_hint.tex) {
+        float tw = (float)FONT_SIZE * (float)s_tc_build_hint.w / (float)s_tc_build_hint.h;
+        draw_tex(&s_tc_build_hint,
+                 layout.panel_x + (layout.panel_w - tw) * 0.5f,
+                 layout.hint_y,
+                 (float)FONT_SIZE);
     }
 }
 
@@ -374,7 +405,7 @@ static void draw_pause_menu(float W, float H)
         float item_y = layout.first_item_y + i * (layout.item_h + layout.gap) + (layout.item_h - item_h);
 
         draw_rect(layout.item_x, item_y, layout.item_w, item_h, 1.0f, 1.0f, 1.0f,
-                  active ? 1.0f : 0.84f);
+                  active ? 1.0f : 0.72f);
 
         if (s_tc_pause_items[i].tex) {
             float tw = (float)MENU_TEXT_SIZE * (float)s_tc_pause_items[i].w / (float)s_tc_pause_items[i].h;
