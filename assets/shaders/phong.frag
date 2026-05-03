@@ -43,6 +43,7 @@ uniform vec2  u_screen;
 uniform float u_rotation;     /* body rotation angle, radians           */
 uniform float u_obliquity;    /* axial tilt, radians (0 = upright)      */
 uniform int   u_planet_type;  /* 0-9, selects colour recipe             */
+uniform float u_star_heat;    /* 0..1 surface heating from star approach */
 uniform int   u_impact_count;
 uniform vec3  u_impact_dir[32];
 uniform vec3  u_impact_tangent1[32];
@@ -319,7 +320,46 @@ void main() {
      * impact loop (kind 4 dampens edge/fringe emission on the lit hemisphere
      * to avoid a transparent-looking orange halo when viewed from the sun). */
     vec3  L    = normalize(u_sun_rel - hit_rel);
+    float sun_dot = dot(N, L);
     float diff = max(dot(N, L), 0.0);
+
+    if (u_star_heat > 0.001) {
+        float star_heat = clamp(u_star_heat, 0.0, 1.0);
+        float day_side = smoothstep(-0.12, 0.42, sun_dot);
+        float hot_side = pow(max(sun_dot, 0.0), 0.72);
+        float view_mu = max(dot(N, -ray_dir), 0.0);
+        float rim = pow(1.0 - view_mu, 2.4);
+        float heat_noise = fbm(NL * 7.4 + vec3(u_rotation * 0.35, star_heat * 4.0, -u_rotation * 0.22));
+        float heat_noise2 = fbm(NL * 13.0 + vec3(2.7, -u_rotation * 0.18, 4.1 + star_heat * 3.3));
+        float crack_mix = heat_noise * 0.64 + heat_noise2 * 0.36;
+        float warm_band = day_side * (0.32 + 0.68 * star_heat);
+        float crust = smoothstep(0.28 - star_heat * 0.10,
+                                 0.96 - star_heat * 0.18,
+                                 crack_mix + hot_side * (0.16 + star_heat * 0.26));
+        float molten_gate = smoothstep(0.46, 0.98, star_heat);
+        float molten = crust * hot_side * molten_gate;
+        float lava_pool = smoothstep(0.62, 1.0, star_heat)
+                        * pow(max(sun_dot, 0.0), 1.35)
+                        * smoothstep(0.50, 0.92, crack_mix + star_heat * 0.22);
+        float haze = smoothstep(0.36, 1.0, star_heat) * day_side * rim;
+        vec3 haze_col = mix(vec3(0.55, 0.08, 0.03),
+                            vec3(0.92, 0.18, 0.06),
+                            0.35 + star_heat * 0.45);
+        vec3 scorch = mix(base_surface * vec3(0.42, 0.24, 0.14),
+                          base_surface * vec3(0.86, 0.38, 0.16),
+                          0.35 + star_heat * 0.45);
+        vec3 crust_col = mix(scorch, lava_color(0.22 + star_heat * 0.38), 0.24 + crust * 0.34);
+        vec3 molten_col = lava_color(clamp(0.34 + star_heat * 0.58 + crack_mix * 0.16, 0.0, 1.0));
+        vec3 white_hot = mix(molten_col, vec3(1.0, 0.84, 0.42), smoothstep(0.82, 1.0, star_heat) * hot_side);
+
+        surface = mix(surface, scorch, warm_band * 0.42);
+        surface = mix(surface, crust_col, warm_band * (0.22 + star_heat * 0.44));
+        surface = mix(surface, molten_col, molten * (0.26 + star_heat * 0.48));
+        surface = mix(surface, white_hot, lava_pool * 0.55);
+        lava_emit += haze_col * haze * (0.18 + star_heat * 0.34);
+        lava_emit += molten_col * molten * (0.22 + star_heat * 1.05);
+        lava_emit += white_hot * lava_pool * (0.40 + star_heat * 1.45);
+    }
 
     /* Pre-pass: accumulate kind-4 (intersection) coverage so craters (kind 5)
      * don't overwrite the live collision bloom regardless of slot order. */

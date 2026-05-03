@@ -41,6 +41,7 @@
 #define MAX_MERGES 16
 #define MAX_PERSISTENT_SCARS 128
 #define MAX_COLLISION_PARTICLES 768
+#define STAR_HEAT_START_SCALE 4.0
 
 typedef struct {
     int active;
@@ -121,8 +122,12 @@ static int s_pos_before_valid = 0;
 
 static int body_is_merge_target(int idx);
 static int body_is_merge_impactor(int idx);
+static int body_is_in_merge(int idx);
 static double current_contact_radius(int body_idx);
 static int body_is_primary(int idx);
+static void impact_dir_for_pair(int target, int impactor, double dt, double out_dir[3]);
+static int swept_spheres_collide(int a, int b, double dt,
+                                 double *out_speed, double *out_hit_t);
 
 static void mark_system_dirty(int root, double hot_duration)
 {
@@ -196,6 +201,26 @@ int collision_system_maybe_has_encounter(int root, double dt)
                 double tau = gap / vr;
                 if (tau <= dt) return 1;
             }
+        }
+    }
+
+    if (g_bodies[root].is_star) {
+        for (int i = 0; i < g_nbodies; i++) {
+            double rx, ry, rz, dist, glow_dist;
+            if (i == root) continue;
+            if (!g_bodies[i].alive || g_bodies[i].is_star) continue;
+            if (body_root_star(i) != root) continue;
+            if (body_is_in_merge(i)) continue;
+
+            rx = g_bodies[i].pos[0] - g_bodies[root].pos[0];
+            ry = g_bodies[i].pos[1] - g_bodies[root].pos[1];
+            rz = g_bodies[i].pos[2] - g_bodies[root].pos[2];
+            dist = sqrt(rx*rx + ry*ry + rz*rz);
+            glow_dist = g_bodies[root].radius * STAR_HEAT_START_SCALE
+                      + current_contact_radius(i);
+
+            if (dist <= glow_dist) return 1;
+            if (swept_spheres_collide(root, i, dt, NULL, NULL)) return 1;
         }
     }
     return 0;
@@ -590,6 +615,62 @@ static double current_contact_radius(int body_idx)
 {
     if (body_idx < 0 || body_idx >= g_nbodies) return 0.0;
     return current_visual_radius(body_idx, g_bodies[body_idx].radius);
+}
+
+static int nearest_star_to_body(int body_idx)
+{
+    int best = -1;
+    double best_d2 = 1e300;
+
+    if (body_idx < 0 || body_idx >= g_nbodies) return -1;
+    for (int i = 0; i < g_nbodies; i++) {
+        double dx, dy, dz, d2;
+        if (i == body_idx) continue;
+        if (!g_bodies[i].alive || !g_bodies[i].is_star) continue;
+
+        dx = g_bodies[i].pos[0] - g_bodies[body_idx].pos[0];
+        dy = g_bodies[i].pos[1] - g_bodies[body_idx].pos[1];
+        dz = g_bodies[i].pos[2] - g_bodies[body_idx].pos[2];
+        d2 = dx*dx + dy*dy + dz*dz;
+        if (d2 < best_d2) {
+            best_d2 = d2;
+            best = i;
+        }
+    }
+
+    return best;
+}
+
+static double star_heat_factor_for_body(int body_idx, int *out_star_idx)
+{
+    int star_idx;
+    double dx, dy, dz, dist;
+    double crash_dist, heat_start, t;
+
+    if (out_star_idx) *out_star_idx = -1;
+    if (body_idx < 0 || body_idx >= g_nbodies) return 0.0;
+    if (!g_bodies[body_idx].alive || g_bodies[body_idx].is_star) return 0.0;
+
+    star_idx = nearest_star_to_body(body_idx);
+    if (star_idx < 0) return 0.0;
+
+    dx = g_bodies[star_idx].pos[0] - g_bodies[body_idx].pos[0];
+    dy = g_bodies[star_idx].pos[1] - g_bodies[body_idx].pos[1];
+    dz = g_bodies[star_idx].pos[2] - g_bodies[body_idx].pos[2];
+    dist = sqrt(dx*dx + dy*dy + dz*dz);
+    crash_dist = g_bodies[star_idx].radius + current_contact_radius(body_idx);
+    heat_start = g_bodies[star_idx].radius * STAR_HEAT_START_SCALE
+               + current_contact_radius(body_idx);
+
+    if (out_star_idx) *out_star_idx = star_idx;
+    if (dist >= heat_start) return 0.0;
+    if (dist <= crash_dist) return 1.0;
+    if (heat_start <= crash_dist + 1.0) return 1.0;
+
+    t = (heat_start - dist) / (heat_start - crash_dist);
+    if (t < 0.0) t = 0.0;
+    if (t > 1.0) t = 1.0;
+    return t * t * (3.0 - 2.0 * t);
 }
 
 /* ── § PARTICLES — intersection ring geometry, particle spawning ─────── */
@@ -1004,6 +1085,7 @@ static void finalize_absorb_body(int target, int impactor, double rel_speed,
 {
     Body *a = &g_bodies[target];
     Body *b = &g_bodies[impactor];
+    const char *outcome_name = "absorb";
 
     for (int i = 0; i < g_nbodies; i++) {
         if (!g_bodies[i].alive || g_bodies[i].parent != impactor) continue;
@@ -1021,11 +1103,48 @@ static void finalize_absorb_body(int target, int impactor, double rel_speed,
     labels_add_body(target);
     labels_remove_body(impactor);
     mark_system_dirty(body_root_star(target), SYSTEM_HOT_DURATION);
+    if (outcome == COLLISION_VIS_MERGE) outcome_name = "merge";
+    else if (outcome == COLLISION_VIS_MAJOR) outcome_name = "major";
+    else if (outcome == COLLISION_VIS_CRATER) outcome_name = "crater";
     fprintf(stderr, "[collision] %s absorbed %s (%.0f m/s, %s, %.0f->%.0f km)\n",
-            a->name, b->name, rel_speed,
-            outcome == COLLISION_VIS_MERGE ? "merge" :
-            outcome == COLLISION_VIS_MAJOR ? "major" : "crater",
+            a->name, b->name, rel_speed, outcome_name,
             old_radius / 1000.0, a->radius / 1000.0);
+}
+
+static void absorb_body_into_star(int star_idx, int body_idx, double rel_speed,
+                                  double collision_dt, double frame_dt)
+{
+    Body *star = &g_bodies[star_idx];
+    Body *body = &g_bodies[body_idx];
+    double old_radius;
+    double dir[3];
+    double touch_pos[3];
+    double total;
+
+    if (!star->alive || !body->alive) return;
+    if (!star->is_star || body->is_star) return;
+    if (body_is_in_merge(body_idx)) return;
+
+    old_radius = star->radius;
+    impact_dir_for_pair(star_idx, body_idx, collision_dt, dir);
+    touch_pos[0] = star->pos[0] + dir[0] * (old_radius + body->radius);
+    touch_pos[1] = star->pos[1] + dir[1] * (old_radius + body->radius);
+    touch_pos[2] = star->pos[2] + dir[2] * (old_radius + body->radius);
+
+    if (body->trail)
+        trails_cut_body_at_time(body_idx, collision_dt, frame_dt, touch_pos);
+    body->trail_emitting = 0;
+    body->trail_accum = 0.0;
+
+    total = star->mass + body->mass;
+    if (total > 0.0) {
+        star->vel[0] = (star->vel[0] * star->mass + body->vel[0] * body->mass) / total;
+        star->vel[1] = (star->vel[1] * star->mass + body->vel[1] * body->mass) / total;
+        star->vel[2] = (star->vel[2] * star->mass + body->vel[2] * body->mass) / total;
+        star->mass = total;
+    }
+
+    finalize_absorb_body(star_idx, body_idx, rel_speed, 0, old_radius);
 }
 
 static void update_merge_events(double dt)
@@ -1726,6 +1845,23 @@ void collision_step_system(int root, double dt)
             if (impactor == a) break;
         }
     }
+
+    if (g_bodies[root].is_star) {
+        for (int i = 0; i < g_nbodies; i++) {
+            double speed = 0.0;
+            double hit_t = 0.0;
+
+            if (i == root) continue;
+            if (!g_bodies[i].alive || g_bodies[i].is_star) continue;
+            if (resolved[i] || body_root_star(i) != root) continue;
+            if (body_is_in_merge(i)) continue;
+            if (!swept_spheres_collide(root, i, dt, &speed, &hit_t))
+                continue;
+
+            absorb_body_into_star(root, i, speed, hit_t, dt);
+            resolved[i] = 1;
+        }
+    }
 }
 
 void collision_step(double dt)
@@ -1991,6 +2127,15 @@ void collision_body_heat_glow(int body_idx, float out_color[3],
     float best_heat = 0.0f;
     int has_merge = 0;
     double merge_growth = active_merge_glow_progress(body_idx);
+    float impact_color[3] = {0.0f, 0.0f, 0.0f};
+    float impact_intensity = 0.0f;
+    float impact_scale = 1.0f;
+    float star_color[3] = {0.0f, 0.0f, 0.0f};
+    float star_intensity = 0.0f;
+    float star_scale = 1.0f;
+    float sum_w;
+    int star_idx = -1;
+    double star_heat;
 
     if (out_color) {
         out_color[0] = 0.0f;
@@ -2017,23 +2162,52 @@ void collision_body_heat_glow(int body_idx, float out_color[3],
             has_merge = 1;
     }
 
-    if (best_heat <= 0.01f) return;
-    best_heat = (best_heat - 0.01f) / 0.99f;
-    if (best_heat < 0.0f) best_heat = 0.0f;
-    if (best_heat > 1.0f) best_heat = 1.0f;
-    best_heat = best_heat * best_heat * (3.0f - 2.0f * best_heat);
-    if (merge_growth > 0.0) best_heat *= (float)merge_growth;
+    if (best_heat > 0.01f) {
+        best_heat = (best_heat - 0.01f) / 0.99f;
+        if (best_heat < 0.0f) best_heat = 0.0f;
+        if (best_heat > 1.0f) best_heat = 1.0f;
+        best_heat = best_heat * best_heat * (3.0f - 2.0f * best_heat);
+        if (merge_growth > 0.0) best_heat *= (float)merge_growth;
 
+        impact_color[0] = 0.90f;
+        impact_color[1] = has_merge ? 0.34f : 0.26f;
+        impact_color[2] = 0.08f;
+        impact_intensity = best_heat * (has_merge ? 0.42f : 0.24f);
+        impact_scale = has_merge ? (1.12f + best_heat * 0.24f)
+                                 : (1.05f + best_heat * 0.10f);
+    }
+
+    star_heat = star_heat_factor_for_body(body_idx, &star_idx);
+    if (star_heat > 0.0 && star_idx >= 0) {
+        float t = (float)star_heat;
+        star_color[0] = 1.00f;
+        star_color[1] = 0.22f + 0.18f * g_bodies[star_idx].col[1];
+        star_color[2] = 0.05f + 0.06f * g_bodies[star_idx].col[2];
+        star_intensity = 0.14f + powf(t, 1.6f) * 0.95f;
+        star_scale = 1.08f + t * 0.34f;
+    }
+
+    if (impact_intensity <= 0.0f && star_intensity <= 0.0f) return;
+
+    sum_w = impact_intensity + star_intensity;
+    if (sum_w <= 1e-6f) sum_w = 1.0f;
     if (out_color) {
-        out_color[0] = 0.90f;
-        out_color[1] = has_merge ? 0.34f : 0.26f;
-        out_color[2] = 0.08f;
+        out_color[0] = (impact_color[0] * impact_intensity + star_color[0] * star_intensity) / sum_w;
+        out_color[1] = (impact_color[1] * impact_intensity + star_color[1] * star_intensity) / sum_w;
+        out_color[2] = (impact_color[2] * impact_intensity + star_color[2] * star_intensity) / sum_w;
     }
     if (out_intensity)
-        *out_intensity = best_heat * (has_merge ? 0.42f : 0.24f);
+        *out_intensity = impact_intensity + star_intensity;
     if (out_scale)
-        *out_scale = has_merge ? (1.12f + best_heat * 0.24f)
-                               : (1.05f + best_heat * 0.10f);
+        *out_scale = impact_scale > star_scale ? impact_scale : star_scale;
+}
+
+float collision_body_star_heat(int body_idx)
+{
+    double heat = star_heat_factor_for_body(body_idx, NULL);
+    if (heat < 0.0) heat = 0.0;
+    if (heat > 1.0) heat = 1.0;
+    return (float)heat;
 }
 
 int collision_body_has_active_merge(int body_idx)

@@ -48,6 +48,7 @@ static GLint  s_sp_sun_world   = -1;
 static GLint  s_sp_rotation    = -1;
 static GLint  s_sp_obliquity   = -1;
 static GLint  s_sp_ptype       = -1;
+static GLint  s_sp_star_heat   = -1;
 static GLint  s_sp_impact_count = -1;
 static GLint  s_sp_impact_dir   = -1;
 static GLint  s_sp_impact_t1    = -1;
@@ -402,6 +403,7 @@ void render_init(void) {
     s_sp_rotation  = glGetUniformLocation(s_sphere_shader, "u_rotation");
     s_sp_obliquity = glGetUniformLocation(s_sphere_shader, "u_obliquity");
     s_sp_ptype     = glGetUniformLocation(s_sphere_shader, "u_planet_type");
+    s_sp_star_heat = glGetUniformLocation(s_sphere_shader, "u_star_heat");
     s_sp_impact_count = glGetUniformLocation(s_sphere_shader, "u_impact_count");
     s_sp_impact_dir   = glGetUniformLocation(s_sphere_shader, "u_impact_dir[0]");
     s_sp_impact_t1    = glGetUniformLocation(s_sphere_shader, "u_impact_tangent1[0]");
@@ -923,6 +925,7 @@ void render_frame(const float view[16], const float proj[16],
         glUniform1f(s_sp_rotation,  (float)fmod(b->rotation_angle, 2.0 * PI));
         glUniform1f(s_sp_obliquity, (float)(b->obliquity * (PI / 180.0)));
         glUniform1i(s_sp_ptype,     get_planet_type(b->name));
+        glUniform1f(s_sp_star_heat, collision_body_star_heat(i));
         {
             CollisionSpot spots[COLLISION_MAX_SPOTS];
             float dirs[COLLISION_MAX_SPOTS * 3] = {0};
