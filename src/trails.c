@@ -6,11 +6,14 @@
  * then uploaded here for rendering.
  *
  * Render strategy:
- *   - Trail positions are stored camera-relative in the VBO (world − cam),
- *     computed in double precision on the CPU before converting to float.
- *     This eliminates float cancellation jitter that arises when subtracting
- *     two large absolute AU-scale positions of similar magnitude.
- *   - Dirty check: re-upload when new samples were recorded OR the camera moved.
+ *   - VBO stores positions relative to a per-body reference point (the body's
+ *     world position at the time of last upload). This keeps VBO values small,
+ *     preserving float precision for the trail shape.
+ *   - Camera offset is applied in the shader via u_body_offset = ref - cam_pos,
+ *     computed CPU-side in double precision to avoid float cancellation jitter.
+ *   - Dirty check: re-upload ONLY when new trail samples were recorded.
+ *     Camera movement no longer triggers VBO re-uploads — only a cheap
+ *     glUniform3fv call per body per frame is needed instead.
  *   - The scratch buffer linearises the circular buffer (oldest→newest)
  *     and appends the live planet position as the final vertex.
  */
@@ -30,13 +33,14 @@ static int     s_n   = 0;
 static int *s_last_head  = NULL;
 static int *s_last_count = NULL;
 
-static GLuint s_shader    = 0;
-static GLint  s_loc_vp    = -1;
-static GLint  s_loc_color = -1;
+static GLuint s_shader          = 0;
+static GLint  s_loc_vp          = -1;
+static GLint  s_loc_color       = -1;
+static GLint  s_loc_body_offset = -1;
 
-/* Last camera position — used to detect when a re-upload is needed even if no
- * new trail samples were recorded (camera moved → camera-relative VBO is stale) */
-static double s_last_cam[3] = {0.0, 0.0, 0.0};
+/* Per-body reference position (world units) used as VBO origin.
+ * Stored at the time of each VBO upload; valid until the next upload. */
+static double (*s_ref_pos)[3] = NULL;
 
 /* Scratch: linearised trail + live position, interleaved xyz + alpha. */
 static float s_scratch[(TRAIL_LEN + 1) * 4];
@@ -49,14 +53,16 @@ void trails_gl_init(void)
                               "assets/shaders/solid.frag");
     if (!s_shader) return;
 
-    s_loc_vp    = glGetUniformLocation(s_shader, "u_vp");
-    s_loc_color = glGetUniformLocation(s_shader, "u_color");
+    s_loc_vp          = glGetUniformLocation(s_shader, "u_vp");
+    s_loc_color       = glGetUniformLocation(s_shader, "u_color");
+    s_loc_body_offset = glGetUniformLocation(s_shader, "u_body_offset");
     s_n          = g_nbodies;
     s_vao        = (GLuint*)malloc(s_n * sizeof(GLuint));
     s_vbo        = (GLuint*)malloc(s_n * sizeof(GLuint));
     s_last_head  = (int*)   malloc(s_n * sizeof(int));
     s_last_count = (int*)   malloc(s_n * sizeof(int));
-    if (!s_vao || !s_vbo || !s_last_head || !s_last_count) return;
+    s_ref_pos    = (double(*)[3])calloc(s_n, sizeof(*s_ref_pos));
+    if (!s_vao || !s_vbo || !s_last_head || !s_last_count || !s_ref_pos) return;
 
     for (int i = 0; i < s_n; i++) {
         s_last_head[i]  = 0;
@@ -85,8 +91,9 @@ void trails_add_body(int body_idx)
     GLuint *new_vbo = (GLuint*)malloc(new_n * sizeof(GLuint));
     int *new_head = (int*)malloc(new_n * sizeof(int));
     int *new_count = (int*)malloc(new_n * sizeof(int));
-    if (!new_vao || !new_vbo || !new_head || !new_count) {
-        free(new_vao); free(new_vbo); free(new_head); free(new_count);
+    double (*new_ref)[3] = (double(*)[3])calloc(new_n, sizeof(*new_ref));
+    if (!new_vao || !new_vbo || !new_head || !new_count || !new_ref) {
+        free(new_vao); free(new_vbo); free(new_head); free(new_count); free(new_ref);
         return;
     }
     if (s_n > 0) {
@@ -94,12 +101,14 @@ void trails_add_body(int body_idx)
         memcpy(new_vbo, s_vbo, s_n * sizeof(GLuint));
         memcpy(new_head, s_last_head, s_n * sizeof(int));
         memcpy(new_count, s_last_count, s_n * sizeof(int));
+        memcpy(new_ref, s_ref_pos, s_n * sizeof(*s_ref_pos));
     }
-    free(s_vao); free(s_vbo); free(s_last_head); free(s_last_count);
+    free(s_vao); free(s_vbo); free(s_last_head); free(s_last_count); free(s_ref_pos);
     s_vao = new_vao;
     s_vbo = new_vbo;
     s_last_head = new_head;
     s_last_count = new_count;
+    s_ref_pos = new_ref;
 
     for (int i = s_n; i < new_n; i++) {
         s_last_head[i] = 0;
@@ -209,13 +218,6 @@ void trails_render(const float vp[16])
     glUseProgram(s_shader);
     glUniformMatrix4fv(s_loc_vp, 1, GL_FALSE, vp);
 
-    /* Camera moved since last frame? If so every trail's VBO must be re-uploaded
-     * because the positions are stored camera-relative (double-precision CPU
-     * subtraction to avoid float cancellation jitter on WASD movement). */
-    const int cam_moved = (g_cam.pos[0] != s_last_cam[0] ||
-                           g_cam.pos[1] != s_last_cam[1] ||
-                           g_cam.pos[2] != s_last_cam[2]);
-
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -232,19 +234,23 @@ void trails_render(const float vp[16])
         glBindVertexArray(s_vao[i]);
         glBindBuffer(GL_ARRAY_BUFFER, s_vbo[i]);
 
-        /* Re-upload when new samples were recorded OR the camera moved.
-         * Positions are stored camera-relative: the double-precision subtraction
-         * (b->trail[idx][x] - g_cam.pos[x]) is done here on the CPU so the
-         * shader only ever receives small residual floats, eliminating the
-         * cancellation jitter that appears when WASD moves the camera. */
-        if (cam_moved || head != s_last_head[i] || count != s_last_count[i]) {
-            /* Linearise circular buffer: oldest → newest, camera-relative.
+        /* Re-upload only when new trail samples were recorded.
+         * VBO stores positions relative to s_ref_pos[i] (the body's world
+         * position at upload time), keeping values small for float precision.
+         * Camera movement is handled cheaply via u_body_offset each frame. */
+        if (head != s_last_head[i] || count != s_last_count[i]) {
+            /* Capture reference point: body's current world position. */
+            s_ref_pos[i][0] = b->pos[0] * RS;
+            s_ref_pos[i][1] = b->pos[1] * RS;
+            s_ref_pos[i][2] = b->pos[2] * RS;
+
+            /* Linearise circular buffer: oldest → newest, ref-relative.
              * Alpha follows cumulative world length, not vertex index. */
             double total_len = b->trail_total_len;
             double cumulative_len = 0.0;
-            int oldest_idx = (head - count + TRAIL_LEN) % TRAIL_LEN;
+            int oldest_idx = (head - count + TRAIL_LEN) & TRAIL_MASK;
             for (int k = 0; k < count; k++) {
-                int idx = (head - count + k + TRAIL_LEN) % TRAIL_LEN;
+                int idx = (head - count + k + TRAIL_LEN) & TRAIL_MASK;
                 float alpha_t;
                 if (idx != oldest_idx && b->trail_seg_len) {
                     cumulative_len += b->trail_seg_len[idx];
@@ -252,10 +258,10 @@ void trails_render(const float vp[16])
                 }
                 if (total_len > 0.0) alpha_t = (float)(cumulative_len / total_len);
                 else alpha_t = (k == count - 1) ? 1.0f : 0.0f;
-                s_scratch[k*4+0] = (float)(b->trail[idx][0] - g_cam.pos[0]);
-                s_scratch[k*4+1] = (float)(b->trail[idx][1] - g_cam.pos[1]);
-                s_scratch[k*4+2] = (float)(b->trail[idx][2] - g_cam.pos[2]);
-                s_scratch[k*4+3] = alpha_t * alpha_t;
+                s_scratch[k*4+0] = (float)(b->trail[idx][0] - s_ref_pos[i][0]);
+                s_scratch[k*4+1] = (float)(b->trail[idx][1] - s_ref_pos[i][1]);
+                s_scratch[k*4+2] = (float)(b->trail[idx][2] - s_ref_pos[i][2]);
+                s_scratch[k*4+3] = alpha_t * sqrtf(alpha_t);
             }
             glBufferSubData(GL_ARRAY_BUFFER, 0,
                             count * 4 * sizeof(float), s_scratch);
@@ -263,15 +269,24 @@ void trails_render(const float vp[16])
             s_last_count[i] = count;
         }
 
+        /* Pass per-body offset = ref_pos - cam_pos, computed in double precision
+         * to avoid float cancellation jitter when the camera is near the body. */
+        float off[3] = {
+            (float)(s_ref_pos[i][0] - g_cam.pos[0]),
+            (float)(s_ref_pos[i][1] - g_cam.pos[1]),
+            (float)(s_ref_pos[i][2] - g_cam.pos[2])
+        };
+        glUniform3fv(s_loc_body_offset, 1, off);
+
         int draw_count;
         if (b->alive && b->trail_emitting) {
             /* Append the live planet position as the final vertex so the
              * trail tip follows the planet every frame without a new sample.
-             * Camera-relative, double-precision subtraction as above. */
+             * Stored ref-relative so it matches the VBO coordinate space. */
             float live[4] = {
-                (float)(b->pos[0] * RS - g_cam.pos[0]),
-                (float)(b->pos[1] * RS - g_cam.pos[1]),
-                (float)(b->pos[2] * RS - g_cam.pos[2]),
+                (float)(b->pos[0] * RS - s_ref_pos[i][0]),
+                (float)(b->pos[1] * RS - s_ref_pos[i][1]),
+                (float)(b->pos[2] * RS - s_ref_pos[i][2]),
                 1.0f
             };
             glBufferSubData(GL_ARRAY_BUFFER,
@@ -286,11 +301,6 @@ void trails_render(const float vp[16])
         glDrawArrays(GL_LINE_STRIP, 0, draw_count);
     }
 
-    /* Record camera position so we can detect movement next frame */
-    s_last_cam[0] = g_cam.pos[0];
-    s_last_cam[1] = g_cam.pos[1];
-    s_last_cam[2] = g_cam.pos[2];
-
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
     glBindVertexArray(0);
@@ -302,6 +312,7 @@ void trails_gl_shutdown(void)
     if (s_vao) { glDeleteVertexArrays(s_n, s_vao);  free(s_vao);      s_vao = NULL; }
     if (s_last_head)  { free(s_last_head);  s_last_head  = NULL; }
     if (s_last_count) { free(s_last_count); s_last_count = NULL; }
+    if (s_ref_pos)    { free(s_ref_pos);    s_ref_pos    = NULL; }
     glDeleteProgram(s_shader);
     s_shader = 0;
     s_n = 0;

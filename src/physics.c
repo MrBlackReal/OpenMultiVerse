@@ -492,7 +492,7 @@ static void sample_body_pos(Body *b, const double pos[3]) {
         target_world_len = TRAIL_SATELLITE_WORLD_LEN;
 
     if (b->trail_count > 0) {
-        int prev_idx = (b->trail_head - 1 + TRAIL_LEN) % TRAIL_LEN;
+        int prev_idx = (b->trail_head - 1 + TRAIL_LEN) & TRAIL_MASK;
         double dx = pos[0] * RS - b->trail[prev_idx][0];
         double dy = pos[1] * RS - b->trail[prev_idx][1];
         double dz = pos[2] * RS - b->trail[prev_idx][2];
@@ -503,13 +503,13 @@ static void sample_body_pos(Body *b, const double pos[3]) {
     b->trail[b->trail_head][1] = pos[1] * RS;
     b->trail[b->trail_head][2] = pos[2] * RS;
     if (b->trail_seg_len) b->trail_seg_len[write_idx] = seg_len;
-    b->trail_head = (b->trail_head + 1) % TRAIL_LEN;
+    b->trail_head = (b->trail_head + 1) & TRAIL_MASK;
     if (b->trail_count < TRAIL_LEN) {
         b->trail_count++;
         b->trail_total_len += seg_len;
     } else {
         int oldest_idx = b->trail_head;
-        int next_oldest_idx = (oldest_idx + 1) % TRAIL_LEN;
+        int next_oldest_idx = (oldest_idx + 1) & TRAIL_MASK;
         if (b->trail_seg_len)
             b->trail_total_len += seg_len - b->trail_seg_len[next_oldest_idx];
         else
@@ -517,8 +517,8 @@ static void sample_body_pos(Body *b, const double pos[3]) {
     }
 
     while (b->trail_count > 2 && b->trail_total_len > target_world_len) {
-        int oldest_idx = (b->trail_head - b->trail_count + TRAIL_LEN) % TRAIL_LEN;
-        int next_oldest_idx = (oldest_idx + 1) % TRAIL_LEN;
+        int oldest_idx = (b->trail_head - b->trail_count + TRAIL_LEN) & TRAIL_MASK;
+        int next_oldest_idx = (oldest_idx + 1) & TRAIL_MASK;
         double drop_len = b->trail_seg_len ? b->trail_seg_len[next_oldest_idx] : 0.0;
         b->trail_total_len -= drop_len;
         if (b->trail_total_len < 0.0) b->trail_total_len = 0.0;
@@ -731,7 +731,7 @@ void trails_cut_body_at_time(int body_idx, double hit_dt, double frame_dt,
     }
 
     if (b->trail_count > 0) {
-        int last_idx = (b->trail_head - 1 + TRAIL_LEN) % TRAIL_LEN;
+        int last_idx = (b->trail_head - 1 + TRAIL_LEN) & TRAIL_MASK;
         dx = b->trail[last_idx][0] - cut_pos[0] * RS;
         dy = b->trail[last_idx][1] - cut_pos[1] * RS;
         dz = b->trail[last_idx][2] - cut_pos[2] * RS;

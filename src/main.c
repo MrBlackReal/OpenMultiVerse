@@ -121,7 +121,7 @@ static int app_init(void) {
         return 0;
     }
 
-    SDL_GL_SetSwapInterval(0);   /* vsync deactivated for debugging purpose - activate for production*/
+    SDL_GL_SetSwapInterval(0);  /* uncapped — no vsync */
 
     /* GLEW */
     glewExperimental = GL_TRUE;
@@ -358,9 +358,9 @@ int main(int argc, char **argv) {
                 physics_respa_begin_system(root, dt_outer);
                 for (int i = 0; i < n_inner; i++) {
                     physics_respa_inner_system(root, dt_inner);
-                    trails_tick_system(root, dt_inner);
                 }
                 physics_respa_end_system(root, dt_outer);
+                trails_tick_system(root, dt_outer);
             }
         }
         physics_advance_time(WARMUP_DT);
@@ -437,9 +437,14 @@ int main(int argc, char **argv) {
                         physics_respa_begin_system(root, dt_outer);
                         for (int i = 0; i < n_inner; i++) {
                             physics_respa_inner_system(root, dt_inner);
-                            trails_tick_system(root, dt_inner);
                         }
                         physics_respa_end_system(root, dt_outer);
+                        /* Trail tick once per outer step instead of every inner step.
+                         * n_inner was typically 50, so this is ~50x fewer calls.
+                         * The Hermite curve over dt_outer correctly captures orbital
+                         * curvature for satellites; planets are flat enough at this
+                         * scale that subdivision terminates immediately. */
+                        trails_tick_system(root, dt_outer);
                         if (local_encounter) {
                             collision_step_system(root, dt_outer);
                         }
