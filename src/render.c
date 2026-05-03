@@ -1363,6 +1363,7 @@ void render_shutdown(void) {
     for (int i = 0; i < 3; i++)
         if (s_build_dist_text[i].tex) glDeleteTextures(1, &s_build_dist_text[i].tex);
     if (s_build_font) TTF_CloseFont(s_build_font);
+    TTF_Quit();
     glDeleteProgram(s_sphere_shader);
     glDeleteProgram(s_atm_shader);
     glDeleteProgram(s_dot_shader);

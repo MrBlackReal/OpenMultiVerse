@@ -131,6 +131,22 @@ static void mark_system_dirty(int root, double hot_duration)
     if (hot_duration > s_system_hot[root]) s_system_hot[root] = hot_duration;
 }
 
+void collision_reset(void)
+{
+    memset(s_impacts, 0, sizeof(s_impacts));
+    memset(s_perm_scars, 0, sizeof(s_perm_scars));
+    memset(s_radius_fx, 0, sizeof(s_radius_fx));
+    memset(s_merges, 0, sizeof(s_merges));
+    memset(s_particles, 0, sizeof(s_particles));
+    memset(s_pair_next, 0, sizeof(s_pair_next));
+    memset(s_system_dirty, 0, sizeof(s_system_dirty));
+    memset(s_system_hot, 0, sizeof(s_system_hot));
+    memset(s_pos_before, 0, sizeof(s_pos_before));
+    s_particle_rng = 0x1234abcdu;
+    s_perm_scar_stamp = 1u;
+    s_pos_before_valid = 0;
+}
+
 void collision_snapshot_positions(void)
 {
     int n = g_nbodies < MAX_BODIES ? g_nbodies : MAX_BODIES;

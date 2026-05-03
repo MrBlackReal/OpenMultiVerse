@@ -31,6 +31,7 @@ typedef struct {
 } CollisionParticle;
 
 void collision_snapshot_positions(void);
+void collision_reset(void);
 void collision_step(double dt);
 int  collision_system_maybe_has_encounter(int root, double dt);
 void collision_step_system(int root, double dt);

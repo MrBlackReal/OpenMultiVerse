@@ -155,7 +155,11 @@ static double random_rotation_rate(BuildVisualType type)
 
 void build_init(void)
 {
+    g_build_mode = 0;
+    g_build_tab_held = 0;
     s_selected = 0;
+    s_prev_paused = 0;
+    s_place_serial = 1;
     s_build_rng = 0x51f15eedu;
 }
 

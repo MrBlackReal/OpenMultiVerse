@@ -23,6 +23,15 @@
 #define BAR_TOP       12.0f   /* distance from top of screen        */
 #define TEXT_GAP      6.0f    /* gap between bar bottom and text    */
 #define FONT_SIZE     14
+#define MENU_TITLE_SIZE 20
+#define MENU_TEXT_SIZE  18
+#define MENU_HINT_SIZE  14
+#define PAUSE_MENU_PANEL_W 360.0f
+#define PAUSE_MENU_PANEL_H 312.0f
+#define PAUSE_MENU_ITEM_W (PAUSE_MENU_PANEL_W - 36.0f)
+#define PAUSE_MENU_ITEM_H 42.0f
+#define PAUSE_MENU_ITEM_ACTIVE_H 50.0f
+#define PAUSE_MENU_ITEM_GAP 10.0f
 
 /* Camera speed range (AU / real-second) */
 #define CAM_MIN       0.00001f
@@ -39,6 +48,8 @@ static GLint  s_loc_use_tex = -1;
 static GLint  s_loc_tex     = -1;
 
 static TTF_Font *s_font = NULL;
+static TTF_Font *s_menu_font = NULL;
+static TTF_Font *s_menu_title_font = NULL;
 
 /* ------------------------------------------------------------------ text cache */
 typedef struct {
@@ -53,6 +64,13 @@ static TextCache s_tc_fps  = {0};
 static TextCache s_tc_nearest = {0};
 static TextCache s_tc_build_title = {0};
 static TextCache s_tc_build_items[8];
+static TextCache s_tc_pause_title = {0};
+static TextCache s_tc_pause_hint = {0};
+static TextCache s_tc_pause_items[4];
+
+static int s_pause_menu_visible = 0;
+static int s_pause_menu_selected = 0;
+static int s_pause_menu_vsync = 0;
 
 /* ------------------------------------------------------------------ FPS smoothing */
 /* Exponential moving average over ~30 frames, updated every UI frame.
@@ -96,7 +114,9 @@ static GLuint surf_to_tex(SDL_Surface *surf, int *w, int *h) {
 }
 
 /* Re-render text texture only when the string changes */
-static void update_text(TextCache *tc, const char *str, SDL_Color col) {
+static void update_text_with_font(TextCache *tc, TTF_Font *font,
+                                  const char *str, SDL_Color col) {
+    if (!font) return;
     if (strcmp(tc->str, str) == 0 &&
         tc->col.r == col.r && tc->col.g == col.g &&
         tc->col.b == col.b && tc->col.a == col.a) return;
@@ -104,8 +124,29 @@ static void update_text(TextCache *tc, const char *str, SDL_Color col) {
     tc->str[63] = '\0';
     tc->col = col;
     if (tc->tex) { glDeleteTextures(1, &tc->tex); tc->tex = 0; }
-    SDL_Surface *surf = TTF_RenderText_Blended(s_font, str, col);
+    SDL_Surface *surf = TTF_RenderText_Blended(font, str, col);
     if (surf) tc->tex = surf_to_tex(surf, &tc->w, &tc->h);
+}
+
+static void update_text(TextCache *tc, const char *str, SDL_Color col) {
+    update_text_with_font(tc, s_font, str, col);
+}
+
+static int pause_menu_item_at(float mx, float my)
+{
+    const float px = ((float)WIN_W - PAUSE_MENU_PANEL_W) * 0.5f;
+    const float py = ((float)WIN_H - PAUSE_MENU_PANEL_H) * 0.5f;
+    const float item_x = px + 18.0f;
+    const float first_item_y = py + 72.0f;
+
+    if (mx < item_x || mx > item_x + PAUSE_MENU_ITEM_W) return -1;
+
+    for (int i = 0; i < 4; i++) {
+        float slot_y = first_item_y + (float)i * (PAUSE_MENU_ITEM_H + PAUSE_MENU_ITEM_GAP);
+        if (my >= slot_y && my <= slot_y + PAUSE_MENU_ITEM_ACTIVE_H)
+            return i;
+    }
+    return -1;
 }
 
 static void format_distance(double au, char *buf, size_t n)
@@ -238,6 +279,66 @@ static void draw_build_bar(float W)
     }
 }
 
+static void draw_pause_menu(float W, float H)
+{
+    if (!s_pause_menu_visible) return;
+
+    const float px = (W - PAUSE_MENU_PANEL_W) * 0.5f;
+    const float py = (H - PAUSE_MENU_PANEL_H) * 0.5f;
+    const float item_x = px + 18.0f;
+    const float first_item_y = py + 72.0f;
+    const char *labels[4] = {
+        "Continue",
+        "Reset Universe",
+        s_pause_menu_vsync ? "Deactivate V-Sync" : "Activate V-Sync",
+        "Leave"
+    };
+
+    SDL_Color title_col = {255, 255, 255, 235};
+    SDL_Color item_col = {0, 0, 0, 255};
+    SDL_Color hint_col = {255, 255, 255, 170};
+
+    update_text_with_font(&s_tc_pause_title, s_menu_title_font, "SYSTEM MENU", title_col);
+    update_text_with_font(&s_tc_pause_hint, s_font, "ENTER select  |  ESC continue", hint_col);
+    for (int i = 0; i < 4; i++)
+        update_text_with_font(&s_tc_pause_items[i], s_menu_font, labels[i], item_col);
+
+    draw_rect(0.0f, 0.0f, W, H, 0.0f, 0.0f, 0.0f, 0.38f);
+    draw_rect(px, py, PAUSE_MENU_PANEL_W, PAUSE_MENU_PANEL_H, 0.03f, 0.04f, 0.07f, 0.90f);
+    draw_rect(px, py, PAUSE_MENU_PANEL_W, 5.0f, 1.0f, 1.0f, 1.0f, 0.95f);
+
+    if (s_tc_pause_title.tex) {
+        float tw = (float)MENU_TITLE_SIZE * (float)s_tc_pause_title.w / (float)s_tc_pause_title.h;
+        draw_tex(&s_tc_pause_title, px + (PAUSE_MENU_PANEL_W - tw) * 0.5f, py + 24.0f, (float)MENU_TITLE_SIZE);
+    }
+
+    for (int i = 0; i < 4; i++) {
+        int active = (i == s_pause_menu_selected);
+        float item_h = active ? PAUSE_MENU_ITEM_ACTIVE_H : PAUSE_MENU_ITEM_H;
+        float item_y = first_item_y + i * (PAUSE_MENU_ITEM_H + PAUSE_MENU_ITEM_GAP) + (PAUSE_MENU_ITEM_H - item_h);
+        float strip_h = active ? 7.0f : 5.0f;
+
+        draw_rect(item_x, item_y, PAUSE_MENU_ITEM_W, item_h, 1.0f, 1.0f, 1.0f,
+                  active ? 1.0f : 0.84f);
+        draw_rect(item_x, item_y, PAUSE_MENU_ITEM_W, strip_h,
+                  active ? 0.07f : 0.82f,
+                  active ? 0.09f : 0.82f,
+                  active ? 0.13f : 0.82f,
+                  1.0f);
+
+        if (s_tc_pause_items[i].tex) {
+            float tw = (float)MENU_TEXT_SIZE * (float)s_tc_pause_items[i].w / (float)s_tc_pause_items[i].h;
+            float text_y = item_y + strip_h + (item_h - strip_h - (float)MENU_TEXT_SIZE) * 0.5f;
+            draw_tex(&s_tc_pause_items[i], item_x + (PAUSE_MENU_ITEM_W - tw) * 0.5f, text_y, (float)MENU_TEXT_SIZE);
+        }
+    }
+
+    if (s_tc_pause_hint.tex) {
+        float tw = (float)MENU_HINT_SIZE * (float)s_tc_pause_hint.w / (float)s_tc_pause_hint.h;
+        draw_tex(&s_tc_pause_hint, px + (PAUSE_MENU_PANEL_W - tw) * 0.5f, py + PAUSE_MENU_PANEL_H - 28.0f, (float)MENU_HINT_SIZE);
+    }
+}
+
 /* ------------------------------------------------------------------ public */
 void ui_init(void) {
     s_shader = gl_shader_load("assets/shaders/ui.vert",
@@ -266,7 +367,23 @@ void ui_init(void) {
 
     TTF_Init();
     s_font = find_font(FONT_SIZE);
+    s_menu_font = find_font(MENU_TEXT_SIZE);
+    s_menu_title_font = find_font(MENU_TITLE_SIZE);
     if (!s_font) fprintf(stderr, "[UI] no font found\n");
+    if (!s_menu_font) s_menu_font = s_font;
+    if (!s_menu_title_font) s_menu_title_font = s_menu_font;
+}
+
+void ui_set_pause_menu(int visible, int selected, int vsync_enabled)
+{
+    s_pause_menu_visible = visible ? 1 : 0;
+    s_pause_menu_selected = selected;
+    s_pause_menu_vsync = vsync_enabled ? 1 : 0;
+}
+
+int ui_pause_menu_hit_test(int mouse_x, int mouse_y)
+{
+    return pause_menu_item_at((float)mouse_x, (float)mouse_y);
 }
 
 void ui_render(void) {
@@ -387,6 +504,7 @@ void ui_render(void) {
     }
 
     draw_build_bar(W);
+    draw_pause_menu(W, (float)WIN_H);
 
     /* ---- restore ---- */
     glBindVertexArray(0);
@@ -403,11 +521,21 @@ void ui_shutdown(void) {
     if (s_tc_build_title.tex) glDeleteTextures(1, &s_tc_build_title.tex);
     for (int i = 0; i < 8; i++)
         if (s_tc_build_items[i].tex) glDeleteTextures(1, &s_tc_build_items[i].tex);
+    if (s_tc_pause_title.tex) glDeleteTextures(1, &s_tc_pause_title.tex);
+    if (s_tc_pause_hint.tex) glDeleteTextures(1, &s_tc_pause_hint.tex);
+    for (int i = 0; i < 4; i++)
+        if (s_tc_pause_items[i].tex) glDeleteTextures(1, &s_tc_pause_items[i].tex);
     if (s_vbo)  glDeleteBuffers(1, &s_vbo);
     if (s_vao)  glDeleteVertexArrays(1, &s_vao);
     if (s_shader) glDeleteProgram(s_shader);
+    if (s_menu_title_font && s_menu_title_font != s_menu_font && s_menu_title_font != s_font)
+        TTF_CloseFont(s_menu_title_font);
+    if (s_menu_font && s_menu_font != s_font)
+        TTF_CloseFont(s_menu_font);
     if (s_font)   TTF_CloseFont(s_font);
     TTF_Quit();
     s_shader = s_vao = s_vbo = 0;
     s_font = NULL;
+    s_menu_font = NULL;
+    s_menu_title_font = NULL;
 }
