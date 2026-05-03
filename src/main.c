@@ -81,6 +81,11 @@ static int s_speed_idx = 4;   /* start at 1.0 days/s */
 int s_warp = 0;
 int g_warp = 0;
 
+static void boot_log(const char *msg) {
+    fprintf(stdout, "[Boot] %s\n", msg);
+    fflush(stdout);
+}
+
 static void clear_movement_keys(void) {
     s_key_w = s_key_s = s_key_a = s_key_d = s_key_q = s_key_e = 0;
 }
@@ -134,6 +139,10 @@ static void move_pause_menu_selection(int delta) {
 static void warmup_universe(void) {
     const double WARMUP_DT = 365.0 * 2.0 * DAY;
     int sys_n = physics_system_count();
+    int completed = 0;
+    fprintf(stdout, "[Boot] Warm-up: pre-simulating %.0f days across %d system%s\n",
+            WARMUP_DT / DAY, sys_n, sys_n == 1 ? "" : "s");
+    fflush(stdout);
 #ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic)
 #endif
@@ -153,22 +162,43 @@ static void warmup_universe(void) {
             physics_respa_end_system(root, dt_outer);
             trails_tick_system(root, dt_outer);
         }
+#ifdef _OPENMP
+#pragma omp critical
+#endif
+        {
+            completed++;
+            fprintf(stdout, "[Boot] Warm-up progress: %d/%d systems (%s)\n",
+                    completed, sys_n, g_bodies[root].name);
+            fflush(stdout);
+        }
     }
     physics_advance_time(WARMUP_DT);
+    boot_log("Warm-up complete");
 }
 
 static void init_runtime_world(void) {
+    boot_log("Preparing runtime world");
     universe_load("assets/universe.json");
+    boot_log("Resetting camera");
     cam_reset();
+    boot_log("Initializing starfield");
     starfield_init();
+    boot_log("Initializing trails");
     trails_gl_init();
+    boot_log("Initializing renderer");
     render_init();
+    boot_log("Initializing rings");
     rings_init("assets/universe.json");
+    boot_log("Initializing asteroid belts");
     asteroids_init("assets/universe.json");
+    boot_log("Initializing labels");
     labels_init();
+    boot_log("Initializing build mode");
     build_init();
+    boot_log("Refreshing physics timestep model");
     physics_refresh_timestep_model();
     warmup_universe();
+    boot_log("Runtime world ready");
 }
 
 static void shutdown_runtime_world(void) {
@@ -223,6 +253,7 @@ static void toggle_fullscreen(void) {
 }
 
 static int app_init(void) {
+    boot_log("Initializing SDL");
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
         fprintf(stderr, "[Main] SDL_Init: %s\n", SDL_GetError());
         return 0;
@@ -252,9 +283,11 @@ static int app_init(void) {
         return 0;
     }
 
+    boot_log("Configuring swap interval");
     set_vsync(0);
 
     /* GLEW */
+    boot_log("Initializing GLEW");
     glewExperimental = GL_TRUE;
     GLenum err = glewInit();
     if (err != GLEW_OK) {
@@ -271,6 +304,7 @@ static int app_init(void) {
     glEnable(GL_MULTISAMPLE);
     glClearColor(0.0f, 0.0f, 0.02f, 1.0f);
     update_viewport_size();
+    boot_log("OpenGL context ready");
 
     return 1;
 }
@@ -524,7 +558,9 @@ int main(int argc, char **argv) {
 
     if (!app_init()) return 1;
 
+    boot_log("Resetting collision state");
     collision_reset();
+    boot_log("Initializing UI");
     ui_init();
     sync_pause_menu_ui();
     init_runtime_world();

@@ -54,7 +54,7 @@ extern int g_win_h;
 #define TRAIL_SATELLITE_SEGMENT_LEN  2.0e6       /* m */
 #define TRAIL_CLOSE_APPROACH_FACTOR  0.35        /* denser sampling only near collisions */
 #define TRAIL_TARGET_WORLD_LEN     (128.0 * AU)  /* fixed retained trail length */
-#define TRAIL_SATELLITE_WORLD_LEN   (1.0 * AU)
+#define TRAIL_SATELLITE_WORLD_LEN   (1.75 * AU)
 #define TRAIL_CURVE_ERROR_RATIO     0.22         /* allowed chord error vs segment length */
 #define TRAIL_CURVE_MIN_ERROR       5.0e3        /* m */
 #define TRAIL_CURVE_MAX_ERROR       2.0e7        /* m */

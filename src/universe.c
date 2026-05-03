@@ -154,6 +154,8 @@ static int root_star_of(int i) { return body_root_star(i); }
 void universe_load(const char *path)
 {
     int i, s;
+    fprintf(stdout, "[Boot] Loading universe data from %s\n", path);
+    fflush(stdout);
     JsonNode *root = json_parse_file(path);
     if (!root) {
         fprintf(stderr, "[universe] failed to open or parse '%s'\n", path);
@@ -177,6 +179,8 @@ void universe_load(const char *path)
      * Placed at their absolute position (pos_ly → metres).
      * Bulk velocity stashed in bv[]; applied in post-processing.
      * ================================================================ */
+    fprintf(stdout, "[Boot] Universe pass 1/3: stars\n");
+    fflush(stdout);
     {
         JsonNode *bn;
         for (bn = bodies_arr->first_child; bn; bn = bn->next) {
@@ -227,6 +231,8 @@ void universe_load(const char *path)
      * Body.parent is set to the star's index so root_star_of() works
      * and the physics engine correctly skips planet–star fast forces.
      * ================================================================ */
+    fprintf(stdout, "[Boot] Universe pass 2/3: planets and dwarf planets\n");
+    fflush(stdout);
     {
         JsonNode *bn;
         for (bn = bodies_arr->first_child; bn; bn = bn->next) {
@@ -289,6 +295,8 @@ void universe_load(const char *path)
      * Pass 3 — Moons
      * Parent-relative orbit; parent must be a planet already loaded.
      * ================================================================ */
+    fprintf(stdout, "[Boot] Universe pass 3/3: moons\n");
+    fflush(stdout);
     {
         JsonNode *bn;
         for (bn = bodies_arr->first_child; bn; bn = bn->next) {
@@ -357,6 +365,8 @@ void universe_load(const char *path)
      *   1. Centre-of-mass velocity correction (zero internal momentum).
      *   2. Apply bulk velocity (proper motion) to all bodies in system.
      * ================================================================ */
+    fprintf(stdout, "[Boot] Universe post-processing: system velocities\n");
+    fflush(stdout);
     int n_stars = 0;
     for (s = 0; s < g_nbodies; s++) {
         if (!g_bodies[s].is_star) continue;
@@ -389,7 +399,7 @@ void universe_load(const char *path)
         for (i = 0; i < g_nbodies; i++)
             if (root_star_of(i) == s) cnt++;
         fprintf(stdout,
-                "[universe] '%s' at (%.3g, %.3g, %.3g) ly  —  %d bod%s\n",
+                "[universe] '%s' at (%.3g, %.3g, %.3g) ly  -  %d bod%s\n",
                 g_bodies[s].name,
                 g_bodies[s].pos[0] / LY,
                 g_bodies[s].pos[1] / LY,
@@ -399,6 +409,7 @@ void universe_load(const char *path)
 
     fprintf(stdout, "[universe] total: %d bodies across %d star%s\n",
             g_nbodies, n_stars, n_stars == 1 ? "" : "s");
+    fflush(stdout);
 
     json_free(root);
 }
@@ -486,3 +497,4 @@ void universe_shutdown(void)
     g_nbodies    = 0;
     g_bodies_cap = 0;
 }
+
