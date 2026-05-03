@@ -2026,6 +2026,22 @@ int collision_body_has_active_merge(int body_idx)
     return body_is_in_merge(body_idx);
 }
 
+int collision_body_needs_dense_trail(int body_idx)
+{
+    int root;
+
+    if (body_idx < 0 || body_idx >= g_nbodies || !g_bodies[body_idx].alive)
+        return 0;
+    if (body_is_in_merge(body_idx))
+        return 1;
+
+    root = body_root_star(body_idx);
+    if (root < 0 || root >= MAX_BODIES)
+        return 0;
+
+    return s_system_hot[root] > 0.0;
+}
+
 int collision_particles(CollisionParticle *out, int max_particles,
                         const double cam_pos[3])
 {

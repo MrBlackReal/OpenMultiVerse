@@ -40,5 +40,6 @@ double collision_visual_radius(int body_idx, double physical_radius);
 void collision_body_heat_glow(int body_idx, float out_color[3],
                               float *out_intensity, float *out_scale);
 int collision_body_has_active_merge(int body_idx);
+int collision_body_needs_dense_trail(int body_idx);
 int collision_particles(CollisionParticle *out, int max_particles,
                         const double cam_pos[3]);

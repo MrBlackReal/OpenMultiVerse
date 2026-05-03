@@ -15,6 +15,7 @@
  */
 #include "physics.h"
 #include "body.h"
+#include "collision.h"
 #include <math.h>
 
 double g_sim_time  = 0.0;
@@ -35,6 +36,10 @@ static double s_inner_dt_limit = INNER_DT_MAX;
 static int    s_system_roots[MAX_BODIES];
 static double s_system_outer_dt[MAX_BODIES];
 static double s_system_inner_dt[MAX_BODIES];
+static int    s_root_to_slot[MAX_BODIES];
+static int    s_body_system_slot[MAX_BODIES];
+static int    s_system_members[MAX_BODIES][MAX_BODIES];
+static int    s_system_member_count[MAX_BODIES];
 static int    s_nsystems = 0;
 
 static int is_satellite(int i);
@@ -42,17 +47,27 @@ static int is_ancestor_of(int ancestor, int child);
 
 static int in_system(int i, int root)
 {
-    return root < 0 || body_root_star(i) == root;
+    int slot;
+
+    if (root < 0) return 1;
+    if (i < 0 || i >= g_nbodies || i >= MAX_BODIES) return 0;
+    if (root >= MAX_BODIES) return 0;
+    slot = s_root_to_slot[root];
+    return slot >= 0 && s_body_system_slot[i] == slot;
 }
 
 static int ensure_system_slot(int root)
 {
+    if (root < 0 || root >= MAX_BODIES) return -1;
+    if (s_root_to_slot[root] >= 0) return s_root_to_slot[root];
     for (int i = 0; i < s_nsystems; i++)
         if (s_system_roots[i] == root) return i;
     if (s_nsystems >= MAX_BODIES) return -1;
     s_system_roots[s_nsystems] = root;
     s_system_outer_dt[s_nsystems] = OUTER_DT_DEFAULT;
     s_system_inner_dt[s_nsystems] = INNER_DT_MAX;
+    s_system_member_count[s_nsystems] = 0;
+    s_root_to_slot[root] = s_nsystems;
     return s_nsystems++;
 }
 
@@ -150,9 +165,28 @@ void physics_refresh_timestep_model(void)
     double best_inner = INNER_DT_MAX;
     s_nsystems = 0;
 
+    for (int i = 0; i < MAX_BODIES; i++) {
+        s_root_to_slot[i] = -1;
+        s_body_system_slot[i] = -1;
+        s_system_member_count[i] = 0;
+    }
+
     for (int i = 0; i < g_nbodies; i++) {
         if (g_bodies[i].alive && g_bodies[i].is_star)
             ensure_system_slot(i);
+    }
+
+    for (int i = 0; i < g_nbodies && i < MAX_BODIES; i++) {
+        int root, slot;
+
+        if (!g_bodies[i].alive) continue;
+        root = body_root_star(i);
+        slot = ensure_system_slot(root);
+        if (slot < 0) continue;
+
+        s_body_system_slot[i] = slot;
+        if (s_system_member_count[slot] < MAX_BODIES)
+            s_system_members[slot][s_system_member_count[slot]++] = i;
     }
 
     for (int i = 0; i < g_nbodies; i++) {
@@ -198,9 +232,8 @@ void physics_refresh_timestep_model(void)
         else if (dt_inner <= 60.0 * 60.0) b->dyn_bucket = 2;
         else if (dt_inner <= 6.0 * 60.0 * 60.0) b->dyn_bucket = 1;
 
-        {
-            int root = body_root_star(i);
-            int slot = ensure_system_slot(root);
+        if (i < MAX_BODIES) {
+            int slot = s_body_system_slot[i];
             if (slot >= 0) {
                 if (dt_outer < s_system_outer_dt[slot]) s_system_outer_dt[slot] = dt_outer;
                 if (is_satellite(i) && dt_inner < s_system_inner_dt[slot]) s_system_inner_dt[slot] = dt_inner;
@@ -265,19 +298,71 @@ static int is_ancestor_of(int ancestor, int child) {
 /* ── slow forces: primary-primary + non-parent tidal on satellites ───── */
 static void compute_acc_slow_system(int root) {
     int i, j;
-    for (i = 0; i < g_nbodies; i++)
-        if (in_system(i, root))
-            g_bodies[i].acc[0] = g_bodies[i].acc[1] = g_bodies[i].acc[2] = 0.0;
+    int slot = (root >= 0 && root < MAX_BODIES) ? s_root_to_slot[root] : -1;
 
-    for (i = 0; i < g_nbodies; i++) {
-        if (!g_bodies[i].alive || !in_system(i, root)) continue;
+    if (root < 0 || slot < 0) {
+        for (i = 0; i < g_nbodies; i++)
+            if (in_system(i, root))
+                g_bodies[i].acc[0] = g_bodies[i].acc[1] = g_bodies[i].acc[2] = 0.0;
+    } else {
+        for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
+            i = s_system_members[slot][mi];
+            g_bodies[i].acc[0] = g_bodies[i].acc[1] = g_bodies[i].acc[2] = 0.0;
+        }
+    }
+
+    if (root < 0 || slot < 0) {
+        for (i = 0; i < g_nbodies; i++) {
+            if (!g_bodies[i].alive || !in_system(i, root)) continue;
+            for (j = 0; j < g_nbodies; j++) {
+                int same_system;
+                double dx, dy, dz, r2, r, f;
+
+                if (j == i || !g_bodies[j].alive) continue;
+
+                same_system = in_system(j, root);
+                if (same_system && j < i) continue;
+
+                /* skip satellite-satellite (negligible and expensive) */
+                if (is_satellite(i) && is_satellite(j)) continue;
+                /* skip only true moon-parent chains here — planet-star stays slow */
+                if (same_system &&
+                    ((is_satellite(j) && is_ancestor_of(i, j)) ||
+                     (is_satellite(i) && is_ancestor_of(j, i)))) continue;
+
+                dx = g_bodies[j].pos[0] - g_bodies[i].pos[0];
+                dy = g_bodies[j].pos[1] - g_bodies[i].pos[1];
+                dz = g_bodies[j].pos[2] - g_bodies[i].pos[2];
+                r2 = dx*dx + dy*dy + dz*dz + SOFTENING*SOFTENING;
+                if (G_CONST * g_bodies[j].mass / r2 < GRAV_EPSILON &&
+                    G_CONST * g_bodies[i].mass / r2 < GRAV_EPSILON) continue;
+                r  = sqrt(r2);
+                f  = G_CONST / (r2 * r);
+
+                g_bodies[i].acc[0] += f * g_bodies[j].mass * dx;
+                g_bodies[i].acc[1] += f * g_bodies[j].mass * dy;
+                g_bodies[i].acc[2] += f * g_bodies[j].mass * dz;
+
+                if (same_system) {
+                    g_bodies[j].acc[0] -= f * g_bodies[i].mass * dx;
+                    g_bodies[j].acc[1] -= f * g_bodies[i].mass * dy;
+                    g_bodies[j].acc[2] -= f * g_bodies[i].mass * dz;
+                }
+            }
+        }
+        return;
+    }
+
+    for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
+        i = s_system_members[slot][mi];
+        if (!g_bodies[i].alive) continue;
         for (j = 0; j < g_nbodies; j++) {
             int same_system;
             double dx, dy, dz, r2, r, f;
 
             if (j == i || !g_bodies[j].alive) continue;
 
-            same_system = in_system(j, root);
+            same_system = (j >= 0 && j < MAX_BODIES && s_body_system_slot[j] == slot);
             if (same_system && j < i) continue;
 
             /* skip satellite-satellite (negligible and expensive) */
@@ -312,13 +397,50 @@ static void compute_acc_slow_system(int root) {
 /* ── fast forces: dominant parent → satellite (+ Newton 3rd reaction) ── */
 static void compute_acc_fast_system(int root) {
     int i;
-    for (i = 0; i < g_nbodies; i++)
-        if (in_system(i, root))
-            g_bodies[i].fast_acc[0] = g_bodies[i].fast_acc[1] =
-            g_bodies[i].fast_acc[2] = 0.0;
+    int slot = (root >= 0 && root < MAX_BODIES) ? s_root_to_slot[root] : -1;
 
-    for (i = 0; i < g_nbodies; i++) {
-        if (!g_bodies[i].alive || !in_system(i, root)) continue;
+    if (root < 0 || slot < 0) {
+        for (i = 0; i < g_nbodies; i++)
+            if (in_system(i, root))
+                g_bodies[i].fast_acc[0] = g_bodies[i].fast_acc[1] =
+                g_bodies[i].fast_acc[2] = 0.0;
+
+        for (i = 0; i < g_nbodies; i++) {
+            if (!g_bodies[i].alive || !in_system(i, root)) continue;
+            if (!has_fast_parent(i)) continue;
+            for (int p = g_bodies[i].parent; p >= 0; p = g_bodies[p].parent) {
+                if (!g_bodies[p].alive || !in_system(p, root)) continue;
+                double dx = g_bodies[p].pos[0] - g_bodies[i].pos[0];
+                double dy = g_bodies[p].pos[1] - g_bodies[i].pos[1];
+                double dz = g_bodies[p].pos[2] - g_bodies[i].pos[2];
+                double r2 = dx*dx + dy*dy + dz*dz + SOFTENING*SOFTENING;
+                if (G_CONST * g_bodies[p].mass / r2 < GRAV_EPSILON) continue;
+                double r  = sqrt(r2);
+                double f  = G_CONST / (r2 * r);
+
+            /* satellite accelerated toward parent */
+                g_bodies[i].fast_acc[0] += f * g_bodies[p].mass * dx;
+                g_bodies[i].fast_acc[1] += f * g_bodies[p].mass * dy;
+                g_bodies[i].fast_acc[2] += f * g_bodies[p].mass * dz;
+
+            /* reaction on parent (Newton 3rd — small but correct) */
+                g_bodies[p].fast_acc[0] -= f * g_bodies[i].mass * dx;
+                g_bodies[p].fast_acc[1] -= f * g_bodies[i].mass * dy;
+                g_bodies[p].fast_acc[2] -= f * g_bodies[i].mass * dz;
+            }
+        }
+        return;
+    }
+
+    for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
+        i = s_system_members[slot][mi];
+        g_bodies[i].fast_acc[0] = g_bodies[i].fast_acc[1] =
+        g_bodies[i].fast_acc[2] = 0.0;
+    }
+
+    for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
+        i = s_system_members[slot][mi];
+        if (!g_bodies[i].alive) continue;
         if (!has_fast_parent(i)) continue;
         for (int p = g_bodies[i].parent; p >= 0; p = g_bodies[p].parent) {
             if (!g_bodies[p].alive || !in_system(p, root)) continue;
@@ -355,12 +477,23 @@ void physics_respa_begin(double dt_outer) {
 
 void physics_respa_begin_system(int root, double dt_outer) {
     int i;
+    int slot = (root >= 0 && root < MAX_BODIES) ? s_root_to_slot[root] : -1;
     compute_acc_slow_system(root);
-    for (i = 0; i < g_nbodies; i++) {
-        if (!g_bodies[i].alive || !in_system(i, root)) continue;
-        g_bodies[i].vel[0] += 0.5 * g_bodies[i].acc[0] * dt_outer;
-        g_bodies[i].vel[1] += 0.5 * g_bodies[i].acc[1] * dt_outer;
-        g_bodies[i].vel[2] += 0.5 * g_bodies[i].acc[2] * dt_outer;
+    if (root < 0 || slot < 0) {
+        for (i = 0; i < g_nbodies; i++) {
+            if (!g_bodies[i].alive || !in_system(i, root)) continue;
+            g_bodies[i].vel[0] += 0.5 * g_bodies[i].acc[0] * dt_outer;
+            g_bodies[i].vel[1] += 0.5 * g_bodies[i].acc[1] * dt_outer;
+            g_bodies[i].vel[2] += 0.5 * g_bodies[i].acc[2] * dt_outer;
+        }
+    } else {
+        for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
+            i = s_system_members[slot][mi];
+            if (!g_bodies[i].alive) continue;
+            g_bodies[i].vel[0] += 0.5 * g_bodies[i].acc[0] * dt_outer;
+            g_bodies[i].vel[1] += 0.5 * g_bodies[i].acc[1] * dt_outer;
+            g_bodies[i].vel[2] += 0.5 * g_bodies[i].acc[2] * dt_outer;
+        }
     }
     /* Pre-compute fast forces so physics_respa_inner can use them
      * immediately without an extra evaluation (carry-over trick). */
@@ -378,27 +511,56 @@ void physics_respa_inner(double dt_inner) {
 
 void physics_respa_inner_system(int root, double dt_inner) {
     int i;
+    int slot = (root >= 0 && root < MAX_BODIES) ? s_root_to_slot[root] : -1;
     /* fast half-kick (uses fast_acc from previous compute_acc_fast) */
-    for (i = 0; i < g_nbodies; i++) {
-        if (!g_bodies[i].alive || !in_system(i, root)) continue;
-        g_bodies[i].vel[0] += 0.5 * g_bodies[i].fast_acc[0] * dt_inner;
-        g_bodies[i].vel[1] += 0.5 * g_bodies[i].fast_acc[1] * dt_inner;
-        g_bodies[i].vel[2] += 0.5 * g_bodies[i].fast_acc[2] * dt_inner;
-    }
-    /* drift all bodies */
-    for (i = 0; i < g_nbodies; i++) {
-        if (!g_bodies[i].alive || !in_system(i, root)) continue;
-        g_bodies[i].pos[0] += g_bodies[i].vel[0] * dt_inner;
-        g_bodies[i].pos[1] += g_bodies[i].vel[1] * dt_inner;
-        g_bodies[i].pos[2] += g_bodies[i].vel[2] * dt_inner;
+    if (root < 0 || slot < 0) {
+        for (i = 0; i < g_nbodies; i++) {
+            if (!g_bodies[i].alive || !in_system(i, root)) continue;
+            g_bodies[i].vel[0] += 0.5 * g_bodies[i].fast_acc[0] * dt_inner;
+            g_bodies[i].vel[1] += 0.5 * g_bodies[i].fast_acc[1] * dt_inner;
+            g_bodies[i].vel[2] += 0.5 * g_bodies[i].fast_acc[2] * dt_inner;
+        }
+        /* drift all bodies */
+        for (i = 0; i < g_nbodies; i++) {
+            if (!g_bodies[i].alive || !in_system(i, root)) continue;
+            g_bodies[i].pos[0] += g_bodies[i].vel[0] * dt_inner;
+            g_bodies[i].pos[1] += g_bodies[i].vel[1] * dt_inner;
+            g_bodies[i].pos[2] += g_bodies[i].vel[2] * dt_inner;
+        }
+    } else {
+        for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
+            i = s_system_members[slot][mi];
+            if (!g_bodies[i].alive) continue;
+            g_bodies[i].vel[0] += 0.5 * g_bodies[i].fast_acc[0] * dt_inner;
+            g_bodies[i].vel[1] += 0.5 * g_bodies[i].fast_acc[1] * dt_inner;
+            g_bodies[i].vel[2] += 0.5 * g_bodies[i].fast_acc[2] * dt_inner;
+        }
+        /* drift all bodies */
+        for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
+            i = s_system_members[slot][mi];
+            if (!g_bodies[i].alive) continue;
+            g_bodies[i].pos[0] += g_bodies[i].vel[0] * dt_inner;
+            g_bodies[i].pos[1] += g_bodies[i].vel[1] * dt_inner;
+            g_bodies[i].pos[2] += g_bodies[i].vel[2] * dt_inner;
+        }
     }
     /* recompute fast forces at new positions, then fast half-kick */
     compute_acc_fast_system(root);
-    for (i = 0; i < g_nbodies; i++) {
-        if (!g_bodies[i].alive || !in_system(i, root)) continue;
-        g_bodies[i].vel[0] += 0.5 * g_bodies[i].fast_acc[0] * dt_inner;
-        g_bodies[i].vel[1] += 0.5 * g_bodies[i].fast_acc[1] * dt_inner;
-        g_bodies[i].vel[2] += 0.5 * g_bodies[i].fast_acc[2] * dt_inner;
+    if (root < 0 || slot < 0) {
+        for (i = 0; i < g_nbodies; i++) {
+            if (!g_bodies[i].alive || !in_system(i, root)) continue;
+            g_bodies[i].vel[0] += 0.5 * g_bodies[i].fast_acc[0] * dt_inner;
+            g_bodies[i].vel[1] += 0.5 * g_bodies[i].fast_acc[1] * dt_inner;
+            g_bodies[i].vel[2] += 0.5 * g_bodies[i].fast_acc[2] * dt_inner;
+        }
+    } else {
+        for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
+            i = s_system_members[slot][mi];
+            if (!g_bodies[i].alive) continue;
+            g_bodies[i].vel[0] += 0.5 * g_bodies[i].fast_acc[0] * dt_inner;
+            g_bodies[i].vel[1] += 0.5 * g_bodies[i].fast_acc[1] * dt_inner;
+            g_bodies[i].vel[2] += 0.5 * g_bodies[i].fast_acc[2] * dt_inner;
+        }
     }
 }
 
@@ -413,19 +575,38 @@ void physics_respa_end(double dt_outer) {
 
 void physics_respa_end_system(int root, double dt_outer) {
     int i;
+    int slot = (root >= 0 && root < MAX_BODIES) ? s_root_to_slot[root] : -1;
     compute_acc_slow_system(root);
-    for (i = 0; i < g_nbodies; i++) {
-        if (!g_bodies[i].alive || !in_system(i, root)) continue;
-        g_bodies[i].vel[0] += 0.5 * g_bodies[i].acc[0] * dt_outer;
-        g_bodies[i].vel[1] += 0.5 * g_bodies[i].acc[1] * dt_outer;
-        g_bodies[i].vel[2] += 0.5 * g_bodies[i].acc[2] * dt_outer;
-    }
-    /* axial rotation */
-    for (i = 0; i < g_nbodies; i++) {
-        if (!g_bodies[i].alive || !in_system(i, root)) continue;
-        g_bodies[i].rotation_angle = fmod(
-            g_bodies[i].rotation_angle + g_bodies[i].rotation_rate * dt_outer,
-            2.0 * PI);
+    if (root < 0 || slot < 0) {
+        for (i = 0; i < g_nbodies; i++) {
+            if (!g_bodies[i].alive || !in_system(i, root)) continue;
+            g_bodies[i].vel[0] += 0.5 * g_bodies[i].acc[0] * dt_outer;
+            g_bodies[i].vel[1] += 0.5 * g_bodies[i].acc[1] * dt_outer;
+            g_bodies[i].vel[2] += 0.5 * g_bodies[i].acc[2] * dt_outer;
+        }
+        /* axial rotation */
+        for (i = 0; i < g_nbodies; i++) {
+            if (!g_bodies[i].alive || !in_system(i, root)) continue;
+            g_bodies[i].rotation_angle = fmod(
+                g_bodies[i].rotation_angle + g_bodies[i].rotation_rate * dt_outer,
+                2.0 * PI);
+        }
+    } else {
+        for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
+            i = s_system_members[slot][mi];
+            if (!g_bodies[i].alive) continue;
+            g_bodies[i].vel[0] += 0.5 * g_bodies[i].acc[0] * dt_outer;
+            g_bodies[i].vel[1] += 0.5 * g_bodies[i].acc[1] * dt_outer;
+            g_bodies[i].vel[2] += 0.5 * g_bodies[i].acc[2] * dt_outer;
+        }
+        /* axial rotation */
+        for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
+            i = s_system_members[slot][mi];
+            if (!g_bodies[i].alive) continue;
+            g_bodies[i].rotation_angle = fmod(
+                g_bodies[i].rotation_angle + g_bodies[i].rotation_rate * dt_outer,
+                2.0 * PI);
+        }
     }
 }
 
@@ -535,6 +716,10 @@ static double trail_segment_len_for_accel(const Body *b)
 
     if (body_idx >= 0 && body_idx < g_nbodies && is_satellite(body_idx))
         segment_len = TRAIL_SATELLITE_SEGMENT_LEN;
+
+    if (body_idx >= 0 && body_idx < g_nbodies &&
+        collision_body_needs_dense_trail(body_idx))
+        segment_len *= TRAIL_CLOSE_APPROACH_FACTOR;
 
     if (segment_len < TRAIL_MIN_SEGMENT_LEN) segment_len = TRAIL_MIN_SEGMENT_LEN;
     if (segment_len > TRAIL_MAX_SEGMENT_LEN) segment_len = TRAIL_MAX_SEGMENT_LEN;
@@ -763,13 +948,52 @@ void trails_tick(double dt) {
 
 void trails_tick_system(int root, double dt) {
     int i;
+    int slot = (root >= 0 && root < MAX_BODIES) ? s_root_to_slot[root] : -1;
     if (dt <= 0.0) return;
 
-    for (i = 0; i < g_nbodies; i++) {
+    if (root < 0 || slot < 0) {
+        for (i = 0; i < g_nbodies; i++) {
+            Body *b = &g_bodies[i];
+            double segment_len, max_err, start[3], start_vel[3], end[3], end_vel[3];
+
+            if (!b->alive || !in_system(i, root) || !b->trail || !b->trail_emitting) {
+                continue;
+            }
+            segment_len = trail_segment_len_for_accel(b);
+            max_err = segment_len * TRAIL_CURVE_ERROR_RATIO;
+            if (max_err < TRAIL_CURVE_MIN_ERROR) max_err = TRAIL_CURVE_MIN_ERROR;
+            if (max_err > TRAIL_CURVE_MAX_ERROR) max_err = TRAIL_CURVE_MAX_ERROR;
+            start[0] = b->trail_prev_pos[0];
+            start[1] = b->trail_prev_pos[1];
+            start[2] = b->trail_prev_pos[2];
+            start_vel[0] = b->trail_prev_vel[0];
+            start_vel[1] = b->trail_prev_vel[1];
+            start_vel[2] = b->trail_prev_vel[2];
+            end[0] = b->pos[0];
+            end[1] = b->pos[1];
+            end[2] = b->pos[2];
+            end_vel[0] = b->vel[0];
+            end_vel[1] = b->vel[1];
+            end_vel[2] = b->vel[2];
+            trail_rebuild_segment(b, start, start_vel, end, end_vel,
+                                  dt, segment_len, max_err);
+
+            b->trail_prev_pos[0] = end[0];
+            b->trail_prev_pos[1] = end[1];
+            b->trail_prev_pos[2] = end[2];
+            b->trail_prev_vel[0] = end_vel[0];
+            b->trail_prev_vel[1] = end_vel[1];
+            b->trail_prev_vel[2] = end_vel[2];
+        }
+        return;
+    }
+
+    for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
+        i = s_system_members[slot][mi];
         Body *b = &g_bodies[i];
         double segment_len, max_err, start[3], start_vel[3], end[3], end_vel[3];
 
-        if (!b->alive || !in_system(i, root) || !b->trail || !b->trail_emitting) {
+        if (!b->alive || !b->trail || !b->trail_emitting) {
             continue;
         }
         segment_len = trail_segment_len_for_accel(b);
