@@ -1,4 +1,4 @@
-<img width="1920" height="734" alt="openverse_logo_update" src="https://github.com/user-attachments/assets/2878c365-11df-4f4a-af8e-3a141d69ae85" />
+![image](https://github.com/user-attachments/assets/2878c365-11df-4f4a-af8e-3a141d69ae85)
 
 # OpenVerse - An open-source universe simulator
 
