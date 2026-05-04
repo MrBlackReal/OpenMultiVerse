@@ -261,6 +261,9 @@ void trails_render(const float vp[16])
                 s_scratch[k*4+0] = (float)(b->trail[idx][0] - s_ref_pos[i][0]);
                 s_scratch[k*4+1] = (float)(b->trail[idx][1] - s_ref_pos[i][1]);
                 s_scratch[k*4+2] = (float)(b->trail[idx][2] - s_ref_pos[i][2]);
+                /* alpha_t^1.5 (= alpha_t * sqrt(alpha_t)): power curve that
+                 * keeps the tail nearly invisible and snaps bright only near
+                 * the current position. Linear fade looks too uniform. */
                 s_scratch[k*4+3] = alpha_t * sqrtf(alpha_t);
             }
             glBufferSubData(GL_ARRAY_BUFFER, 0,

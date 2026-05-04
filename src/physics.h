@@ -13,8 +13,8 @@
  *       physics_respa_begin(dt_outer);
  *       for each inner step:
  *           physics_respa_inner(dt_inner);
- *           trails_tick(dt_inner);   // acceleration-driven trail sampling
  *       physics_respa_end(dt_outer);
+ *       trails_tick(dt_outer);       // arc-length-driven trail sampling
  */
 #pragma once
 #include "common.h"

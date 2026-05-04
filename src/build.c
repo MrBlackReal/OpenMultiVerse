@@ -1,8 +1,42 @@
 /*
- * build.c — first-pass runtime body placement mode
- */
-/*
- * build.c - first-pass runtime body placement mode
+ * build.c — runtime body placement ("build mode")
+ *
+ * Build mode lets the user interactively place bodies into the live simulation.
+ * Pressing B enters build mode (pauses simulation), Tab+scroll selects the
+ * preset type, left-click places a body in front of the camera.
+ *
+ * Key subsystems
+ * ──────────────
+ * Preset table      Six archetypes (rocky, gas giant, ice planet, moon, dwarf,
+ *                   star) with canonical mass, radius, colour, and atmospheric
+ *                   parameters. Stars use a fixed colour; all other types get a
+ *                   procedurally randomised colour from random_color_in_range().
+ *
+ * Colour palette    Each visual type has four hand-tuned corner colours arranged
+ *                   into three segments. A LCG roll picks one segment (t),
+ *                   a second roll interpolates within it (u), and two more rolls
+ *                   add per-channel noise (v, w). This produces ~4,000 distinct
+ *                   hues that all look physically plausible for the type.
+ *
+ * Placement pos     build_preview_pos_au() projects the preset along the camera
+ *                   forward vector at a distance scaled so the body subtends a
+ *                   constant ~18 px on screen, clamped to [0.00035, 18] AU.
+ *
+ * Parent inference  build_nearest3() returns three reference bodies in the
+ *                   camera region — the parent is picked from that set based on
+ *                   the preset's wants_nonstar_parent / wants_planet_parent flags.
+ *                   A moon preset prefers the nearest non-star; planets prefer
+ *                   the nearest star within BUILD_PARENT_STAR_MAX_AU.
+ *
+ * Orbital velocity  add_parent_velocity() gives the new body a circular orbit
+ *                   around its inferred parent: v = sqrt(GM/r) along the cross
+ *                   product of the separation vector and world-up. If the
+ *                   separation is nearly parallel to world-up, the camera
+ *                   forward direction provides a fallback tangent.
+ *
+ * Post-placement    universe_rebind_to_nearest_stars() is called when a star is
+ *                   placed so that existing planets re-evaluate their parent star
+ *                   (relevant when two stars are placed close together).
  */
 #include "build.h"
 #include "body.h"
@@ -17,18 +51,24 @@
 int g_build_mode = 0;
 int g_build_tab_held = 0;
 
-static int s_selected = 0;
-static int s_prev_paused = 0;
-static int s_place_serial = 1;
-static unsigned int s_build_rng = 0x51f15eedu;
+/* ── static state ─────────────────────────────────────────────────────────── */
+static int s_selected = 0;         /* index into s_presets[] */
+static int s_prev_paused = 0;      /* pause state before build mode was entered */
+static int s_place_serial = 1;     /* monotonic counter appended to generated names */
+static unsigned int s_build_rng = 0x51f15eedu; /* LCG state; fixed seed for determinism */
 
-#define BUILD_REF_LOCAL_AU        0.018
-#define BUILD_REF_INTERSTELLAR_AU 1200.0
-#define BUILD_PREVIEW_TARGET_PX   18.0
-#define BUILD_PREVIEW_MIN_AU      0.00035
-#define BUILD_PREVIEW_MAX_AU      18.0
-#define BUILD_PARENT_STAR_MAX_AU  250.0
+/* Thresholds that govern build_nearest3() mode selection (in AU). */
+#define BUILD_REF_LOCAL_AU        0.018   /* inside this → local mode (moon placement) */
+#define BUILD_REF_INTERSTELLAR_AU 1200.0  /* outside this → star-only mode */
+#define BUILD_PREVIEW_TARGET_PX   18.0    /* desired angular size of preview body on screen */
+#define BUILD_PREVIEW_MIN_AU      0.00035 /* minimum placement distance (inside bodies) */
+#define BUILD_PREVIEW_MAX_AU      18.0    /* maximum placement distance */
+#define BUILD_PARENT_STAR_MAX_AU  250.0   /* star not accepted as parent beyond this */
 
+/* ── preset table ─────────────────────────────────────────────────────────── */
+/* Each row: { name, mass_kg, radius_m, col_rgb, visual_type,
+ *             is_star, wants_planet_parent, wants_nonstar_parent,
+ *             atm_color_rgb, atm_intensity, atm_scale }              */
 static const BuildPreset s_presets[] = {
     { "Rocky Planet", 5.972e24,   6371.0e3,  {0.52f, 0.44f, 0.36f}, BUILD_VIS_ROCKY,        0, 1, 0, {0.00f, 0.00f, 0.00f}, 0.00f, 1.00f },
     { "Gas Giant",    1.898e27,  71492.0e3,  {0.84f, 0.70f, 0.50f}, BUILD_VIS_GAS_GIANT,    0, 1, 0, {0.90f, 0.72f, 0.50f}, 0.25f, 1.22f },
@@ -38,6 +78,11 @@ static const BuildPreset s_presets[] = {
     { "Star",         1.989e30, 696000.0e3,  {1.00f, 0.92f, 0.28f}, BUILD_VIS_STAR,         1, 0, 0, {0.00f, 0.00f, 0.00f}, 0.00f, 1.00f }
 };
 
+/* ── PRNG ─────────────────────────────────────────────────────────────────── */
+/* Linear congruential generator (LCG) with Knuth constants.
+ * Output masked to 24 bits to avoid the low-bit periodicity of LCGs, then
+ * mapped to [0, 1). Produces a different colour every call sequence even when
+ * placements happen on the same frame. */
 static double build_rand01(void)
 {
     s_build_rng = 1664525u * s_build_rng + 1013904223u;
@@ -49,6 +94,25 @@ static float lerpf(float a, float b, float t)
     return a + (b - a) * t;
 }
 
+/* ── colour generation ────────────────────────────────────────────────────── */
+/*
+ * random_color_in_range — procedurally sample a perceptually natural colour for
+ * a body of the given visual type.
+ *
+ * Algorithm
+ * ─────────
+ * Each type has four hand-tuned corner colours (c0–c3) arranged into three
+ * overlapping segments: [c0,c1], [c1,c2], [c2,c3].
+ *
+ *   t  — chooses which segment (three equal-probability thirds)
+ *   u  — interpolates within the chosen segment (scaled to 0.95 to avoid
+ *         landing on the exact corner colours, which look synthetic)
+ *   v,w — small per-channel offset noise (±0.05 R, ±0.04 G/B) so that two
+ *         bodies placed at the same t/u still differ slightly
+ *
+ * Result is clamped to [0, 1] after noise. Stars always use the fixed preset
+ * colour and skip this function.
+ */
 static void random_color_in_range(BuildVisualType type, float out[3])
 {
     float c0[3], c1[3], c2[3], c3[3];
@@ -112,11 +176,17 @@ static void random_color_in_range(BuildVisualType type, float out[3])
         out[2] = lerpf(c2[2], c3[2], (float)(u * 0.95));
     }
 
+    /* Per-channel noise: v perturbs R (±0.05), w perturbs G (±0.04),
+     * u (already consumed above) reused for B noise — low correlation
+     * between channels because u and v come from consecutive LCG states. */
     out[0] = fminf(1.0f, fmaxf(0.0f, out[0] + (float)(v - 0.5) * 0.10f));
     out[1] = fminf(1.0f, fmaxf(0.0f, out[1] + (float)(w - 0.5) * 0.08f));
     out[2] = fminf(1.0f, fmaxf(0.0f, out[2] + (float)(u - 0.5) * 0.08f));
 }
 
+/* ── rotation / obliquity ─────────────────────────────────────────────────── */
+/* Rotation period ranges are physically motivated (Earth~1 d, gas giants faster,
+ * moons wide range to accommodate tidal locking, stars slow). */
 static double random_rotation_period_days(BuildVisualType type)
 {
     double t = build_rand01();
@@ -131,6 +201,8 @@ static double random_rotation_period_days(BuildVisualType type)
     }
 }
 
+/* Obliquity ranges: gas giants low (mostly prograde), ice planets high (Uranus-like),
+ * stars fixed at 7.25° (solar reference). Sign is handled in random_rotation_rate. */
 static double random_obliquity_deg(BuildVisualType type)
 {
     double t = build_rand01();
@@ -145,6 +217,7 @@ static double random_obliquity_deg(BuildVisualType type)
     }
 }
 
+/* Random retrograde rotation (50% chance) except for stars which are always prograde. */
 static double random_rotation_rate(BuildVisualType type)
 {
     double period_days = random_rotation_period_days(type);
@@ -153,6 +226,7 @@ static double random_rotation_rate(BuildVisualType type)
     return sign * (2.0 * PI) / (period_days * DAY);
 }
 
+/* ── init / accessors ─────────────────────────────────────────────────────── */
 void build_init(void)
 {
     g_build_mode = 0;
@@ -184,6 +258,19 @@ const BuildPreset *build_current_preset(void)
     return build_preset_at(s_selected);
 }
 
+/* ── similarity deduplication ─────────────────────────────────────────────── */
+/*
+ * reference_too_similar — returns 1 if candidate body 'cand' is too close to
+ * any already-selected reference body to be a useful independent reference.
+ *
+ * The check is relative, not absolute: sep / min(d_cand, d_other) < ratio.
+ * This means bodies that are physically close together (like a moon and its
+ * planet) are filtered at fine scales, while bodies that are far from the
+ * camera are only filtered if they are proportionally close to each other.
+ *
+ *   mode == 0: stars only → ratio 0.08  (wide deduplication; stars are far apart)
+ *   mode != 0: others     → ratio 0.015 (tight; we want nearby independent references)
+ */
 static int reference_too_similar(int cand, double cand_dist,
                                  const int idx[3], const double best[3],
                                  int mode)
@@ -205,12 +292,13 @@ static int reference_too_similar(int cand, double cand_dist,
     return 0;
 }
 
+/* ── mode toggle / scroll ─────────────────────────────────────────────────── */
 void build_toggle(void)
 {
     g_build_mode = !g_build_mode;
     if (g_build_mode) {
         s_prev_paused = g_paused;
-        g_paused = 1;
+        g_paused = 1;   /* freeze physics while the user aims */
     } else {
         g_build_tab_held = 0;
         g_paused = s_prev_paused;
@@ -222,6 +310,7 @@ void build_set_tab_held(int held)
     g_build_tab_held = held ? 1 : 0;
 }
 
+/* Scroll wheel cycles presets (wrap-around). Only active when Tab is held. */
 void build_scroll(int wheel_y)
 {
     if (!g_build_mode || !g_build_tab_held || wheel_y == 0) return;
@@ -231,6 +320,20 @@ void build_scroll(int wheel_y)
     while (s_selected >= n) s_selected -= n;
 }
 
+/* ── preview position ─────────────────────────────────────────────────────── */
+/*
+ * build_preview_pos_au — compute where the ghost preview should appear.
+ *
+ * Distance is chosen so the body fills BUILD_PREVIEW_TARGET_PX (18 px) on
+ * screen, using the perspective formula:
+ *
+ *   px_height = WIN_H * radius_au / (dist_au * tan(FOV/2))
+ *   → dist = WIN_H * radius / (target_px * tan(FOV/2))
+ *
+ * This keeps the preview body consistently sized regardless of the preset's
+ * physical radius, which spans >3 orders of magnitude (moon to star).
+ * Result is clamped to [BUILD_PREVIEW_MIN_AU, BUILD_PREVIEW_MAX_AU].
+ */
 void build_preview_pos_au(double out[3])
 {
     float dx, dy, dz;
@@ -256,6 +359,45 @@ void build_preview_pos_m(double out[3])
     out[2] = p[2] * AU;
 }
 
+/* ── reference body selection ─────────────────────────────────────────────── */
+/*
+ * build_nearest3 — find the three most spatially distinct bodies near pos_m.
+ *
+ * This is used in two places: render_build_preview() draws guide lines to
+ * these references, and build_place_current() infers the new body's parent.
+ *
+ * Mode selection (determined once before the three passes):
+ * ──────────────────────────────────────────────────────────
+ *   mode 0  "interstellar" — nearest star is > BUILD_REF_INTERSTELLAR_AU (1200 AU)
+ *           away; only stars are candidates. Useful when exploring open space.
+ *
+ *   mode 1  "system scale" — default; considers all primaries (stars and planets,
+ *           no moons). Gives the three nearest stars/planets.
+ *
+ *   mode 2  "local" — nearest non-star body is within BUILD_REF_LOCAL_AU (0.018 AU),
+ *           meaning the cursor is very close to a planet or moon.
+ *           Pass 0 in mode 2 builds a tight neighbourhood: the nearest non-star,
+ *           its moons, its siblings (same parent), and its parent. This gives
+ *           reference lines that frame the local environment precisely.
+ *
+ * Three-pass fallback:
+ * ────────────────────
+ * Each pass tries to fill up to 3 slots. If a pass doesn't fill all 3 slots
+ * (e.g. there's only one star in mode 0), the next pass widens the scope.
+ * Mode transitions: 0→1→2→1 (mode 2 falls back to system scale, not interstellar).
+ *
+ * Similarity deduplication (reference_too_similar):
+ * ──────────────────────────────────────────────────
+ * Candidate bodies that are proportionally very close to already-selected ones
+ * are skipped. This prevents all three references from clustering on the same
+ * planet-moon pair when the cursor sits between them.
+ *
+ * Emergency fallback (last loop):
+ * ─────────────────────────────────
+ * If after all three passes some slots are still unfilled, a plain distance
+ * sort without deduplication fills the remainder. Ensures we always return
+ * up to g_nbodies references.
+ */
 void build_nearest3(const double pos_m[3], int out_idx[3], double out_dist_au[3])
 {
     int mode = 1; /* 0=stars, 1=primaries, 2=local bodies */
@@ -268,6 +410,7 @@ void build_nearest3(const double pos_m[3], int out_idx[3], double out_dist_au[3]
         out_dist_au[k] = 0.0;
     }
 
+    /* First pass over all bodies to determine mode. */
     for (int i = 0; i < g_nbodies; i++) {
         if (!g_bodies[i].alive) continue;
         double dx = g_bodies[i].pos[0] - pos_m[0];
@@ -294,6 +437,7 @@ void build_nearest3(const double pos_m[3], int out_idx[3], double out_dist_au[3]
 
         for (int i = 0; i < g_nbodies; i++) {
             if (!g_bodies[i].alive) continue;
+            /* is_moon: parent is a non-star (i.e. planet-moon or moon-moon) */
             int is_moon = (g_bodies[i].parent >= 0 &&
                            !g_bodies[g_bodies[i].parent].is_star);
             int accept = 0;
@@ -304,6 +448,8 @@ void build_nearest3(const double pos_m[3], int out_idx[3], double out_dist_au[3]
                 accept = !is_moon;
             else {
                 if (pass == 0 && nearest_nonstar >= 0) {
+                    /* Accept: the nearest planet itself, its moons,
+                     * its parent star, and its siblings (same parent). */
                     int parent = g_bodies[nearest_nonstar].parent;
                     accept = (i == nearest_nonstar ||
                               g_bodies[i].parent == nearest_nonstar ||
@@ -320,6 +466,7 @@ void build_nearest3(const double pos_m[3], int out_idx[3], double out_dist_au[3]
             double dz = g_bodies[i].pos[2] - pos_m[2];
             double d = sqrt(dx*dx + dy*dy + dz*dz);
             if (reference_too_similar(i, d, idx, best, mode)) continue;
+            /* Insertion sort into top-3 by distance. */
             for (int k = 0; k < 3; k++) {
                 if (d >= best[k]) continue;
                 for (int m = 2; m > k; m--) {
@@ -332,6 +479,7 @@ void build_nearest3(const double pos_m[3], int out_idx[3], double out_dist_au[3]
             }
         }
 
+        /* Merge pass results into output, skipping duplicates. */
         for (int k = 0; k < 3; k++) {
             if (out_idx[k] >= 0 || idx[k] < 0) continue;
             int used = 0;
@@ -347,12 +495,14 @@ void build_nearest3(const double pos_m[3], int out_idx[3], double out_dist_au[3]
             if (out_idx[k] < 0) filled = 0;
         if (filled) break;
 
+        /* Widen mode for next pass: 0→1, 1→2, 2→1 */
         if (mode == 0) mode = 1;
         else if (mode == 1) mode = 2;
         else mode = 1;
         if (pass == 2) break;
     }
 
+    /* Emergency fallback: fill remaining slots with nearest un-used bodies. */
     for (int k = 0; k < 3; k++) {
         if (out_idx[k] >= 0) continue;
         double best = DBL_MAX;
@@ -379,6 +529,7 @@ void build_nearest3(const double pos_m[3], int out_idx[3], double out_dist_au[3]
     }
 }
 
+/* ── parent helpers ───────────────────────────────────────────────────────── */
 static int nearest_star(const double pos_m[3])
 {
     int best_idx = -1;
@@ -432,6 +583,24 @@ static int nearest_nonstar(const double pos_m[3])
     return best_idx;
 }
 
+/* ── orbital velocity ─────────────────────────────────────────────────────── */
+/*
+ * add_parent_velocity — give the new body a circular orbit around 'parent'.
+ *
+ * Step 1: Inherit parent's bulk velocity (parent may itself be orbiting a star).
+ * Step 2: Compute the separation vector r from parent to new body.
+ * Step 3: Find a tangent vector t = r × Y_up (cross product).
+ *         This is perpendicular to both r and world-up, giving a prograde
+ *         direction for a near-equatorial orbit.
+ * Step 4: If r is nearly parallel to Y_up (|t| ≈ 0), fall back to using the
+ *         camera forward direction projected into the XZ plane. This handles
+ *         bodies placed directly above/below the parent.
+ * Step 5: Add orbital speed v_circ = sqrt(GM / |r|) along the normalised tangent.
+ *
+ * The result is an exact circular orbit in a plane defined by r and Y_up.
+ * Real orbits are rarely in this exact plane, but it avoids the radial
+ * trajectory that would send the body crashing into the parent.
+ */
 static void add_parent_velocity(BodyCreateSpec *spec, int parent)
 {
     if (parent < 0) return;
@@ -447,12 +616,14 @@ static void add_parent_velocity(BodyCreateSpec *spec, int parent)
     double gm = G_CONST * g_bodies[parent].mass;
     if (r <= 0.0 || gm <= 0.0) return;
 
+    /* Tangent = r × world_up. Degenerates when r ≈ Y axis. */
     double up[3] = {0.0, 1.0, 0.0};
     double tx = ry*up[2] - rz*up[1];
     double ty = rz*up[0] - rx*up[2];
     double tz = rx*up[1] - ry*up[0];
     double tl = sqrt(tx*tx + ty*ty + tz*tz);
     if (tl < 1e-9) {
+        /* Fallback: use camera forward XZ component as tangent. */
         float fdx, fdy, fdz;
         cam_get_dir(&fdx, &fdy, &fdz);
         tx = (double)fdz;
@@ -468,6 +639,22 @@ static void add_parent_velocity(BodyCreateSpec *spec, int parent)
     spec->vel[2] += tz / tl * v;
 }
 
+/* ── placement ────────────────────────────────────────────────────────────── */
+/*
+ * build_place_current — spawn the currently selected preset at the preview
+ * position and register it with all subsystems.
+ *
+ * Parent inference order:
+ *   1. wants_nonstar_parent (moon): nearest non-star body
+ *   2. wants_planet_parent (planet): nearest star within BUILD_PARENT_STAR_MAX_AU
+ *   3. Fallback: same star query (ensures no planet is parentless near a star)
+ *
+ * After placement:
+ *   - Stars trigger universe_rebind_to_nearest_stars() so existing planets
+ *     adopt the new star if it is closer than their current parent.
+ *   - trails_reset_body() seeds the trail ring with the current position so
+ *     the trail starts clean (no stale samples from before placement).
+ */
 int build_place_current(void)
 {
     if (!g_build_mode || g_nbodies >= MAX_BODIES) return -1;

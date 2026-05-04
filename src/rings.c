@@ -1,23 +1,55 @@
 /*
  * rings.c — Keplerian ring particle system, data-driven from universe.json
  *
- * Physics
- * ───────
- * Each particle follows a Keplerian elliptical orbit around its parent body.
- * The CPU advances the mean anomaly  M += n·dt  each physics sub-step.
- * The GPU solves the first-order Kepler equation every frame.
+ * ── Physics model ────────────────────────────────────────────────────────
  *
- * Ring-plane orientation
- * ──────────────────────
- * Each planet's ring plane is perpendicular to its rotation pole.
- * We build an orthonormal basis {b1, b2, pole} by rotating the ecliptic
- * frame about the X-axis by the planet's obliquity.
+ * Each ring particle follows a Keplerian elliptical orbit:
+ *   - The CPU advances the mean anomaly M each physics step: M += n × dt
+ *     where n = √(GM/a³) is the mean motion in rad/s.
+ *   - The GPU (ring.vert) solves the Kepler equation E − e·sin(E) = M
+ *     via Newton-Raphson each frame to compute the particle's screen position.
+ *     This offloads the O(N) per-particle position computation entirely to the GPU.
  *
- * LOD
- * ───
- *   dist > SPRITE_DIST  →  flat sprite quad
- *   dist > LOD_DIST     →  reduced particle count
- *   dist ≤ LOD_DIST     →  full particle count
+ * ── Per-particle data layout (8 floats per particle) ────────────────────
+ *
+ *   [0] M0    — current mean anomaly (radians), updated by rings_tick()
+ *   [1] a_au  — semi-major axis (AU)
+ *   [2] e     — eccentricity
+ *   [3] omega — argument of periapsis (radians)
+ *   [4] h     — vertical displacement from ring plane (AU), small for thin disc
+ *   [5] r     — red channel (particle color)
+ *   [6] g     — green channel
+ *   [7] b     — blue channel
+ *
+ * The corresponding n_arr[] stores the pre-computed mean motion (rad/s) for
+ * each particle at the same index.
+ *
+ * ── Semi-major axis distribution ─────────────────────────────────────────
+ *
+ * Uniform sampling in a² (instead of in a) gives equal particle area density
+ * across the disc annulus:
+ *   a = √(r²_min + u × (r²_max − r²_min))   where u ~ Uniform[0,1]
+ * This mirrors the asteroids.c belt distribution; area-uniform sampling avoids
+ * over-density near the inner edge.
+ *
+ * ── Ring-plane orientation ────────────────────────────────────────────────
+ *
+ * Ring plane = perpendicular to the planet's rotation pole.
+ * The basis {b1, b2, pole} is built by rotating the ecliptic frame around X
+ * by the planet's obliquity angle:
+ *   b1   = (1, 0, 0)                  — fixed ecliptic X
+ *   b2   = (0, sin(obl), −cos(obl))   — 90° from pole in the ring plane
+ *   pole = (0, cos(obl),  sin(obl))   — planet's rotation axis
+ *
+ * ── LOD switching ─────────────────────────────────────────────────────────
+ *
+ *   dist > SPRITE_DIST  →  flat sprite quad (single textured disc billboard)
+ *   dist ∈ [LOD_DIST, SPRITE_DIST] →  reduced particle count (n_lod)
+ *   dist ≤ LOD_DIST     →  full particle count (n_full)
+ *
+ * The sprite quad uses ring_sprite.frag (Saturn texture) or
+ * ring_sprite_generic.frag (procedural ring drawn by inner/outer radius),
+ * selected by the JSON "shader_type" field.
  */
 #include "rings.h"
 #include "body.h"
@@ -30,22 +62,25 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#define SPRITE_DIST   0.2f
-#define LOD_DIST      0.05f
-#define MAX_ZONES     16
+#define SPRITE_DIST   0.2f    /* AU: farther than this → flat sprite */
+#define LOD_DIST      0.05f   /* AU: farther than this → reduced count */
+#define MAX_ZONES     16      /* maximum annulus zones per ring descriptor */
 
-/* ── Zone ───────────────────────────────────────────────────────────── */
+/* ── Zone ── one concentric annulus band of a ring disc ────────────────── */
 typedef struct {
-    float r_min, r_max;
-    float density;
-    float r, g, b;
+    float r_min, r_max;   /* inner / outer radius in km */
+    float density;        /* fraction of total particles allocated to this zone */
+    float r, g, b;        /* base particle color */
 } Zone;
 
-/* ── Active disc instances ──────────────────────────────────────────── */
-static ParticleDisc *s_discs  = NULL;
+/* ── Disc instances loaded from universe.json ───────────────────────────── */
+static ParticleDisc *s_discs   = NULL;
 static int           s_n_discs = 0;
 
-/* ── XorShift32 PRNG ────────────────────────────────────────────────── */
+/* ── XorShift32 PRNG ─────────────────────────────────────────────────────
+ * Used for deterministic ring particle generation.  The seed is set per-disc
+ * from "seed_full" / "seed_lod" in the JSON so regenerating (e.g. after a
+ * collision retune) gives the same ring layout.                            */
 static uint32_t s_rng = 1;
 static void  s_seed(uint32_t seed) { s_rng = seed ? seed : 1; }
 static float s_randf(void) {
@@ -55,15 +90,25 @@ static float s_randf(void) {
     return (float)(s_rng >> 8) * (1.0f / (float)(1 << 24));
 }
 
-/* ── build_basis — ring-plane orthonormal basis from obliquity ───────  */
+/* ── build_basis — ring-plane orthonormal frame from planet obliquity ───── */
 static void build_basis(ParticleDisc *d, float obl_deg)
 {
     float obl = obl_deg * (float)(PI / 180.0);
-    d->b1[0] = 1.0f; d->b1[1] = 0.0f;       d->b1[2] = 0.0f;
-    d->b2[0] = 0.0f; d->b2[1] = sinf(obl);  d->b2[2] = -cosf(obl);
+    d->b1[0] = 1.0f; d->b1[1] = 0.0f;        d->b1[2] = 0.0f;
+    d->b2[0] = 0.0f; d->b2[1] =  sinf(obl);  d->b2[2] = -cosf(obl);
     d->pole[0] = 0.0f; d->pole[1] = cosf(obl); d->pole[2] = sinf(obl);
 }
 
+/*
+ * retune_disc_parent — reattach a disc to a new parent body after absorption.
+ *
+ * Called by rings_on_body_absorbed() when the impactor carries a ring and the
+ * target absorbs it.  Updates the basis vectors from the new parent's obliquity
+ * and recomputes every particle's mean motion n = √(GM/a³) from the new GM.
+ *
+ * Must recompute n for all particles because n ∝ √(GM) — the new parent has
+ * a different mass, so all orbital periods change.
+ */
 static void retune_disc_parent(ParticleDisc *d, int parent_idx)
 {
     if (!d || parent_idx < 0 || parent_idx >= g_nbodies) return;
@@ -86,7 +131,21 @@ static void retune_disc_parent(ParticleDisc *d, int parent_idx)
     d->initialized = 1;
 }
 
-/* ── bake_particles ─────────────────────────────────────────────────── */
+/*
+ * bake_particles — fill a particle data array by sampling orbits within zones.
+ *
+ * For each zone, particles are distributed by `density` fraction.  The last
+ * zone absorbs rounding remainder so all n particles are placed.
+ *
+ * Per particle:
+ *   a_au = √(r²_min_au + u × (r²_max_au − r²_min_au))  [area-uniform in AU]
+ *   M0   = uniform in [0, 2π]
+ *   e    = uniform in [0, e_max]
+ *   omega= uniform in [0, 2π]
+ *   h    = uniform in [−h_scale/2, h_scale/2]  (disc thickness in AU)
+ *   color= zone base color × brightness jitter [0.85, 1.0]
+ *   n    = √(GM / a³)  pre-computed in rad/s
+ */
 static void bake_particles(float *data, float *n_arr, int n,
                             const Zone *zones, int n_zones,
                             double gm, float e_max, float h_scale)
@@ -97,7 +156,7 @@ static void bake_particles(float *data, float *n_arr, int n,
                   ? (n - idx)
                   : (int)(zones[z].density * n);
 
-        float r_min_au = zones[z].r_min / 1.496e8f;
+        float r_min_au = zones[z].r_min / 1.496e8f;   /* km → AU */
         float r_max_au = zones[z].r_max / 1.496e8f;
         float r2_min = r_min_au * r_min_au;
         float r2_max = r_max_au * r_max_au;
@@ -115,18 +174,19 @@ static void bake_particles(float *data, float *n_arr, int n,
             data[idx*8+3] = omega;
             data[idx*8+4] = h;
 
-            float j = 0.85f + 0.15f * s_randf();
+            float j = 0.85f + 0.15f * s_randf();   /* brightness jitter */
             data[idx*8+5] = zones[z].r * j;
             data[idx*8+6] = zones[z].g * j;
             data[idx*8+7] = zones[z].b * j;
 
-            double a_m = (double)a_au * 1.496e11;
+            double a_m = (double)a_au * 1.496e11;   /* AU → metres */
             n_arr[idx] = (float)sqrt(gm / (a_m * a_m * a_m));
         }
     }
 }
 
-/* ── VBO attribute layout ───────────────────────────────────────────── */
+/* Set up the 8-float-per-particle VAO attribute pointers (loc 0..5).
+ * Locations 0..4 are individual floats; loc 5 is vec3 (rgb). */
 static void setup_particle_attribs(void) {
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 1, GL_FLOAT, GL_FALSE, 8*sizeof(float), (void*)(0*sizeof(float)));
@@ -142,9 +202,10 @@ static void setup_particle_attribs(void) {
     glVertexAttribPointer(5, 3, GL_FLOAT, GL_FALSE, 8*sizeof(float), (void*)(5*sizeof(float)));
 }
 
-/* ── init_disc_gl ───────────────────────────────────────────────────── */
+/* Compile shaders and upload initial particle data for one disc. */
 static void init_disc_gl(ParticleDisc *d)
 {
+    /* ring.vert solves the Kepler equation per-particle on the GPU */
     d->shader = gl_shader_load("assets/shaders/ring.vert",
                                "assets/shaders/color.frag");
     if (!d->shader) return;
@@ -154,18 +215,21 @@ static void init_disc_gl(ParticleDisc *d)
     d->loc_b2     = glGetUniformLocation(d->shader, "u_b2");
     d->loc_pole   = glGetUniformLocation(d->shader, "u_pole");
 
+    /* Full-count VAO/VBO */
     d->vao_full = gl_vao_create();
     d->vbo_full = gl_vbo_create(d->n_full * 8 * sizeof(float),
                                 d->data_full, GL_DYNAMIC_DRAW);
     setup_particle_attribs();
     glBindVertexArray(0);
 
+    /* LOD VAO/VBO */
     d->vao_lod = gl_vao_create();
     d->vbo_lod = gl_vbo_create(d->n_lod * 8 * sizeof(float),
                                d->data_lod, GL_DYNAMIC_DRAW);
     setup_particle_attribs();
     glBindVertexArray(0);
 
+    /* Sprite shader: "saturn" → textured disc; anything else → procedural */
     const char *frag = d->use_generic_sprite
                        ? "assets/shaders/ring_sprite_generic.frag"
                        : "assets/shaders/ring_sprite.frag";
@@ -184,6 +248,7 @@ static void init_disc_gl(ParticleDisc *d)
         d->sp_loc_alpha_max  = glGetUniformLocation(d->sprite_shader, "u_alpha_max");
     }
 
+    /* Sprite quad VBO: 6 vertices × 3 floats (one quad, two triangles) */
     d->sprite_vao = gl_vao_create();
     d->sprite_vbo = gl_vbo_create(6 * 3 * sizeof(float), NULL, GL_DYNAMIC_DRAW);
     glEnableVertexAttribArray(0);
@@ -191,7 +256,13 @@ static void init_disc_gl(ParticleDisc *d)
     glBindVertexArray(0);
 }
 
-/* ── build_sprite_quad ──────────────────────────────────────────────── */
+/*
+ * build_sprite_quad — construct a flat ring disc quad in world space.
+ *
+ * The disc lies in the ring plane (spanned by b1, b2).  The quad extends
+ * from (cx−R, cy−R) to (cx+R, cy+R) in ring-plane coordinates.  R is set
+ * to the disc's outer sprite radius so the sprite covers the full ring extent.
+ */
 static void build_sprite_quad(float *verts,
                                float cx, float cy, float cz,
                                float R,
@@ -213,15 +284,28 @@ static void build_sprite_quad(float *verts,
     memcpy(verts+15, c[3], 12);
 }
 
-/* ── render_disc ────────────────────────────────────────────────────── */
+/*
+ * render_disc — render one ring disc at the appropriate LOD.
+ *
+ * Camera-relative distance (computed in double → float) determines which path:
+ *
+ *   SPRITE path (dist > SPRITE_DIST):
+ *     Build a flat quad in the ring plane and draw it with the sprite shader.
+ *     This replaces thousands of individual particles with one textured disc
+ *     that is indistinguishable at the viewing distance.
+ *
+ *   PARTICLE path (dist ≤ SPRITE_DIST):
+ *     Upload updated mean anomaly data (M0 array) to the VBO via glBufferSubData.
+ *     ring.vert solves Kepler's equation on the GPU and positions each particle.
+ *     Full particle count within LOD_DIST; reduced count beyond that.
+ */
 static void render_disc(const ParticleDisc *d, const float vp[16])
 {
     Body *par = &g_bodies[d->parent_idx];
     float px = (float)(par->pos[0] * RS);
     float py = (float)(par->pos[1] * RS);
     float pz = (float)(par->pos[2] * RS);
-    /* Camera-relative distance: subtract in double before cast to float to
-     * avoid float32 cancellation when the ring parent is far from the origin. */
+    /* Camera-relative distance in double → float to avoid float32 cancellation */
     float dx   = (float)(par->pos[0] * RS - g_cam.pos[0]);
     float dy   = (float)(par->pos[1] * RS - g_cam.pos[1]);
     float dz   = (float)(par->pos[2] * RS - g_cam.pos[2]);
@@ -260,10 +344,11 @@ static void render_disc(const ParticleDisc *d, const float vp[16])
     } else {
         if (!d->shader) return;
 
-        int    n   = (dist > LOD_DIST) ? d->n_lod   : d->n_full;
-        float *data= (dist > LOD_DIST) ? d->data_lod : d->data_full;
-        GLuint vao = (dist > LOD_DIST) ? d->vao_lod  : d->vao_full;
-        GLuint vbo = (dist > LOD_DIST) ? d->vbo_lod  : d->vbo_full;
+        /* Select full or LOD particle buffer by distance */
+        int    n   = (dist > LOD_DIST) ? d->n_lod    : d->n_full;
+        float *data= (dist > LOD_DIST) ? d->data_lod  : d->data_full;
+        GLuint vao = (dist > LOD_DIST) ? d->vao_lod   : d->vao_full;
+        GLuint vbo = (dist > LOD_DIST) ? d->vbo_lod   : d->vbo_full;
 
         glUseProgram(d->shader);
         glUniformMatrix4fv(d->loc_vp,     1, GL_FALSE, vp);
@@ -274,6 +359,7 @@ static void render_disc(const ParticleDisc *d, const float vp[16])
 
         glBindVertexArray(vao);
         glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        /* Upload updated M0 values (and unchanged a,e,omega,h,rgb) each frame */
         glBufferSubData(GL_ARRAY_BUFFER, 0, n * 8 * sizeof(float), data);
 
         glEnable(GL_DEPTH_TEST);
@@ -283,11 +369,21 @@ static void render_disc(const ParticleDisc *d, const float vp[16])
     }
 }
 
-/* ── public ─────────────────────────────────────────────────────────── */
+/* ── public API ─────────────────────────────────────────────────────────── */
 
+/*
+ * rings_init — parse "rings" array from universe.json and build all disc data.
+ *
+ * For each ring entry:
+ *   1. Find the parent body by name.
+ *   2. Parse zones (annulus bands with density, color, radii).
+ *   3. Allocate particle arrays (full and LOD counts).
+ *   4. Build ring-plane basis from parent obliquity.
+ *   5. Bake particle orbits (bake_particles) for both full and LOD arrays.
+ *   6. Upload to GPU (init_disc_gl).
+ */
 void rings_init(const char *path)
 {
-    /* Parse rings section from universe.json */
     JsonNode *root = json_parse_file(path);
     if (!root) {
         fprintf(stderr, "[Rings] cannot parse '%s'\n", path);
@@ -301,7 +397,6 @@ void rings_init(const char *path)
         return;
     }
 
-    /* Count entries */
     int count = 0;
     { JsonNode *n = rings_arr->first_child; while (n) { count++; n = n->next; } }
     if (count == 0) { json_free(root); return; }
@@ -312,7 +407,7 @@ void rings_init(const char *path)
 
     JsonNode *rnode = rings_arr->first_child;
     while (rnode) {
-        const char *body_name  = json_str(json_get(rnode, "body"), "");
+        const char *body_name   = json_str(json_get(rnode, "body"),        "");
         const char *shader_type = json_str(json_get(rnode, "shader_type"), "generic");
         int    n_full      = (int)json_num(json_get(rnode, "n_full"),       1000);
         int    n_lod       = (int)json_num(json_get(rnode, "n_lod"),         200);
@@ -322,7 +417,6 @@ void rings_init(const char *path)
         float  h_scale     = (float)json_num(json_get(rnode, "h_scale"),     1e-6);
         float  sprite_r    = (float)json_num(json_get(rnode, "sprite_r_au"), 0.001);
 
-        /* Find parent body */
         int par_idx = -1;
         for (int i = 0; i < g_nbodies; i++) {
             if (strcmp(g_bodies[i].name, body_name) == 0) { par_idx = i; break; }
@@ -333,7 +427,6 @@ void rings_init(const char *path)
             continue;
         }
 
-        /* Parse zones */
         Zone zones[MAX_ZONES];
         int  n_zones = 0;
         JsonNode *zones_arr = json_get(rnode, "zones");
@@ -354,10 +447,10 @@ void rings_init(const char *path)
         if (n_zones == 0) { rnode = rnode->next; continue; }
 
         ParticleDisc *disc = &s_discs[s_n_discs++];
-        disc->parent_idx     = par_idx;
-        disc->n_full         = n_full;
-        disc->n_lod          = n_lod;
-        disc->sprite_r       = sprite_r;
+        disc->parent_idx         = par_idx;
+        disc->n_full             = n_full;
+        disc->n_lod              = n_lod;
+        disc->sprite_r           = sprite_r;
         disc->use_generic_sprite = (strcmp(shader_type, "saturn") != 0);
 
         if (disc->use_generic_sprite) {
@@ -399,6 +492,13 @@ void rings_init(const char *path)
     json_free(root);
 }
 
+/*
+ * rings_tick — advance mean anomaly for all ring particles: M += n × dt.
+ *
+ * M is kept in [0, 2π) by subtracting 2π × floor(M / 2π) rather than using
+ * fmod, which can be slow for many particles.  The result is passed to the
+ * GPU each frame via glBufferSubData in render_disc().
+ */
 void rings_tick(double dt)
 {
     const float TWO_PI = 6.28318530718f;
@@ -424,6 +524,7 @@ void rings_tick(double dt)
     }
 }
 
+/* Draw all initialized, alive ring discs at their current LOD. */
 void rings_render(const float vp[16])
 {
     for (int d = 0; d < s_n_discs; d++) {
@@ -435,6 +536,20 @@ void rings_render(const float vp[16])
     }
 }
 
+/*
+ * rings_on_body_absorbed — handle ring ownership transfer after a collision.
+ *
+ * Two cases:
+ *   - Impactor had a ring (disc->parent_idx == impactor_idx):
+ *       If the target already has its own ring, just disable this one.
+ *       Otherwise, retune it to orbit the target using the target's mass and obliquity.
+ *
+ *   - Target had a ring (disc->parent_idx == target_idx):
+ *       Retune it to match the target's updated mass/obliquity after absorption.
+ *
+ * Stars and already-ringed targets don't inherit a second ring because overlapping
+ * disc geometry would not look correct.
+ */
 void rings_on_body_absorbed(int target_idx, int impactor_idx)
 {
     for (int d = 0; d < s_n_discs; d++) {
@@ -457,11 +572,13 @@ void rings_on_body_absorbed(int target_idx, int impactor_idx)
                 retune_disc_parent(disc, target_idx);
             }
         } else if (disc->parent_idx == target_idx) {
+            /* Target's own ring: retune for updated mass after absorption */
             retune_disc_parent(disc, target_idx);
         }
     }
 }
 
+/* Free all CPU-side particle data and GPU resources. */
 void rings_shutdown(void)
 {
     for (int d = 0; d < s_n_discs; d++) {
