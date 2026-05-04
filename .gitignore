@@ -56,3 +56,7 @@ dkms.conf
 
 # Release packaging output
 dist/
+
+# AI assistant worktrees
+.claude/worktrees/
+.codex/worktrees/
