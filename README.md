@@ -13,12 +13,12 @@ Not a screensaver. Not a game. A sandbox for curiosity.
 
 <table>
   <tr>
-    <td><img src="https://github.com/user-attachments/assets/38309e42-acfb-4728-93d3-761169c5174b" alt="Planets"/><br/><sub>Discover planets and other celestial bodies</sub></td>
-    <td><img src="https://github.com/user-attachments/assets/f1493379-c699-411f-aa56-5355c950b04c" alt="Solar system"/><br/><sub>Simulate entire solar systems</sub></td>
+    <td><img src="https://github.com/user-attachments/assets/38309e42-acfb-4728-93d3-761169c5174b" alt="Planets"/><br/><sub><b>Discover planets and other celestial bodies</b></sub></td>
+    <td><img src="https://github.com/user-attachments/assets/f1493379-c699-411f-aa56-5355c950b04c" alt="Solar system"/><br/><sub><b>Simulate entire solar systems</b></sub></td>
   </tr>
   <tr>
-    <td><img src="https://github.com/user-attachments/assets/3c1df437-4e81-4a35-b3c6-45ea37121afd" alt="Collision"/><br/><sub>Collision of bodies using orbital mechanics</sub></td>
-    <td><img src="https://github.com/user-attachments/assets/991701d9-f47b-4ab8-857d-5757fb9bfddf" alt="Build mode"/><br/><sub>Build your own systems using build mode</sub></td>
+    <td><img src="https://github.com/user-attachments/assets/3c1df437-4e81-4a35-b3c6-45ea37121afd" alt="Collision"/><br/><sub><b>Collision of bodies using orbital mechanics</b></sub></td>
+    <td><img src="https://github.com/user-attachments/assets/7340ad70-9054-48a4-8943-88ab3a7d8392" alt="Build mode"/><br/><sub><b>Build your own systems using build mode</b></sub></td>
   </tr>
 </table>
 
