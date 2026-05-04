@@ -1,11 +1,79 @@
-<img width="1920" height="710" alt="OpenVerse_Logo_Banner" src="https://github.com/user-attachments/assets/29ec1633-2c24-4738-bfa3-7923fc10b0d0" />
+<img width="1920" height="734" alt="openverse_logo_update" src="https://github.com/user-attachments/assets/2878c365-11df-4f4a-af8e-3a141d69ae85" />
 
-# OpenVerse
+# OpenVerse - An open-source universe simulator
 
 **OpenVerse** is an open-source, open-world universe simulator.  
 The goal is to simulate as much of the universe as possible - multiple star systems, planets, moons, asteroid belts, rings, and more - driven by real gravitational physics.
 
 Not a screensaver. Not a game. A sandbox for curiosity.
+
+---
+
+## Installation
+
+> No build tools required — just download and run.
+
+**Step 1 — Go to the [Releases page](https://github.com/ortanaV2/OpenVerse/releases)**
+
+---
+
+**Step 2 — Select the most recent version**
+
+<img width="1031" height="636" alt="openverse_installation_step_1" src="https://github.com/user-attachments/assets/e5ff55d2-dc9c-4cf6-8804-9fc2ee798d51" />
+
+---
+
+**Step 3 — Download the package for your system**
+
+Click the `.zip` for Windows or the `.tar.gz` for Linux under the **Assets** section.
+
+<img width="1082" height="233" alt="openverse_installation_step_2" src="https://github.com/user-attachments/assets/80cbce65-4cad-4855-9c93-0a7141e701b4" />
+
+---
+
+**Step 4 — Unzip the downloaded archive**
+
+Extract the folder to any location on your machine.
+
+<img width="776" height="709" alt="openverse_installation_step_3" src="https://github.com/user-attachments/assets/c3f7b65d-6cf4-4b4c-85cc-8aa1adbe6d9e" />
+
+---
+
+**Step 5 — Run the executable**
+
+- **Windows:** Double-click `verse.exe`
+- **Linux:** Open a terminal in the folder and run `./verse`
+
+<img width="797" height="158" alt="image" src="https://github.com/user-attachments/assets/62e1ebfb-949a-420c-b9e3-0928380c2c59" />
+
+---
+
+## Showcase
+
+<img width="1845" height="1048" alt="image" src="https://github.com/user-attachments/assets/6aafbee4-406a-44a4-9aa6-4c18e95b81a0" />
+
+---
+
+## Controls
+
+| Key / Input | Action |
+|---|---|
+| Left-click | Enter free-look (captures mouse) |
+| Escape | Open system menu / exit build mode / release mouse |
+| W / S | Move forward / backward |
+| A / D | Strafe left / right |
+| Q / E | Move down / up |
+| Mouse | Look around |
+| Scroll | Adjust camera speed |
+| T | Toggle warp mode |
+| B | Toggle build mode |
+| Tab + Scroll | Cycle build presets (in build mode) |
+| F11 / Alt+Enter | Toggle fullscreen |
+| `+` / `-` | Simulation speed up / down |
+| Space | Pause / resume |
+| R | Reset camera near the Sun |
+
+**Simulation speeds:** `0 → 0.1 → 0.25 → 0.5 → 1 → 2 → 5 → 10 → 30 → 60 → 100 → 365` days/s
 
 ---
 
@@ -24,73 +92,53 @@ Space is incomprehensibly large. Most simulations either abstract that away or c
 
 | Feature | Status |
 |---|---|
-| N-body gravity (RESPA integrator) | ✓ |
-| Solar system — Sun, 8 planets, dwarf planets | ✓ |
-| Moons (Luna, Phobos, Deimos, Galilean moons, Titan, …) | ✓ |
-| Axial tilt & planetary rotation | ✓ |
-| Atmospheric glow (Venus, Earth, Mars, gas giants, Titan) | ✓ |
-| Saturn rings — Keplerian particles + LOD sprite | ✓ |
-| Uranus & Neptune rings | ✓ |
-| Main Belt & Kuiper Belt — gravity-integrated particles | ✓ |
-| Orbital trails | ✓ |
-| Logarithmic depth buffer (cm → light-years in one scene) | ✓ |
-| Multiple star systems | ✓ |
-| Nearby exoplanet systems | ✓ |
-| Data-driven universe config | ✓ |
-| Variable warp travel | ✓ |
+| N-body gravity — RESPA hierarchical integrator, adaptive per-system timestep | ✓ |
+| Full solar system — Sun, 8 planets, dwarf planets, and major moons | ✓ |
+| Ring systems — Saturn (Keplerian particles), Uranus & Neptune rings | ✓ |
+| Asteroid belts — Main Belt & Kuiper Belt with gravity-integrated particles | ✓ |
+| Planet collision & merge — animation, particle spray, persistent craters, spin transfer | ✓ |
+| Build mode — spawn and place bodies at runtime | ✓ |
+| Atmospheric glow — Venus, Earth, Mars, gas giants, Titan | ✓ |
+| Procedural planet textures, axial tilt & rotation | ✓ |
+| Logarithmic depth buffer — cm to light-years in a single scene | ✓ |
+| Multiple star systems & nearby exoplanet systems | ✓ |
+| Data-driven universe config (JSON) | ✓ |
+| Warp travel — up to 1 light-year/s | ✓ |
+| Supernovae | planned |
 | Black holes | planned |
+| Expand Universe | planned |
 
 ---
 
-## Building
+## Building from Source
+
+*For contributors and developers. End users should use the [pre-built releases](#installation) above.*
 
 **Windows (MSYS2 / MinGW-w64)**
 ```bash
-pacman -S mingw-w64-x86_64-SDL2 mingw-w64-x86_64-SDL2_ttf mingw-w64-x86_64-glew
+pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-make \
+          mingw-w64-x86_64-SDL2 mingw-w64-x86_64-SDL2_ttf mingw-w64-x86_64-glew
 mingw32-make
 ./verse.exe
 ```
 
 **Linux**
 ```bash
-sudo apt install libsdl2-dev libsdl2-ttf-dev libglew-dev
+sudo apt install build-essential libsdl2-dev libsdl2-ttf-dev libglew-dev
 make
 ./verse
 ```
 
----
-
-## Controls
-
-| Key / Input | Action |
-|---|---|
-| Left-click | Enter free-look (captures mouse) |
-| Escape | Open system menu / release mouse from free-look |
-| W / S | Move forward / backward |
-| A / D | Strafe left / right |
-| Q / E | Move down / up |
-| Mouse | Look around |
-| Scroll | Camera speed / warp speed |
-| T | Toggle warp mode |
-| F11 / Alt+Enter | Toggle fullscreen |
-| `+` / `-` | Simulation speed up / down |
-| Space | Pause / resume |
-| R | Reset camera near the Sun, looking at the Sun |
-
-**Simulation speeds:** `0 → 0.1 → 0.25 → 0.5 → 1 → 2 → 5 → 10 → 30 → 60 → 100 → 365 → 730 → 1825 → 3650` days/s
+For a full technical reference of the codebase, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
-
-## Showcase
-
-<img width="1263" height="713" alt="image" src="https://github.com/user-attachments/assets/f50e9843-0965-46bb-957b-9d3794b07a5c" />
-*Fly wherever you want and discover new perspectives.*
-
-<img width="1273" height="712" alt="image" src="https://github.com/user-attachments/assets/47b08b19-8944-46ab-8b90-c19a2dfcb592" />
-*Our solar system was precisely modeled with many small details.*
-
----
-
-## Contributing
 
 OpenVerse is open source and early in development. The physics engine, rendering pipeline, and coordinate system are all designed to scale beyond a single solar system. If you want to help push toward a truly open universe, contributions are welcome.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on reporting bugs, requesting features, and submitting pull requests.
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
