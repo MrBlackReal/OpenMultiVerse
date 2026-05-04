@@ -13,7 +13,7 @@ Not a screensaver. Not a game. A sandbox for curiosity.
 
 > No build tools required — just download and run.
 
-**Step 1 — Go to the [Releases page](https://github.com/ortanaV2/OpenVerse/releases)**
+**Step 1 — Go to the [Releases page](https://github.com/ortanaV2/OpenVerse/tags)**
 
 ---
 
@@ -50,7 +50,17 @@ Extract the folder to any location on your machine.
 
 ## Showcase
 
-<img width="1845" height="1048" alt="image" src="https://github.com/user-attachments/assets/6aafbee4-406a-44a4-9aa6-4c18e95b81a0" />
+### Discover planets and other celestial bodies in our universe
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/38309e42-acfb-4728-93d3-761169c5174b" />
+
+### Simulate entire solar systems
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/f1493379-c699-411f-aa56-5355c950b04c" />
+
+### Collision of bodies using orbital mechanics
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/3c1df437-4e81-4a35-b3c6-45ea37121afd" />
+
+### Build your own systems using build-mode
+<img width="1771" height="916" alt="image" src="https://github.com/user-attachments/assets/991701d9-f47b-4ab8-857d-5757fb9bfddf" />
 
 ---
 
