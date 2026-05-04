@@ -9,58 +9,66 @@ Not a screensaver. Not a game. A sandbox for curiosity.
 
 ---
 
+## Showcase
+
+<table>
+  <tr>
+    <td><img src="https://github.com/user-attachments/assets/38309e42-acfb-4728-93d3-761169c5174b" alt="Planets"/><br/><sub>Discover planets and other celestial bodies</sub></td>
+    <td><img src="https://github.com/user-attachments/assets/f1493379-c699-411f-aa56-5355c950b04c" alt="Solar system"/><br/><sub>Simulate entire solar systems</sub></td>
+  </tr>
+  <tr>
+    <td><img src="https://github.com/user-attachments/assets/3c1df437-4e81-4a35-b3c6-45ea37121afd" alt="Collision"/><br/><sub>Collision of bodies using orbital mechanics</sub></td>
+    <td><img src="https://github.com/user-attachments/assets/991701d9-f47b-4ab8-857d-5757fb9bfddf" alt="Build mode"/><br/><sub>Build your own systems using build mode</sub></td>
+  </tr>
+</table>
+
+---
+
 ## Installation
 
 > No build tools required — just download and run.
 
-**Step 1 — Go to the [Releases page](https://github.com/ortanaV2/OpenVerse/tags)**
+<details>
+<summary><strong>Step 1 — Go to the Releases page</strong></summary>
 
----
+Visit [github.com/ortanaV2/OpenVerse/releases](https://github.com/ortanaV2/OpenVerse/releases)
 
-**Step 2 — Select the most recent version**
+</details>
+
+<details>
+<summary><strong>Step 2 — Select the most recent version</strong></summary>
 
 <img width="1031" height="636" alt="openverse_installation_step_1" src="https://github.com/user-attachments/assets/e5ff55d2-dc9c-4cf6-8804-9fc2ee798d51" />
 
----
+</details>
 
-**Step 3 — Download the package for your system**
+<details>
+<summary><strong>Step 3 — Download the package for your system</strong></summary>
 
 Click the `.zip` for Windows or the `.tar.gz` for Linux under the **Assets** section.
 
 <img width="1082" height="233" alt="openverse_installation_step_2" src="https://github.com/user-attachments/assets/80cbce65-4cad-4855-9c93-0a7141e701b4" />
 
----
+</details>
 
-**Step 4 — Unzip the downloaded archive**
+<details>
+<summary><strong>Step 4 — Unzip the downloaded archive</strong></summary>
 
 Extract the folder to any location on your machine.
 
 <img width="776" height="709" alt="openverse_installation_step_3" src="https://github.com/user-attachments/assets/c3f7b65d-6cf4-4b4c-85cc-8aa1adbe6d9e" />
 
----
+</details>
 
-**Step 5 — Run the executable**
+<details>
+<summary><strong>Step 5 — Run the executable</strong></summary>
 
 - **Windows:** Double-click `verse.exe`
 - **Linux:** Open a terminal in the folder and run `./verse`
 
 <img width="797" height="158" alt="image" src="https://github.com/user-attachments/assets/62e1ebfb-949a-420c-b9e3-0928380c2c59" />
 
----
-
-## Showcase
-
-### Discover planets and other celestial bodies in our universe
-<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/38309e42-acfb-4728-93d3-761169c5174b" />
-
-### Simulate entire solar systems
-<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/f1493379-c699-411f-aa56-5355c950b04c" />
-
-### Collision of bodies using orbital mechanics
-<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/3c1df437-4e81-4a35-b3c6-45ea37121afd" />
-
-### Build your own systems using build-mode
-<img width="1771" height="916" alt="image" src="https://github.com/user-attachments/assets/991701d9-f47b-4ab8-857d-5757fb9bfddf" />
+</details>
 
 ---
 
@@ -142,6 +150,8 @@ make
 For a full technical reference of the codebase, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
+
+## Contributing
 
 OpenVerse is open source and early in development. The physics engine, rendering pipeline, and coordinate system are all designed to scale beyond a single solar system. If you want to help push toward a truly open universe, contributions are welcome.
 
