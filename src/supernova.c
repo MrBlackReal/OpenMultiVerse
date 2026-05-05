@@ -11,9 +11,9 @@
 #include <stdio.h>
 
 #define SOLAR_MASS 1.98847e30
-#define FLASH_DURATION (DAY * 0.12)
-#define CORE_DURATION  (DAY * 2.4)
-#define CLOUD_DURATION (DAY * 110.0)
+#define FLASH_DURATION (DAY * 0.90)
+#define CORE_DURATION  (DAY * 7.0)
+#define CLOUD_DURATION (DAY * 320.0)
 #define SHOCK_SPEED_BASE 9.0e6
 #define CLOUD_SPEED_BASE 5.5e6
 #define FLASH_ENERGY_BASE 9.0e43
@@ -61,6 +61,20 @@ static double smoothstepd_local(double edge0, double edge1, double x)
     t = (x - edge0) / (edge1 - edge0);
     t = clampd_local(t, 0.0, 1.0);
     return t * t * (3.0 - 2.0 * t);
+}
+
+static double rise_and_fall(double age, double rise_seconds, double decay_seconds)
+{
+    double rise;
+    double decay;
+
+    if (age <= 0.0) return 0.0;
+    if (rise_seconds <= 1e-9) rise_seconds = 1e-9;
+    if (decay_seconds <= 1e-9) decay_seconds = 1e-9;
+
+    rise = 1.0 - exp(-age / rise_seconds);
+    decay = exp(-age / decay_seconds);
+    return rise * decay;
 }
 
 static int body_is_descendant_of_local(int body_idx, int ancestor_idx)
@@ -383,37 +397,51 @@ int supernova_render_events(SupernovaRenderEvent *out, int max_events,
     for (int ei = 0; ei < SUPERNOVA_MAX_EVENTS && n < max_events; ei++) {
         SupernovaEvent *e = &s_events[ei];
         SupernovaRenderEvent *r;
-        double flash_t, core_t, cloud_t;
+        double cloud_t;
         double flash_alpha, core_alpha, cloud_alpha, hot_alpha;
         double flash_radius, core_radius, cloud_radius, inner_ratio;
-        double flash_growth, core_growth, cloud_growth;
+        double core_growth, cloud_growth, cavity_growth;
+        double cloud_rise, cloud_fade;
+        double cloud_impulse, cloud_spread, end_fade;
+        double age = e->age;
 
         if (!e->active) continue;
 
-        flash_t = e->age / FLASH_DURATION;
-        core_t = e->age / CORE_DURATION;
-        cloud_t = e->age / CLOUD_DURATION;
+        cloud_t = age / CLOUD_DURATION;
+        core_growth = 1.0 - exp(-age / (DAY * 0.40));
+        cloud_growth = 1.0 - exp(-age / (DAY * 14.0));
+        cavity_growth = 1.0 - exp(-age / (DAY * 24.0));
+        cloud_rise = 1.0 - exp(-age / (DAY * 0.16));
+        cloud_fade = exp(-age / (DAY * 110.0));
+        cloud_impulse = 1.0 - exp(-age / (DAY * 0.11));
+        cloud_spread = pow(1.0 + age / (DAY * 0.85), 0.82) - 1.0;
+        end_fade = 1.0 - smoothstepd_local(0.58, 1.0, cloud_t);
 
-        flash_growth = 1.0 - exp(-flash_t * 5.2);
-        core_growth = 1.0 - exp(-core_t * 2.8);
-        cloud_growth = smoothstepd_local(0.0, 0.82, cloud_t);
+        flash_alpha = 1.28 * rise_and_fall(age, DAY * 0.012, DAY * 0.42)
+                    + 0.18 * exp(-age / (DAY * 2.2));
+        core_alpha = 0.96 * rise_and_fall(age, DAY * 0.05, DAY * 7.5)
+                   + 0.10 * exp(-age / (DAY * 32.0));
+        cloud_alpha = 0.90 * (0.26 + 0.74 * cloud_rise) * cloud_fade * end_fade * end_fade;
+        hot_alpha = 1.00 * rise_and_fall(age, DAY * 0.03, DAY * 18.0) * end_fade * end_fade;
+        core_alpha *= end_fade * end_fade;
+        flash_alpha *= end_fade * end_fade;
 
-        flash_alpha = exp(-flash_t * 6.8);
-        core_alpha = (1.0 - exp(-flash_t * 3.6)) * exp(-core_t * 1.10);
-        cloud_alpha = smoothstepd_local(0.0, 0.035, cloud_t) *
-                      (0.72 + 0.28 * smoothstepd_local(0.04, 0.30, cloud_t)) *
-                      (1.0 - smoothstepd_local(0.88, 1.0, cloud_t));
-        hot_alpha = smoothstepd_local(0.0, 0.025, cloud_t) *
-                    (1.0 - smoothstepd_local(0.22, 0.68, cloud_t));
+        flash_radius = fmax(0.12 * AU,
+                            e->initial_radius * (4.0 + 7.2 * (1.0 - exp(-age / (DAY * 0.05))))
+                          + e->shock_speed * age * 0.13);
+        core_radius = fmax(0.08 * AU,
+                           e->initial_radius * (1.9 + 4.4 * core_growth)
+                         + e->cloud_speed * age * 0.045);
+        cloud_radius = e->initial_radius * (0.58 + 0.86 * cloud_rise)
+                     + e->cloud_speed * DAY * (0.30 * cloud_impulse + 0.56 * cloud_spread)
+                     + e->initial_radius * 2.6 * cloud_growth;
+        if (cloud_radius < e->initial_radius * 0.55)
+            cloud_radius = e->initial_radius * 0.55;
+        if (cloud_radius < core_radius * 0.70)
+            cloud_radius = core_radius * 0.70;
 
-        flash_radius = fmax(0.10 * AU,
-                            e->initial_radius * (4.2 + 24.0 * flash_growth));
-        core_radius = fmax(0.07 * AU,
-                           e->initial_radius * (2.4 + 15.0 * core_growth));
-        cloud_radius = fmax(core_radius * 1.18,
-                            e->initial_radius * (2.8 + 9.5 * cloud_growth) +
-                            e->cloud_speed * e->age * 1.38);
-        inner_ratio = 0.16 + 0.54 * smoothstepd_local(0.05, 0.62, cloud_t);
+        inner_ratio = 0.06 + 0.70 * cavity_growth;
+        if (inner_ratio > 0.88) inner_ratio = 0.88;
 
         r = &out[n++];
         r->pos[0] = (float)(e->pos[0] * RS - cam_pos[0]);

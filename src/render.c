@@ -187,12 +187,18 @@ static GLint  s_sn_core_center = -1;
 static GLint  s_sn_core_radius = -1;
 static GLint  s_sn_core_right = -1;
 static GLint  s_sn_core_up = -1;
+static GLint  s_sn_core_fwd = -1;
+static GLint  s_sn_core_oc = -1;
 static GLint  s_sn_core_color = -1;
 static GLint  s_sn_core_flash = -1;
 static GLint  s_sn_core_core = -1;
+static GLint  s_sn_core_ratio = -1;
 static GLint  s_sn_core_time = -1;
 static GLint  s_sn_core_seed = -1;
 static GLint  s_sn_core_bill = -1;
+static GLint  s_sn_core_fov_tan = -1;
+static GLint  s_sn_core_aspect = -1;
+static GLint  s_sn_core_screen = -1;
 static GLint  s_sn_cloud_vp = -1;
 static GLint  s_sn_cloud_center = -1;
 static GLint  s_sn_cloud_radius = -1;
@@ -215,6 +221,8 @@ static GLuint s_supernova_flash_vbo = 0;
 static GLint  s_sn_flash_screen = -1;
 static GLint  s_sn_flash_center = -1;
 static GLint  s_sn_flash_intensity = -1;
+static GLint  s_sn_flash_radius = -1;
+static GLint  s_sn_flash_aspect = -1;
 static GLint  s_sn_flash_tint = -1;
 
 /* Glare billboard is STAR_GLARE_BILL_SCALE × the star's visual radius.
@@ -609,12 +617,18 @@ void render_init(void) {
         s_sn_core_radius = glGetUniformLocation(s_supernova_core_shader, "u_radius");
         s_sn_core_right = glGetUniformLocation(s_supernova_core_shader, "u_cam_right");
         s_sn_core_up = glGetUniformLocation(s_supernova_core_shader, "u_cam_up");
+        s_sn_core_fwd = glGetUniformLocation(s_supernova_core_shader, "u_cam_fwd");
+        s_sn_core_oc = glGetUniformLocation(s_supernova_core_shader, "u_oc");
         s_sn_core_color = glGetUniformLocation(s_supernova_core_shader, "u_color");
         s_sn_core_flash = glGetUniformLocation(s_supernova_core_shader, "u_flash_intensity");
         s_sn_core_core = glGetUniformLocation(s_supernova_core_shader, "u_core_intensity");
+        s_sn_core_ratio = glGetUniformLocation(s_supernova_core_shader, "u_core_ratio");
         s_sn_core_time = glGetUniformLocation(s_supernova_core_shader, "u_time");
         s_sn_core_seed = glGetUniformLocation(s_supernova_core_shader, "u_seed");
         s_sn_core_bill = glGetUniformLocation(s_supernova_core_shader, "u_bill_scale");
+        s_sn_core_fov_tan = glGetUniformLocation(s_supernova_core_shader, "u_fov_tan");
+        s_sn_core_aspect = glGetUniformLocation(s_supernova_core_shader, "u_aspect");
+        s_sn_core_screen = glGetUniformLocation(s_supernova_core_shader, "u_screen");
     }
 
     s_supernova_cloud_shader = gl_shader_load("assets/shaders/supernova_billboard.vert",
@@ -649,6 +663,8 @@ void render_init(void) {
         s_sn_flash_screen = glGetUniformLocation(s_supernova_flash_shader, "u_screen");
         s_sn_flash_center = glGetUniformLocation(s_supernova_flash_shader, "u_center_uv");
         s_sn_flash_intensity = glGetUniformLocation(s_supernova_flash_shader, "u_intensity");
+        s_sn_flash_radius = glGetUniformLocation(s_supernova_flash_shader, "u_radius_uv");
+        s_sn_flash_aspect = glGetUniformLocation(s_supernova_flash_shader, "u_aspect");
         s_sn_flash_tint = glGetUniformLocation(s_supernova_flash_shader, "u_tint");
         s_supernova_flash_vao = gl_vao_create();
         s_supernova_flash_vbo = gl_vbo_create(24 * sizeof(float), NULL, GL_DYNAMIC_DRAW);
@@ -1040,7 +1056,7 @@ void render_frame(const float view[16], const float proj[16],
     SupernovaRenderEvent sn_events[SUPERNOVA_MAX_EVENTS];
     int sn_count = supernova_render_events(sn_events, SUPERNOVA_MAX_EVENTS, g_cam.pos);
     float sn_flash_best = 0.0f;
-    float sn_flash_uv[2] = {0.5f, 0.5f};
+    float sn_flash_uv[3] = {0.5f, 0.5f, 0.12f};
     float sn_flash_tint[3] = {1.0f, 0.97f, 0.92f};
 
     /* Sun world position in AU units — used as lighting reference only */
@@ -1315,6 +1331,10 @@ void render_frame(const float view[16], const float proj[16],
         glUniformMatrix4fv(s_sn_core_vp, 1, GL_FALSE, vp_camrel);
         glUniform3f(s_sn_core_right, cam_right[0], cam_right[1], cam_right[2]);
         glUniform3f(s_sn_core_up, cam_up[0], cam_up[1], cam_up[2]);
+        glUniform3f(s_sn_core_fwd, cam_fwd[0], cam_fwd[1], cam_fwd[2]);
+        glUniform1f(s_sn_core_fov_tan, tanf(FOV * 0.5f * (float)(PI / 180.0)));
+        glUniform1f(s_sn_core_aspect, aspect);
+        glUniform2f(s_sn_core_screen, (float)WIN_W, (float)WIN_H);
 
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE);
@@ -1328,29 +1348,39 @@ void render_frame(const float view[16], const float proj[16],
             float dist = sqrtf(e->pos[0]*e->pos[0] + e->pos[1]*e->pos[1] + e->pos[2]*e->pos[2]);
             float apparent;
             float overlay_weight;
+            float overlay_radius;
 
             if (e->flash_intensity <= 0.001f && e->core_intensity <= 0.001f)
                 continue;
 
             glUniform3f(s_sn_core_center, e->pos[0], e->pos[1], e->pos[2]);
-            glUniform1f(s_sn_core_radius, e->core_radius);
+            glUniform1f(s_sn_core_radius, e->flash_radius);
+            glUniform3f(s_sn_core_oc, -e->pos[0], -e->pos[1], -e->pos[2]);
             glUniform3f(s_sn_core_color, e->color[0], e->color[1], e->color[2]);
             glUniform1f(s_sn_core_flash, e->flash_intensity);
             glUniform1f(s_sn_core_core, e->core_intensity);
+            glUniform1f(s_sn_core_ratio,
+                        e->flash_radius > 1e-6f ? e->core_radius / e->flash_radius : 0.32f);
             glUniform1f(s_sn_core_time, e->time_days);
             glUniform1f(s_sn_core_seed, e->seed);
-            glUniform1f(s_sn_core_bill, 10.0f);
+            glUniform1f(s_sn_core_bill, 1.18f);
             glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
 
             if (!mat4_project(vp_camrel, e->pos[0], e->pos[1], e->pos[2],
                               WIN_W, WIN_H, &sx, &sy))
                 continue;
             apparent = e->flash_radius / fmaxf(dist, e->flash_radius);
-            overlay_weight = e->flash_intensity * clampf_local(0.18f + apparent * 18.0f, 0.0f, 1.0f);
+            overlay_weight = clampf_local(e->flash_intensity * 0.80f + e->core_intensity * 0.45f,
+                                          0.0f, 1.25f)
+                           * clampf_local(0.10f + apparent * 13.0f, 0.0f, 1.0f);
+            overlay_radius = clampf_local((e->flash_radius / fmaxf(dist, 1e-4f))
+                                        / (2.0f * tanf(FOV * 0.5f * (float)(PI / 180.0f))),
+                                          0.030f, 1.10f);
             if (overlay_weight > sn_flash_best) {
                 sn_flash_best = overlay_weight;
                 sn_flash_uv[0] = sx / (float)WIN_W;
                 sn_flash_uv[1] = 1.0f - sy / (float)WIN_H;
+                sn_flash_uv[2] = overlay_radius;
                 sn_flash_tint[0] = 1.0f;
                 sn_flash_tint[1] = 0.98f - 0.05f * e->seed;
                 sn_flash_tint[2] = 0.92f + 0.05f * e->color[2];
@@ -1691,6 +1721,8 @@ void render_frame(const float view[16], const float proj[16],
         glUniform2f(s_sn_flash_screen, (float)WIN_W, (float)WIN_H);
         glUniform2f(s_sn_flash_center, sn_flash_uv[0], sn_flash_uv[1]);
         glUniform1f(s_sn_flash_intensity, sn_flash_best);
+        glUniform1f(s_sn_flash_radius, sn_flash_uv[2]);
+        glUniform1f(s_sn_flash_aspect, aspect);
         glUniform3f(s_sn_flash_tint, sn_flash_tint[0], sn_flash_tint[1], sn_flash_tint[2]);
         glBindVertexArray(s_supernova_flash_vao);
         glBindBuffer(GL_ARRAY_BUFFER, s_supernova_flash_vbo);

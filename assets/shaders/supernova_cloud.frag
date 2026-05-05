@@ -7,6 +7,7 @@ in vec2 v_uv;
 
 uniform vec3  u_oc;
 uniform vec3  u_color;
+uniform float u_radius;
 uniform float u_shell_inner;
 uniform float u_density;
 uniform float u_hot_shell;
@@ -67,12 +68,14 @@ float fbm(vec3 p) {
 void main() {
     float outer = 1.0;
     float inner = clamp(u_shell_inner, 0.05, 0.96);
+    float radius = max(u_radius, 1e-5);
+    vec3 oc_local = u_oc / radius;
     vec2 ndc = (gl_FragCoord.xy / (u_screen * 0.5)) - 1.0;
     vec3 ray_dir = normalize(u_cam_fwd
                            + u_cam_right * (ndc.x * u_aspect * u_fov_tan)
                            + u_cam_up    * (ndc.y * u_fov_tan));
-    float b = dot(u_oc, ray_dir);
-    float c = dot(u_oc, u_oc) - 1.0;
+    float b = dot(oc_local, ray_dir);
+    float c = dot(oc_local, oc_local) - 1.0;
     float disc = b * b - c;
     float t0, t1, tEnter, tExit, stepLen, eye_depth;
     float accumAlpha = 0.0;
@@ -91,16 +94,27 @@ void main() {
 
     for (int i = 0; i < 14; i++) {
         float t = tEnter + (float(i) + 0.5) * stepLen;
-        vec3 p = u_oc + ray_dir * t;
+        vec3 p = oc_local + ray_dir * t;
         float rr = length(p);
-        float shell = smoothstep(inner, inner + 0.08, rr)
-                    * (1.0 - smoothstep(0.86, 1.0, rr));
+        vec3 dir = rr > 1e-4 ? p / rr : vec3(0.0, 0.0, 1.0);
         float swirl = fbm(p * 3.5 + vec3(u_seed * 10.0, u_time * 0.22, -u_time * 0.16));
         float filaments = fbm(p.yzx * 7.5 + vec3(8.0, u_seed * 15.0, u_time * 0.11));
-        float density = shell * mix(0.30, 1.0, swirl) * mix(0.74, 1.12, filaments);
-        vec3 hot = mix(vec3(1.28, 0.78, 0.36), u_color, smoothstep(inner, 1.0, rr));
+        float macro = fbm(dir * 4.8 + vec3(u_seed * 23.0, u_time * 0.04, -u_time * 0.03));
+        float lobe = fbm(dir.zxy * 8.0 + vec3(2.0, u_seed * 31.0, u_time * 0.06));
+        float innerWarp = clamp(inner + (macro - 0.5) * 0.11 + (lobe - 0.5) * 0.05, 0.04, 0.90);
+        float outerWarp = clamp(outer - 0.10 + (macro - 0.5) * 0.16 + (swirl - 0.5) * 0.08,
+                                innerWarp + 0.08, 1.04);
+        float shell = smoothstep(innerWarp - 0.03, innerWarp + 0.08, rr)
+                    * (1.0 - smoothstep(outerWarp - 0.16, outerWarp + 0.02, rr));
+        float body = smoothstep(innerWarp * 0.78, innerWarp + 0.10, rr)
+                   * (1.0 - smoothstep(outerWarp - 0.30, outerWarp - 0.05, rr));
+        float pockets = smoothstep(0.34, 0.88, swirl) * smoothstep(0.30, 0.82, filaments);
+        float density = (shell * mix(0.34, 1.05, swirl) * mix(0.76, 1.16, filaments))
+                      + (body * pockets * (0.18 + 0.26 * u_density));
+        density *= mix(0.80, 1.16, macro) * mix(0.88, 1.10, lobe);
+        vec3 hot = mix(vec3(1.28, 0.78, 0.36), u_color, smoothstep(innerWarp, outerWarp, rr));
         vec3 cold = vec3(0.18, 0.34, 0.56);
-        vec3 sampleCol = mix(cold, hot, smoothstep(inner, 1.0, rr));
+        vec3 sampleCol = mix(cold, hot, smoothstep(innerWarp * 0.85, outerWarp, rr));
         float sampleAlpha = density * stepLen * 1.55 * (1.15 + u_hot_shell * 0.9) * u_density;
 
         sampleAlpha = clamp(sampleAlpha, 0.0, 0.32);
@@ -110,7 +124,7 @@ void main() {
 
     if (accumAlpha < 0.01) discard;
 
-    eye_depth = tExit * dot(ray_dir, u_cam_fwd);
+    eye_depth = (tExit * radius) * dot(ray_dir, u_cam_fwd);
     gl_FragDepth = log2(eye_depth + 1.0) / log2(FAR + 1.0);
     frag_color = vec4(accumColor, accumAlpha);
 }
