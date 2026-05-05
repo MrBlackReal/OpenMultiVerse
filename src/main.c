@@ -46,6 +46,7 @@
 #include "ui.h"
 #include "build.h"
 #include "collision.h"
+#include "supernova.h"
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -261,6 +262,7 @@ static void shutdown_runtime_world(void) {
 static void reset_universe_state(void) {
     shutdown_runtime_world();
     collision_reset();
+    supernova_reset();
     clear_movement_keys();
     s_freelook = 0;
     s_warp = 0;
@@ -644,6 +646,8 @@ int main(int argc, char **argv) {
 
     boot_log("Resetting collision state");
     collision_reset();
+    boot_log("Resetting supernova state");
+    supernova_reset();
     boot_log("Initializing UI");
     ui_init();
     sync_pause_menu_ui();
@@ -724,6 +728,7 @@ int main(int argc, char **argv) {
                     }
                 }
                 physics_advance_time(effective_sim_dt);
+                supernova_step(effective_sim_dt);
                 collision_step(effective_sim_dt);
                 asteroids_step(effective_sim_dt);
                 rings_tick(effective_sim_dt);

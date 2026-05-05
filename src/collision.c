@@ -20,6 +20,7 @@
 #include "labels.h"
 #include "physics.h"
 #include "rings.h"
+#include "supernova.h"
 #include "trails.h"
 #include <math.h>
 #include <stdio.h>
@@ -2124,6 +2125,26 @@ void collision_step(double dt)
         }
 
         (void)root_had_collision;
+    }
+
+    for (int ai = 0; ai < active_root_count; ai++) {
+        int root_a = active_roots[ai];
+        if (root_a < 0 || root_a >= g_nbodies) continue;
+        if (!g_bodies[root_a].alive || !g_bodies[root_a].is_star) continue;
+
+        for (int bi = ai + 1; bi < active_root_count; bi++) {
+            int root_b = active_roots[bi];
+            double speed = 0.0;
+            double hit_t = 0.0;
+
+            if (root_b < 0 || root_b >= g_nbodies) continue;
+            if (!g_bodies[root_b].alive || !g_bodies[root_b].is_star) continue;
+            if (!systems_may_interact(root_a, root_b, system_radius)) continue;
+            if (!swept_spheres_collide(root_a, root_b, dt, &speed, &hit_t))
+                continue;
+
+            supernova_try_trigger(root_a, root_b, speed, hit_t, dt);
+        }
     }
 
     for (int i = 0; i < MAX_BODIES; i++) {
