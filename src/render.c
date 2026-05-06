@@ -1305,7 +1305,7 @@ void render_frame(const float view[16], const float proj[16],
 
         for (int i = 0; i < sn_count; i++) {
             const SupernovaRenderEvent *e = &sn_events[i];
-            if (e->cloud_intensity <= 0.001f || e->cloud_radius <= 0.0f) continue;
+            if (e->cloud_intensity <= 0.00005f || e->cloud_radius <= 0.0f) continue;
 
             glUniform3f(s_sn_cloud_center, e->pos[0], e->pos[1], e->pos[2]);
             glUniform1f(s_sn_cloud_radius, e->cloud_radius);
@@ -1346,11 +1346,12 @@ void render_frame(const float view[16], const float proj[16],
             const SupernovaRenderEvent *e = &sn_events[i];
             float sx, sy;
             float dist = sqrtf(e->pos[0]*e->pos[0] + e->pos[1]*e->pos[1] + e->pos[2]*e->pos[2]);
+            float core_bill_scale;
             float apparent;
             float overlay_weight;
             float overlay_radius;
 
-            if (e->flash_intensity <= 0.001f && e->core_intensity <= 0.001f)
+            if (e->flash_intensity <= 0.00005f && e->core_intensity <= 0.00005f)
                 continue;
 
             glUniform3f(s_sn_core_center, e->pos[0], e->pos[1], e->pos[2]);
@@ -1363,7 +1364,14 @@ void render_frame(const float view[16], const float proj[16],
                         e->flash_radius > 1e-6f ? e->core_radius / e->flash_radius : 0.32f);
             glUniform1f(s_sn_core_time, e->time_days);
             glUniform1f(s_sn_core_seed, e->seed);
-            glUniform1f(s_sn_core_bill, 1.18f);
+            if (dist > e->flash_radius * 1.01f) {
+                float denom = sqrtf(fmaxf(dist * dist - e->flash_radius * e->flash_radius, 1e-6f));
+                core_bill_scale = dist / denom;
+            } else {
+                core_bill_scale = 8.0f;
+            }
+            core_bill_scale = clampf_local(core_bill_scale * 1.10f, 1.18f, 8.0f);
+            glUniform1f(s_sn_core_bill, core_bill_scale);
             glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
 
             if (!mat4_project(vp_camrel, e->pos[0], e->pos[1], e->pos[2],
@@ -1707,7 +1715,7 @@ void render_frame(const float view[16], const float proj[16],
     labels_render(view_rot, proj, vp_camrel, info, dt);
 
     /* ------------------------------------------------------------------ 7.5. Screen flash */
-    if (sn_flash_best > 0.001f && s_supernova_flash_shader && s_supernova_flash_vao) {
+    if (sn_flash_best > 0.0002f && s_supernova_flash_shader && s_supernova_flash_vao) {
         float quad[24] = {
             0.0f,           0.0f,           0.0f, 0.0f,
             (float)WIN_W,   0.0f,           1.0f, 0.0f,

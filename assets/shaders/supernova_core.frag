@@ -80,7 +80,7 @@ void main() {
     float accumAlpha = 0.0;
     vec3 accumColor = vec3(0.0);
 
-    if ((u_flash_intensity <= 0.001 && u_core_intensity <= 0.001) || disc < 0.0) discard;
+    if ((u_flash_intensity <= 0.00005 && u_core_intensity <= 0.00005) || disc < 0.0) discard;
 
     t0 = -b - sqrt(disc);
     t1 = -b + sqrt(disc);
@@ -96,22 +96,37 @@ void main() {
         vec3 p = oc_local + ray_dir * t;
         float rr = length(p);
         vec3 dir = rr > 1e-4 ? p / rr : vec3(0.0, 0.0, 1.0);
-        float core_shape = exp(-pow(rr / max(core_r, 0.12), 2.15) * 2.2);
-        float flash_fill = exp(-rr * 2.4);
+        float flash_w = clamp(u_flash_intensity, 0.0, 1.0);
+        float core_w = clamp(u_core_intensity, 0.0, 1.0);
+        float blast_w = max(flash_w, core_w * 0.70);
+        float shell_w = clamp(max(flash_w, core_w * 0.90), 0.0, 1.0);
+        float collapse_w = smoothstep(0.04, 0.34, shell_w);
+        float core_linger = max(core_w, flash_w * 0.28);
         float turbulence = fbm(p * 4.2 + vec3(u_seed * 11.0, u_time * 0.18, -u_time * 0.14));
         float wisps = fbm(p.zxy * 8.0 + vec3(7.0, u_seed * 17.0, u_time * 0.10));
         float macro = fbm(dir * 5.6 + vec3(u_seed * 19.0, u_time * 0.05, -u_time * 0.03));
-        float shock_center = mix(core_r + 0.09, 0.84, clamp(u_flash_intensity * 0.9 + 0.1, 0.0, 1.0))
-                           + (macro - 0.5) * 0.08;
-        float shock_width = mix(0.20, 0.09, clamp(u_flash_intensity, 0.0, 1.0))
+        float blob = fbm(dir * 9.0 + vec3(u_seed * 29.0, -u_time * 0.06, u_time * 0.04));
+        float lobes = fbm(dir.yzx * 13.0 + vec3(4.0, u_seed * 37.0, -u_time * 0.03));
+        float radial_warp = 1.0
+                          + (macro - 0.5) * (0.16 + 0.10 * blast_w)
+                          + (blob - 0.5) * (0.24 + 0.16 * flash_w)
+                          + (lobes - 0.5) * (0.10 + 0.08 * flash_w);
+        float rr_warp = rr / clamp(radial_warp, 0.72, 1.34);
+        float core_shape = exp(-pow(rr_warp / max(core_r, 0.12), 2.15) * 2.2);
+        float flash_fill = exp(-rr_warp * 2.4);
+        float shock_center = mix(core_r + 0.06, 0.90, collapse_w)
+                           + (macro - 0.5) * 0.08
+                           + (blob - 0.5) * (0.05 + 0.05 * flash_w);
+        float shock_width = mix(0.18, 0.09, collapse_w)
                           + (wisps - 0.5) * 0.03;
-        float shock_shell = exp(-pow((rr - shock_center) / max(shock_width, 0.05), 2.0));
-        float shock_fill = smoothstep(core_r + 0.02, shock_center, rr)
+        float shock_shell = exp(-pow((rr_warp - shock_center) / max(shock_width, 0.05), 2.0));
+        float shock_fill = smoothstep(core_r + 0.02, shock_center, rr_warp)
                          * (1.0 - smoothstep(shock_center + shock_width * 0.8,
-                                             shock_center + shock_width * 1.8, rr));
-        float density = (core_shape * (0.90 + 0.85 * u_core_intensity)
-                       + flash_fill * (0.18 + 0.95 * u_flash_intensity)
-                       + (shock_shell * 0.70 + shock_fill * 0.28) * (0.16 + 1.15 * u_flash_intensity));
+                                             shock_center + shock_width * 1.8, rr_warp));
+        float density = (core_shape * (0.18 + 1.28 * core_w) * core_linger
+                       + flash_fill * (0.06 + 0.62 * blast_w) * max(flash_w, core_linger * 0.34)
+                       + (shock_shell * 0.70 + shock_fill * 0.28)
+                         * (0.16 + 1.18 * shell_w) * max(shell_w, core_linger * 0.92));
         density *= mix(0.82, 1.20, turbulence) * mix(0.88, 1.12, wisps) * mix(0.90, 1.12, macro);
 
         vec3 white_hot = vec3(1.75, 1.68, 1.52);
@@ -124,7 +139,8 @@ void main() {
         accumAlpha += sampleAlpha * (1.0 - accumAlpha);
     }
 
-    if (accumAlpha < 0.01) discard;
+    accumAlpha *= smoothstep(0.0, 0.018, accumAlpha);
+    if (accumAlpha < 0.0008) discard;
 
     eye_depth = (tExit * radius) * dot(ray_dir, u_cam_fwd);
     gl_FragDepth = log2(eye_depth + 1.0) / log2(FAR + 1.0);

@@ -81,7 +81,7 @@ void main() {
     float accumAlpha = 0.0;
     vec3 accumColor = vec3(0.0);
 
-    if (u_density <= 0.001 || disc < 0.0) discard;
+    if (u_density <= 0.00005 || disc < 0.0) discard;
 
     t0 = -b - sqrt(disc);
     t1 = -b + sqrt(disc);
@@ -122,7 +122,8 @@ void main() {
         accumAlpha += sampleAlpha * (1.0 - accumAlpha);
     }
 
-    if (accumAlpha < 0.01) discard;
+    accumAlpha *= smoothstep(0.0, 0.018, accumAlpha);
+    if (accumAlpha < 0.0008) discard;
 
     eye_depth = (tExit * radius) * dot(ray_dir, u_cam_fwd);
     gl_FragDepth = log2(eye_depth + 1.0) / log2(FAR + 1.0);
