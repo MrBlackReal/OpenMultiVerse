@@ -1,6 +1,11 @@
 #version 330 core
 /*
  * supernova_core.frag - volumetric blast core and shock front.
+ *
+ * Unlike the outer cloud shader, this pass emphasizes the dense central fire-
+ * ball and the bright shock shell during the early / mid aftermath. The
+ * billboard only supplies coverage; the actual volume is reconstructed here
+ * from camera rays and the event center in local sphere space.
  */
 
 in vec2 v_uv;
@@ -68,6 +73,9 @@ float fbm(vec3 p) {
 void main() {
     float radius = max(u_radius, 1e-5);
     vec3 oc_local = u_oc / radius;
+    /* Rebuild the camera ray per fragment so the shader can raymarch a sphere
+     * anchored in world space instead of relying on interpolated billboard UVs
+     * as if they were already volumetric coordinates. */
     vec2 ndc = (gl_FragCoord.xy / (u_screen * 0.5)) - 1.0;
     vec3 ray_dir = normalize(u_cam_fwd
                            + u_cam_right * (ndc.x * u_aspect * u_fov_tan)
@@ -92,6 +100,9 @@ void main() {
     stepLen = (tExit - tEnter) / 18.0;
 
     for (int i = 0; i < 18; i++) {
+        /* March through the reconstructed unit sphere and synthesize density
+         * from a combination of central falloff, turbulent distortion, and a
+         * warped shell that represents the bright shock front. */
         float t = tEnter + (float(i) + 0.5) * stepLen;
         vec3 p = oc_local + ray_dir * t;
         float rr = length(p);
@@ -141,6 +152,8 @@ void main() {
 
     eye_depth = (tExit * radius) * dot(ray_dir, u_cam_fwd);
     eye_depth = max(eye_depth, 0.0);
+    /* Fade against the effective volumetric far limit instead of hard-popping
+     * when the reconstructed shell approaches the renderer's depth horizon. */
     accumAlpha *= smoothstep(0.0, 0.018, accumAlpha);
     accumAlpha *= 1.0 - smoothstep(FAR * 0.82, FAR * 4.60, eye_depth);
     if (accumAlpha < 0.0008) discard;

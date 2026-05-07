@@ -1,6 +1,11 @@
 #version 330 core
 /*
- * supernova_cloud.frag - volumetric shell cloud for the expanding remnant.
+ * supernova_cloud.frag - volumetric ejecta shell for the expanding remnant.
+ *
+ * This pass is responsible for the long-lived outer cloud. It raymarches a
+ * deformed shell volume, layering broad lobes, filaments, ridges, clumps, and
+ * hotter rim accents so the result reads more like asymmetric ejecta than a
+ * perfect noisy sphere.
  */
 
 in vec2 v_uv;
@@ -84,6 +89,8 @@ void main() {
     float inner = clamp(u_shell_inner, 0.05, 0.96);
     float radius = max(u_radius, 1e-5);
     vec3 oc_local = u_oc / radius;
+    /* Reconstruct the per-fragment world ray. The billboard is only a raster
+     * carrier; all meaningful volume work happens from this ray onward. */
     vec2 ndc = (gl_FragCoord.xy / (u_screen * 0.5)) - 1.0;
     vec3 ray_dir = normalize(u_cam_fwd
                            + u_cam_right * (ndc.x * u_aspect * u_fov_tan)
@@ -107,6 +114,9 @@ void main() {
     stepLen = (tExit - tEnter) / 16.0;
 
     for (int i = 0; i < 16; i++) {
+        /* March a deformed shell rather than a full dense fog volume. The
+         * inner/outer radii are warped independently so large-scale lobes can
+         * protrude without collapsing the whole cloud into a uniform sphere. */
         float t = tEnter + (float(i) + 0.5) * stepLen;
         vec3 p = oc_local + ray_dir * t;
         float rr = length(p);
@@ -175,6 +185,8 @@ void main() {
 
     eye_depth = (tExit * radius) * dot(ray_dir, u_cam_fwd);
     eye_depth = max(eye_depth, 0.0);
+    /* Use a soft far fade so very large late-stage clouds disappear gradually
+     * instead of popping exactly at the volumetric depth horizon. */
     accumAlpha *= smoothstep(0.0, 0.018, accumAlpha);
     accumAlpha *= 1.0 - smoothstep(FAR * 0.82, FAR * 4.60, eye_depth);
     if (accumAlpha < 0.0008) discard;

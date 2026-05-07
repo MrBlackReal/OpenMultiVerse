@@ -1,5 +1,24 @@
 /*
  * supernova.c - generic star-star supernova events.
+ *
+ * This module owns the full non-persistent lifecycle of a stellar collision
+ * aftermath:
+ *
+ *   trigger path
+ *     collision.c detects a star-star impact and calls supernova_try_trigger()
+ *
+ *   simulation path
+ *     the two source stars are retired, a remnant star is inserted, nearby
+ *     bodies may be destroyed immediately by the flash, and later receive a
+ *     one-shot outward kick once the shock front reaches them
+ *
+ *   rendering path
+ *     render.c asks supernova_render_events() for camera-relative radii and
+ *     intensities that drive the dedicated volumetric shaders
+ *
+ * The event itself intentionally stays anchored at the birth location of the
+ * explosion. The remnant body can move away physically, but the visible cloud
+ * and shock timings continue to reference the original detonation point.
  */
 #include "supernova.h"
 #include "body.h"
@@ -88,6 +107,8 @@ static int body_is_descendant_of_local(int body_idx, int ancestor_idx)
     return 0;
 }
 
+/* Root-orbiting bodies are planets / moons whose top-level motion should react
+ * to the blast, but stars themselves are excluded from the generic push path. */
 static int body_is_root_orbiting_body(int body_idx)
 {
     if (body_idx < 0 || body_idx >= g_nbodies) return 0;
@@ -96,6 +117,8 @@ static int body_is_root_orbiting_body(int body_idx)
            g_bodies[g_bodies[body_idx].parent].is_star;
 }
 
+/* Sum a root body plus all of its descendants so shock pushes move the whole
+ * local subtree together instead of tearing moons away from their parent. */
 static double body_subtree_mass(int root_idx)
 {
     double total = 0.0;
@@ -116,6 +139,8 @@ static void supernova_event_release(SupernovaEvent *e)
     e->push_done_cap = 0;
 }
 
+/* push_done tracks which root-orbiting bodies have already received their
+ * one-shot shock kick. Keep it sized to the current body count. */
 static int supernova_event_ensure_push_capacity(SupernovaEvent *e, int needed)
 {
     unsigned char *resized;
@@ -150,6 +175,7 @@ static void apply_velocity_to_subtree(int root_idx, const double dv[3])
     }
 }
 
+/* Stop stale labels / trails from continuing to represent consumed stars. */
 static void disable_body_visuals(int body_idx)
 {
     if (body_idx < 0 || body_idx >= g_nbodies) return;
@@ -158,6 +184,7 @@ static void disable_body_visuals(int body_idx)
     labels_remove_body(body_idx);
 }
 
+/* Destroy a top-level survivor and any moons or sub-bodies attached to it. */
 static void destroy_subtree(int root_idx)
 {
     for (int i = 0; i < g_nbodies; i++) {
@@ -178,6 +205,8 @@ static int alloc_event_slot(void)
     return -1;
 }
 
+/* Reconstruct the barycentric impact center at the swept hit time rather than
+ * using the already-advanced end-of-step positions. */
 static void event_center_from_pair(int a, int b, double hit_t, double frame_dt,
                                    double out_pos[3], double out_vel[3])
 {
@@ -210,6 +239,8 @@ static void event_center_from_pair(int a, int b, double hit_t, double frame_dt,
                   g_bodies[b].vel[2] * g_bodies[b].mass) / total;
 }
 
+/* Apply the prompt flash kill test immediately at detonation time. This is a
+ * coarse survivability heuristic rather than a full physical ablation model. */
 static void immediate_flash_effects(const SupernovaEvent *e)
 {
     if (!e) return;
@@ -283,6 +314,10 @@ int supernova_try_trigger(int star_a, int star_b, double rel_speed,
     event_center_from_pair(star_a, star_b, hit_t, frame_dt, pos, vel);
     mass_scale = total_mass / SOLAR_MASS;
     if (mass_scale < 0.5) mass_scale = 0.5;
+
+    /* The remnant/ejecta split is intentionally stylized: plausible enough to
+     * read like a stellar catastrophe without simulating compact-object classes
+     * or detailed nucleosynthesis outcomes. */
     remnant_mass = total_mass * 0.72;
     remnant_mass = clampd_local(remnant_mass, 1.10 * SOLAR_MASS,
                                 fmin(total_mass * 0.92, 3.2 * SOLAR_MASS));
@@ -324,6 +359,8 @@ int supernova_try_trigger(int star_a, int star_b, double rel_speed,
     labels_add_body(remnant_idx);
     collision_on_body_added(remnant_idx);
 
+    /* Any planets/moons previously owned by the source stars are rebound to the
+     * newly spawned remnant so the existing system hierarchy keeps working. */
     for (int i = 0; i < g_nbodies; i++) {
         if (!g_bodies[i].alive || i == remnant_idx) continue;
         if (g_bodies[i].parent == star_a || g_bodies[i].parent == star_b)
@@ -389,6 +426,11 @@ void supernova_step(double dt)
                 e->active = 0;
                 continue;
             }
+
+            /* Bodies are kicked once, when the expanding shock first reaches
+             * their orbital subtree root. The impulse magnitude is deliberately
+             * conservative so it nudges survivor orbits instead of dominating
+             * the post-remnant gravitational response. */
             for (int i = 0; i < g_nbodies; i++) {
                 Body *b = &g_bodies[i];
                 double dx, dy, dz, dist2, dist, subtree_mass, momentum, dv_mag;
@@ -455,6 +497,9 @@ int supernova_render_events(SupernovaRenderEvent *out, int max_events,
 
         if (!e->active) continue;
 
+        /* These curves are tuned to keep the flash fast, the core lingering for
+         * days, and the ejecta cloud expanding for much longer before a steeper
+         * late fade clears the final low-quality tail. */
         cloud_t = age / CLOUD_DURATION;
         core_growth = 1.0 - exp(-age / (DAY * 0.40));
         cloud_growth = 1.0 - exp(-age / (DAY * 14.0));
@@ -494,6 +539,8 @@ int supernova_render_events(SupernovaRenderEvent *out, int max_events,
         if (inner_ratio > 0.88) inner_ratio = 0.88;
 
         r = &out[n++];
+        /* Render payloads are camera-relative AU values because the renderer
+         * works in view-space-friendly units rather than raw world metres. */
         r->pos[0] = (float)(e->pos[0] * RS - cam_pos[0]);
         r->pos[1] = (float)(e->pos[1] * RS - cam_pos[1]);
         r->pos[2] = (float)(e->pos[2] * RS - cam_pos[2]);

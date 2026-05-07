@@ -1,6 +1,10 @@
 #version 330 core
 /*
  * supernova_flash.frag - screen-space exposure wash around the event center.
+ *
+ * This is not the volumetric blast itself. It is a cheap post-like overlay
+ * used to sell the idea of sensor / exposure overload around the brightest
+ * phase of the event.
  */
 
 in vec2 v_uv;
