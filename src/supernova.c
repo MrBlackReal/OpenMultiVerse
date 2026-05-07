@@ -8,6 +8,8 @@
 #include "trails.h"
 #include "universe.h"
 #include <math.h>
+#include <stdlib.h>
+#include <string.h>
 #include <stdio.h>
 
 #define SOLAR_MASS 1.98847e30
@@ -35,7 +37,8 @@ typedef struct {
     double initial_radius;
     float color[3];
     float seed;
-    unsigned char push_done[MAX_BODIES];
+    unsigned char *push_done;
+    int push_done_cap;
 } SupernovaEvent;
 
 static SupernovaEvent s_events[SUPERNOVA_MAX_EVENTS];
@@ -105,6 +108,35 @@ static double body_subtree_mass(int root_idx)
     return total;
 }
 
+static void supernova_event_release(SupernovaEvent *e)
+{
+    if (!e) return;
+    free(e->push_done);
+    e->push_done = NULL;
+    e->push_done_cap = 0;
+}
+
+static int supernova_event_ensure_push_capacity(SupernovaEvent *e, int needed)
+{
+    unsigned char *resized;
+    int new_cap;
+
+    if (!e) return 0;
+    if (needed <= 0) return 1;
+    if (e->push_done_cap >= needed && e->push_done) return 1;
+
+    new_cap = needed;
+    resized = (unsigned char*)realloc(e->push_done, (size_t)new_cap * sizeof(unsigned char));
+    if (!resized) return 0;
+
+    if (new_cap > e->push_done_cap)
+        memset(resized + e->push_done_cap, 0, (size_t)(new_cap - e->push_done_cap));
+
+    e->push_done = resized;
+    e->push_done_cap = new_cap;
+    return 1;
+}
+
 static void apply_velocity_to_subtree(int root_idx, const double dv[3])
 {
     if (!dv) return;
@@ -146,17 +178,29 @@ static int alloc_event_slot(void)
     return -1;
 }
 
-static void event_center_from_pair(int a, int b, double out_pos[3], double out_vel[3])
+static void event_center_from_pair(int a, int b, double hit_t, double frame_dt,
+                                   double out_pos[3], double out_vel[3])
 {
     double total = g_bodies[a].mass + g_bodies[b].mass;
+    double back_dt = 0.0;
+    double pos_a[3], pos_b[3];
     if (total <= 0.0) total = 1.0;
 
-    out_pos[0] = (g_bodies[a].pos[0] * g_bodies[a].mass +
-                  g_bodies[b].pos[0] * g_bodies[b].mass) / total;
-    out_pos[1] = (g_bodies[a].pos[1] * g_bodies[a].mass +
-                  g_bodies[b].pos[1] * g_bodies[b].mass) / total;
-    out_pos[2] = (g_bodies[a].pos[2] * g_bodies[a].mass +
-                  g_bodies[b].pos[2] * g_bodies[b].mass) / total;
+    if (frame_dt > 0.0) {
+        back_dt = frame_dt - hit_t;
+        back_dt = clampd_local(back_dt, 0.0, frame_dt);
+    }
+
+    pos_a[0] = g_bodies[a].pos[0] - g_bodies[a].vel[0] * back_dt;
+    pos_a[1] = g_bodies[a].pos[1] - g_bodies[a].vel[1] * back_dt;
+    pos_a[2] = g_bodies[a].pos[2] - g_bodies[a].vel[2] * back_dt;
+    pos_b[0] = g_bodies[b].pos[0] - g_bodies[b].vel[0] * back_dt;
+    pos_b[1] = g_bodies[b].pos[1] - g_bodies[b].vel[1] * back_dt;
+    pos_b[2] = g_bodies[b].pos[2] - g_bodies[b].vel[2] * back_dt;
+
+    out_pos[0] = (pos_a[0] * g_bodies[a].mass + pos_b[0] * g_bodies[b].mass) / total;
+    out_pos[1] = (pos_a[1] * g_bodies[a].mass + pos_b[1] * g_bodies[b].mass) / total;
+    out_pos[2] = (pos_a[2] * g_bodies[a].mass + pos_b[2] * g_bodies[b].mass) / total;
 
     out_vel[0] = (g_bodies[a].vel[0] * g_bodies[a].mass +
                   g_bodies[b].vel[0] * g_bodies[b].mass) / total;
@@ -195,6 +239,8 @@ static void immediate_flash_effects(const SupernovaEvent *e)
 
 void supernova_reset(void)
 {
+    for (int i = 0; i < SUPERNOVA_MAX_EVENTS; i++)
+        supernova_event_release(&s_events[i]);
     memset(s_events, 0, sizeof(s_events));
 }
 
@@ -208,9 +254,6 @@ int supernova_try_trigger(int star_a, int star_b, double rel_speed,
     double mass_scale, initial_radius, remnant_radius;
     int slot, remnant_idx;
     char name[32];
-
-    (void)hit_t;
-    (void)frame_dt;
 
     if (star_a < 0 || star_b < 0 || star_a >= g_nbodies || star_b >= g_nbodies)
         return 0;
@@ -228,10 +271,16 @@ int supernova_try_trigger(int star_a, int star_b, double rel_speed,
     slot = alloc_event_slot();
     if (slot < 0) return 0;
 
+    e = &s_events[slot];
+    supernova_event_release(e);
+    memset(e, 0, sizeof(*e));
+    if (!supernova_event_ensure_push_capacity(e, g_nbodies + 1))
+        return 0;
+
     total_mass = g_bodies[star_a].mass + g_bodies[star_b].mass;
     if (total_mass <= 0.0) return 0;
 
-    event_center_from_pair(star_a, star_b, pos, vel);
+    event_center_from_pair(star_a, star_b, hit_t, frame_dt, pos, vel);
     mass_scale = total_mass / SOLAR_MASS;
     if (mass_scale < 0.5) mass_scale = 0.5;
     remnant_mass = total_mass * 0.72;
@@ -266,7 +315,11 @@ int supernova_try_trigger(int star_a, int star_b, double rel_speed,
     spec.obliquity = (g_bodies[star_a].obliquity + g_bodies[star_b].obliquity) * 0.5;
 
     remnant_idx = universe_add_body(&spec);
-    if (remnant_idx < 0) return 0;
+    if (remnant_idx < 0) {
+        supernova_event_release(e);
+        memset(e, 0, sizeof(*e));
+        return 0;
+    }
     trails_add_body(remnant_idx);
     labels_add_body(remnant_idx);
     collision_on_body_added(remnant_idx);
@@ -284,8 +337,6 @@ int supernova_try_trigger(int star_a, int star_b, double rel_speed,
     g_bodies[star_a].mass = 0.0;
     g_bodies[star_b].mass = 0.0;
 
-    e = &s_events[slot];
-    memset(e, 0, sizeof(*e));
     e->active = 1;
     e->star_a = star_a;
     e->star_b = star_b;
@@ -333,13 +384,18 @@ void supernova_step(double dt)
 
         {
             double shock_radius = e->shock_speed * e->age;
+            if (!supernova_event_ensure_push_capacity(e, g_nbodies)) {
+                supernova_event_release(e);
+                e->active = 0;
+                continue;
+            }
             for (int i = 0; i < g_nbodies; i++) {
                 Body *b = &g_bodies[i];
                 double dx, dy, dz, dist2, dist, subtree_mass, momentum, dv_mag;
                 double dir[3], dv[3];
 
                 if (!body_is_root_orbiting_body(i)) continue;
-                if (!b->alive || e->push_done[i]) continue;
+                if (!b->alive || (e->push_done && e->push_done[i])) continue;
                 if (i == e->remnant_idx) continue;
 
                 dx = b->pos[0] - e->pos[0];
@@ -352,7 +408,7 @@ void supernova_step(double dt)
 
                 subtree_mass = body_subtree_mass(i);
                 if (subtree_mass <= 0.0) {
-                    e->push_done[i] = 1;
+                    if (e->push_done) e->push_done[i] = 1;
                     continue;
                 }
 
@@ -369,12 +425,14 @@ void supernova_step(double dt)
                 dv[1] = dir[1] * dv_mag;
                 dv[2] = dir[2] * dv_mag;
                 apply_velocity_to_subtree(i, dv);
-                e->push_done[i] = 1;
+                if (e->push_done) e->push_done[i] = 1;
             }
         }
 
-        if (e->age >= CLOUD_DURATION)
+        if (e->age >= CLOUD_DURATION) {
+            supernova_event_release(e);
             e->active = 0;
+        }
     }
 }
 
