@@ -327,19 +327,9 @@ void supernova_step(double dt)
         if (!e->active) continue;
 
         e->age += dt;
-        if (e->remnant_idx >= 0 && e->remnant_idx < g_nbodies &&
-            g_bodies[e->remnant_idx].alive) {
-            e->pos[0] = g_bodies[e->remnant_idx].pos[0];
-            e->pos[1] = g_bodies[e->remnant_idx].pos[1];
-            e->pos[2] = g_bodies[e->remnant_idx].pos[2];
-            e->vel[0] = g_bodies[e->remnant_idx].vel[0];
-            e->vel[1] = g_bodies[e->remnant_idx].vel[1];
-            e->vel[2] = g_bodies[e->remnant_idx].vel[2];
-        } else {
-            e->pos[0] += e->vel[0] * dt;
-            e->pos[1] += e->vel[1] * dt;
-            e->pos[2] += e->vel[2] * dt;
-        }
+        /* Intentionally keep the supernova anchored at its birth position in
+         * world space. The remnant body can move away, but the visible blast
+         * cloud and its shock effects stay centered on the original event. */
 
         {
             double shock_radius = e->shock_speed * e->age;
