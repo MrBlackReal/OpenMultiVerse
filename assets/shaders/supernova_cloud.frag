@@ -65,6 +65,19 @@ float fbm(vec3 p) {
     return v;
 }
 
+float ridged_fbm(vec3 p) {
+    float v = 0.0;
+    float a = 0.60;
+    for (int i = 0; i < 3; i++) {
+        float n = noise3(p);
+        n = 1.0 - abs(n * 2.0 - 1.0);
+        v += n * a;
+        p = p * 2.18 + vec3(4.1, 2.3, 3.4);
+        a *= 0.55;
+    }
+    return v;
+}
+
 void main() {
     float outer = 1.0;
     float inner = clamp(u_shell_inner, 0.05, 0.96);
@@ -90,9 +103,9 @@ void main() {
     tExit = t1;
     if (tExit <= tEnter) discard;
 
-    stepLen = (tExit - tEnter) / 14.0;
+    stepLen = (tExit - tEnter) / 16.0;
 
-    for (int i = 0; i < 14; i++) {
+    for (int i = 0; i < 16; i++) {
         float t = tEnter + (float(i) + 0.5) * stepLen;
         vec3 p = oc_local + ray_dir * t;
         float rr = length(p);
@@ -101,6 +114,10 @@ void main() {
         float filaments = fbm(p.yzx * 7.5 + vec3(8.0, u_seed * 15.0, u_time * 0.11));
         float macro = fbm(dir * 4.8 + vec3(u_seed * 23.0, u_time * 0.04, -u_time * 0.03));
         float lobe = fbm(dir.zxy * 8.0 + vec3(2.0, u_seed * 31.0, u_time * 0.06));
+        float ridges = ridged_fbm(p.zxy * 8.8 + dir * 3.5
+                                + vec3(u_seed * 41.0, -u_time * 0.08, u_time * 0.12));
+        float knots = fbm(p * 11.0 + dir.yzx * 4.5
+                        + vec3(6.0, u_seed * 27.0, -u_time * 0.10));
         float innerWarp = clamp(inner + (macro - 0.5) * 0.11 + (lobe - 0.5) * 0.05, 0.04, 0.90);
         float outerWarp = clamp(outer - 0.10 + (macro - 0.5) * 0.16 + (swirl - 0.5) * 0.08,
                                 innerWarp + 0.08, 1.04);
@@ -108,14 +125,30 @@ void main() {
                     * (1.0 - smoothstep(outerWarp - 0.16, outerWarp + 0.02, rr));
         float body = smoothstep(innerWarp * 0.78, innerWarp + 0.10, rr)
                    * (1.0 - smoothstep(outerWarp - 0.30, outerWarp - 0.05, rr));
+        float rim = smoothstep(outerWarp - 0.18, outerWarp - 0.05, rr)
+                  * (1.0 - smoothstep(outerWarp - 0.02, outerWarp + 0.05, rr));
+        float shockBands = 0.5 + 0.5 * sin(rr * 24.0 - u_time * 0.45
+                                          + (macro - 0.5) * 4.0 + filaments * 2.8);
+        float streaks = pow(smoothstep(0.34, 0.92, filaments), 1.35)
+                      * mix(0.78, 1.28, ridges);
         float pockets = smoothstep(0.34, 0.88, swirl) * smoothstep(0.30, 0.82, filaments);
-        float density = (shell * mix(0.34, 1.05, swirl) * mix(0.76, 1.16, filaments))
-                      + (body * pockets * (0.18 + 0.26 * u_density));
-        density *= mix(0.80, 1.16, macro) * mix(0.88, 1.10, lobe);
-        vec3 hot = mix(vec3(1.28, 0.78, 0.36), u_color, smoothstep(innerWarp, outerWarp, rr));
-        vec3 cold = vec3(0.18, 0.34, 0.56);
-        vec3 sampleCol = mix(cold, hot, smoothstep(innerWarp * 0.85, outerWarp, rr));
-        float sampleAlpha = density * stepLen * 1.55 * (1.15 + u_hot_shell * 0.9) * u_density;
+        float clumps = smoothstep(0.44, 0.92, knots) * mix(0.82, 1.24, macro);
+        float voids = 1.0 - 0.40 * smoothstep(0.14, 0.52, ridges) * smoothstep(0.18, 0.58, knots);
+        float density = (shell * mix(0.24, 1.18, swirl)
+                               * mix(0.72, 1.22, streaks)
+                               * mix(0.84, 1.24, ridges))
+                      + (rim * (0.18 + 0.44 * u_hot_shell)
+                             * mix(0.84, 1.42, shockBands)
+                             * mix(0.78, 1.18, ridges))
+                      + (body * pockets * clumps * (0.14 + 0.24 * u_density));
+        density *= voids * mix(0.80, 1.18, macro) * mix(0.86, 1.12, lobe);
+        vec3 hot = mix(vec3(1.30, 0.80, 0.38), u_color * 1.04, smoothstep(innerWarp, outerWarp, rr));
+        vec3 ember = vec3(1.08, 0.46, 0.18);
+        vec3 cold = vec3(0.16, 0.30, 0.52);
+        vec3 sampleCol = mix(cold, hot, smoothstep(innerWarp * 0.84, outerWarp - 0.05, rr));
+        sampleCol = mix(sampleCol, ember, rim * (0.32 + 0.38 * shockBands));
+        sampleCol *= mix(0.90, 1.10, clumps);
+        float sampleAlpha = density * stepLen * 1.48 * (1.12 + u_hot_shell * 1.05) * u_density;
 
         sampleAlpha = clamp(sampleAlpha, 0.0, 0.32);
         accumColor += sampleCol * sampleAlpha * (1.0 - accumAlpha);
