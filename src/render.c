@@ -178,10 +178,9 @@ static GLint  s_gl_right     = -1;
 static GLint  s_gl_up        = -1;
 static GLint  s_gl_color     = -1;
 
-/* Supernova passes: volumetric cloud, flash/core, and screen-space wash. */
+/* Supernova passes: volumetric cloud and flash/core. */
 static GLuint s_supernova_core_shader = 0;
 static GLuint s_supernova_cloud_shader = 0;
-static GLuint s_supernova_flash_shader = 0;
 static GLint  s_sn_core_vp = -1;
 static GLint  s_sn_core_center = -1;
 static GLint  s_sn_core_radius = -1;
@@ -216,14 +215,6 @@ static GLint  s_sn_cloud_bill = -1;
 static GLint  s_sn_cloud_fov_tan = -1;
 static GLint  s_sn_cloud_aspect = -1;
 static GLint  s_sn_cloud_screen = -1;
-static GLuint s_supernova_flash_vao = 0;
-static GLuint s_supernova_flash_vbo = 0;
-static GLint  s_sn_flash_screen = -1;
-static GLint  s_sn_flash_center = -1;
-static GLint  s_sn_flash_intensity = -1;
-static GLint  s_sn_flash_radius = -1;
-static GLint  s_sn_flash_aspect = -1;
-static GLint  s_sn_flash_tint = -1;
 
 /* Glare billboard is STAR_GLARE_BILL_SCALE × the star's visual radius.
  * This constant is also used to compute when the dot fades as the glare grows. */
@@ -655,27 +646,6 @@ void render_init(void) {
         s_sn_cloud_screen = glGetUniformLocation(s_supernova_cloud_shader, "u_screen");
     }
 
-    s_supernova_flash_shader = gl_shader_load("assets/shaders/ui.vert",
-                                              "assets/shaders/supernova_flash.frag");
-    if (!s_supernova_flash_shader)
-        fprintf(stderr, "[Render] supernova flash shader failed\n");
-    else {
-        s_sn_flash_screen = glGetUniformLocation(s_supernova_flash_shader, "u_screen");
-        s_sn_flash_center = glGetUniformLocation(s_supernova_flash_shader, "u_center_uv");
-        s_sn_flash_intensity = glGetUniformLocation(s_supernova_flash_shader, "u_intensity");
-        s_sn_flash_radius = glGetUniformLocation(s_supernova_flash_shader, "u_radius_uv");
-        s_sn_flash_aspect = glGetUniformLocation(s_supernova_flash_shader, "u_aspect");
-        s_sn_flash_tint = glGetUniformLocation(s_supernova_flash_shader, "u_tint");
-        s_supernova_flash_vao = gl_vao_create();
-        s_supernova_flash_vbo = gl_vbo_create(24 * sizeof(float), NULL, GL_DYNAMIC_DRAW);
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
-        glEnableVertexAttribArray(1);
-        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float),
-                              (void*)(2 * sizeof(float)));
-        glBindVertexArray(0);
-    }
-
     /* --- Atmosphere glow shader --- */
     s_atm_shader = gl_shader_load("assets/shaders/atm.vert",
                                   "assets/shaders/atm.frag");
@@ -1055,9 +1025,6 @@ void render_frame(const float view[16], const float proj[16],
 
     SupernovaRenderEvent sn_events[SUPERNOVA_MAX_EVENTS];
     int sn_count = supernova_render_events(sn_events, SUPERNOVA_MAX_EVENTS, g_cam.pos);
-    float sn_flash_best = 0.0f;
-    float sn_flash_uv[3] = {0.5f, 0.5f, 0.12f};
-    float sn_flash_tint[3] = {1.0f, 0.97f, 0.92f};
 
     /* Sun world position in AU units — used as lighting reference only */
     float sun_wx = (float)(g_bodies[0].pos[0] * RS);
@@ -1344,12 +1311,8 @@ void render_frame(const float view[16], const float proj[16],
 
         for (int i = 0; i < sn_count; i++) {
             const SupernovaRenderEvent *e = &sn_events[i];
-            float sx, sy;
             float dist = sqrtf(e->pos[0]*e->pos[0] + e->pos[1]*e->pos[1] + e->pos[2]*e->pos[2]);
             float core_bill_scale;
-            float apparent;
-            float overlay_weight;
-            float overlay_radius;
 
             if (e->flash_intensity <= 0.00005f && e->core_intensity <= 0.00005f)
                 continue;
@@ -1373,26 +1336,6 @@ void render_frame(const float view[16], const float proj[16],
             core_bill_scale = clampf_local(core_bill_scale * 1.10f, 1.18f, 8.0f);
             glUniform1f(s_sn_core_bill, core_bill_scale);
             glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
-
-            if (!mat4_project(vp_camrel, e->pos[0], e->pos[1], e->pos[2],
-                              WIN_W, WIN_H, &sx, &sy))
-                continue;
-            apparent = e->flash_radius / fmaxf(dist, e->flash_radius);
-            overlay_weight = clampf_local(e->flash_intensity * 0.80f + e->core_intensity * 0.45f,
-                                          0.0f, 1.25f)
-                           * clampf_local(0.10f + apparent * 13.0f, 0.0f, 1.0f);
-            overlay_radius = clampf_local((e->flash_radius / fmaxf(dist, 1e-4f))
-                                        / (2.0f * tanf(FOV * 0.5f * (float)(PI / 180.0f))),
-                                          0.030f, 1.10f);
-            if (overlay_weight > sn_flash_best) {
-                sn_flash_best = overlay_weight;
-                sn_flash_uv[0] = sx / (float)WIN_W;
-                sn_flash_uv[1] = 1.0f - sy / (float)WIN_H;
-                sn_flash_uv[2] = overlay_radius;
-                sn_flash_tint[0] = 1.0f;
-                sn_flash_tint[1] = 0.98f - 0.05f * e->seed;
-                sn_flash_tint[2] = 0.92f + 0.05f * e->color[2];
-            }
         }
 
         glBindVertexArray(0);
@@ -1714,37 +1657,12 @@ void render_frame(const float view[16], const float proj[16],
     /* ------------------------------------------------------------------ 7. Labels */
     labels_render(view_rot, proj, vp_camrel, info, dt);
 
-    /* ------------------------------------------------------------------ 7.5. Screen flash */
-    if (sn_flash_best > 0.0002f && s_supernova_flash_shader && s_supernova_flash_vao) {
-        float quad[24] = {
-            0.0f,           0.0f,           0.0f, 0.0f,
-            (float)WIN_W,   0.0f,           1.0f, 0.0f,
-            (float)WIN_W,   (float)WIN_H,   1.0f, 1.0f,
-            0.0f,           0.0f,           0.0f, 0.0f,
-            (float)WIN_W,   (float)WIN_H,   1.0f, 1.0f,
-            0.0f,           (float)WIN_H,   0.0f, 1.0f
-        };
-
-        glUseProgram(s_supernova_flash_shader);
-        glUniform2f(s_sn_flash_screen, (float)WIN_W, (float)WIN_H);
-        glUniform2f(s_sn_flash_center, sn_flash_uv[0], sn_flash_uv[1]);
-        glUniform1f(s_sn_flash_intensity, sn_flash_best);
-        glUniform1f(s_sn_flash_radius, sn_flash_uv[2]);
-        glUniform1f(s_sn_flash_aspect, aspect);
-        glUniform3f(s_sn_flash_tint, sn_flash_tint[0], sn_flash_tint[1], sn_flash_tint[2]);
-        glBindVertexArray(s_supernova_flash_vao);
-        glBindBuffer(GL_ARRAY_BUFFER, s_supernova_flash_vbo);
-        glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(quad), quad);
-        glDisable(GL_DEPTH_TEST);
-        glDepthMask(GL_FALSE);
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
-        glDisable(GL_BLEND);
-        glDepthMask(GL_TRUE);
-        glEnable(GL_DEPTH_TEST);
-        glBindVertexArray(0);
-    }
+    /* ------------------------------------------------------------------ 7.5. Screen flash
+     *
+     * Disabled on purpose: the camera-space glare/wash was reading as too
+     * artificial, so we keep the volumetric supernova itself but omit the
+     * fullscreen exposure pass entirely.
+     */
 }
 
 /* ------------------------------------------------------------------ shutdown */
@@ -1760,7 +1678,6 @@ void render_shutdown(void) {
     glDeleteProgram(s_glare_shader);
     glDeleteProgram(s_supernova_core_shader);
     glDeleteProgram(s_supernova_cloud_shader);
-    glDeleteProgram(s_supernova_flash_shader);
     glDeleteProgram(s_build_line_shader);
     glDeleteProgram(s_build_ui_shader);
     glDeleteBuffers(1, &s_sphere_vbo);
@@ -1770,15 +1687,13 @@ void render_shutdown(void) {
     glDeleteVertexArrays(1, &s_dot_vao);
     glDeleteBuffers(1, &s_impact_particle_vbo);
     glDeleteVertexArrays(1, &s_impact_particle_vao);
-    glDeleteBuffers(1, &s_supernova_flash_vbo);
-    glDeleteVertexArrays(1, &s_supernova_flash_vao);
     glDeleteBuffers(1, &s_build_line_vbo);
     glDeleteVertexArrays(1, &s_build_line_vao);
     glDeleteBuffers(1, &s_build_ui_vbo);
     glDeleteVertexArrays(1, &s_build_ui_vao);
     s_sphere_shader = s_dot_shader = 0;
     s_impact_particle_shader = 0;
-    s_supernova_core_shader = s_supernova_cloud_shader = s_supernova_flash_shader = 0;
+    s_supernova_core_shader = s_supernova_cloud_shader = 0;
     s_build_line_shader = s_build_ui_shader = 0;
     s_build_font = NULL;
 }
