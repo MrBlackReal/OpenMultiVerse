@@ -119,6 +119,7 @@ static double s_system_hot[MAX_BODIES];
 static unsigned int s_particle_rng = 0x1234abcdu;
 static unsigned int s_perm_scar_stamp = 1u;
 static double s_pos_before[MAX_BODIES][3];
+static double s_vel_before[MAX_BODIES][3];
 static int s_pos_before_valid = 0;
 
 static int body_is_merge_target(int idx);
@@ -148,6 +149,7 @@ void collision_reset(void)
     memset(s_system_dirty, 0, sizeof(s_system_dirty));
     memset(s_system_hot, 0, sizeof(s_system_hot));
     memset(s_pos_before, 0, sizeof(s_pos_before));
+    memset(s_vel_before, 0, sizeof(s_vel_before));
     s_particle_rng = 0x1234abcdu;
     s_perm_scar_stamp = 1u;
     s_pos_before_valid = 0;
@@ -160,6 +162,9 @@ void collision_snapshot_positions(void)
         s_pos_before[i][0] = g_bodies[i].pos[0];
         s_pos_before[i][1] = g_bodies[i].pos[1];
         s_pos_before[i][2] = g_bodies[i].pos[2];
+        s_vel_before[i][0] = g_bodies[i].vel[0];
+        s_vel_before[i][1] = g_bodies[i].vel[1];
+        s_vel_before[i][2] = g_bodies[i].vel[2];
     }
     s_pos_before_valid = 1;
 }
@@ -339,6 +344,139 @@ static int bodies_are_in_ancestor_chain(int a, int b)
 static double dot3d(const double a[3], const double b[3])
 {
     return a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+}
+
+static void star_pair_rel_hermite_pos(int a, int b, double dt, double u, double out[3])
+{
+    double p0[3] = {
+        s_pos_before[b][0] - s_pos_before[a][0],
+        s_pos_before[b][1] - s_pos_before[a][1],
+        s_pos_before[b][2] - s_pos_before[a][2]
+    };
+    double p1[3] = {
+        g_bodies[b].pos[0] - g_bodies[a].pos[0],
+        g_bodies[b].pos[1] - g_bodies[a].pos[1],
+        g_bodies[b].pos[2] - g_bodies[a].pos[2]
+    };
+    double m0[3] = {
+        (s_vel_before[b][0] - s_vel_before[a][0]) * dt,
+        (s_vel_before[b][1] - s_vel_before[a][1]) * dt,
+        (s_vel_before[b][2] - s_vel_before[a][2]) * dt
+    };
+    double m1[3] = {
+        (g_bodies[b].vel[0] - g_bodies[a].vel[0]) * dt,
+        (g_bodies[b].vel[1] - g_bodies[a].vel[1]) * dt,
+        (g_bodies[b].vel[2] - g_bodies[a].vel[2]) * dt
+    };
+    double u2 = u * u;
+    double u3 = u2 * u;
+    double h00 = 2.0 * u3 - 3.0 * u2 + 1.0;
+    double h10 = u3 - 2.0 * u2 + u;
+    double h01 = -2.0 * u3 + 3.0 * u2;
+    double h11 = u3 - u2;
+
+    out[0] = h00 * p0[0] + h10 * m0[0] + h01 * p1[0] + h11 * m1[0];
+    out[1] = h00 * p0[1] + h10 * m0[1] + h01 * p1[1] + h11 * m1[1];
+    out[2] = h00 * p0[2] + h10 * m0[2] + h01 * p1[2] + h11 * m1[2];
+}
+
+static void star_pair_rel_hermite_vel(int a, int b, double dt, double u, double out[3])
+{
+    double p0[3] = {
+        s_pos_before[b][0] - s_pos_before[a][0],
+        s_pos_before[b][1] - s_pos_before[a][1],
+        s_pos_before[b][2] - s_pos_before[a][2]
+    };
+    double p1[3] = {
+        g_bodies[b].pos[0] - g_bodies[a].pos[0],
+        g_bodies[b].pos[1] - g_bodies[a].pos[1],
+        g_bodies[b].pos[2] - g_bodies[a].pos[2]
+    };
+    double m0[3] = {
+        (s_vel_before[b][0] - s_vel_before[a][0]) * dt,
+        (s_vel_before[b][1] - s_vel_before[a][1]) * dt,
+        (s_vel_before[b][2] - s_vel_before[a][2]) * dt
+    };
+    double m1[3] = {
+        (g_bodies[b].vel[0] - g_bodies[a].vel[0]) * dt,
+        (g_bodies[b].vel[1] - g_bodies[a].vel[1]) * dt,
+        (g_bodies[b].vel[2] - g_bodies[a].vel[2]) * dt
+    };
+    double u2 = u * u;
+    double dh00 = 6.0 * u2 - 6.0 * u;
+    double dh10 = 3.0 * u2 - 4.0 * u + 1.0;
+    double dh01 = -6.0 * u2 + 6.0 * u;
+    double dh11 = 3.0 * u2 - 2.0 * u;
+    double inv_dt = dt > 0.0 ? 1.0 / dt : 0.0;
+
+    out[0] = (dh00 * p0[0] + dh10 * m0[0] + dh01 * p1[0] + dh11 * m1[0]) * inv_dt;
+    out[1] = (dh00 * p0[1] + dh10 * m0[1] + dh01 * p1[1] + dh11 * m1[1]) * inv_dt;
+    out[2] = (dh00 * p0[2] + dh10 * m0[2] + dh01 * p1[2] + dh11 * m1[2]) * inv_dt;
+}
+
+static int star_pair_swept_collide(int a, int b, double dt,
+                                   double *out_speed, double *out_hit_t)
+{
+    double r = current_contact_radius(a) + current_contact_radius(b);
+    double p_prev[3];
+    double p_curr[3];
+    int steps = 12;
+
+    if (!s_pos_before_valid || dt <= 0.0) return 0;
+
+    star_pair_rel_hermite_pos(a, b, dt, 0.0, p_prev);
+    if (dot3d(p_prev, p_prev) <= r * r) {
+        double v[3];
+        star_pair_rel_hermite_vel(a, b, dt, 0.0, v);
+        if (out_speed) *out_speed = sqrt(dot3d(v, v));
+        if (out_hit_t) *out_hit_t = 0.0;
+        return 1;
+    }
+
+    for (int i = 1; i <= steps; i++) {
+        double u = (double)i / (double)steps;
+        double d[3];
+        double dd;
+        double seg_t = 0.0;
+        double closest[3];
+
+        star_pair_rel_hermite_pos(a, b, dt, u, p_curr);
+
+        d[0] = p_curr[0] - p_prev[0];
+        d[1] = p_curr[1] - p_prev[1];
+        d[2] = p_curr[2] - p_prev[2];
+        dd = dot3d(d, d);
+        if (dd > 1e-18) {
+            seg_t = -dot3d(p_prev, d) / dd;
+            if (seg_t < 0.0) seg_t = 0.0;
+            if (seg_t > 1.0) seg_t = 1.0;
+        }
+
+        closest[0] = p_prev[0] + d[0] * seg_t;
+        closest[1] = p_prev[1] + d[1] * seg_t;
+        closest[2] = p_prev[2] + d[2] * seg_t;
+
+        if (dot3d(closest, closest) <= r * r) {
+            double u_hit = ((double)(i - 1) + seg_t) / (double)steps;
+            double v[3];
+            star_pair_rel_hermite_vel(a, b, dt, u_hit, v);
+            if (out_speed) *out_speed = sqrt(dot3d(v, v));
+            if (out_hit_t) *out_hit_t = u_hit * dt;
+            return 1;
+        }
+
+        p_prev[0] = p_curr[0];
+        p_prev[1] = p_curr[1];
+        p_prev[2] = p_curr[2];
+    }
+
+    if (out_speed) {
+        double v[3];
+        star_pair_rel_hermite_vel(a, b, dt, 1.0, v);
+        *out_speed = sqrt(dot3d(v, v));
+    }
+    if (out_hit_t) *out_hit_t = 0.0;
+    return 0;
 }
 
 static int body_is_in_merge(int idx)
@@ -1653,15 +1791,48 @@ static int classify_collision(int a, int b, double rel_speed)
 
 static int systems_may_interact(int root_a, int root_b, const double system_radius[MAX_BODIES])
 {
+    double rel_p[3];
+    double rel_q[3];
+    double rel_d[3];
+    double rr;
+    double dd;
+    double t;
+    double c[3];
+
     if (root_a == root_b) return 1;
     if (root_a < 0 || root_b < 0) return 0;
     if (!g_bodies[root_a].alive || !g_bodies[root_b].alive) return 0;
 
-    double dx = g_bodies[root_b].pos[0] - g_bodies[root_a].pos[0];
-    double dy = g_bodies[root_b].pos[1] - g_bodies[root_a].pos[1];
-    double dz = g_bodies[root_b].pos[2] - g_bodies[root_a].pos[2];
-    double r = system_radius[root_a] + system_radius[root_b];
-    return dx*dx + dy*dy + dz*dz <= r*r;
+    rr = system_radius[root_a] + system_radius[root_b];
+
+    rel_q[0] = g_bodies[root_b].pos[0] - g_bodies[root_a].pos[0];
+    rel_q[1] = g_bodies[root_b].pos[1] - g_bodies[root_a].pos[1];
+    rel_q[2] = g_bodies[root_b].pos[2] - g_bodies[root_a].pos[2];
+    if (rel_q[0]*rel_q[0] + rel_q[1]*rel_q[1] + rel_q[2]*rel_q[2] <= rr*rr)
+        return 1;
+
+    if (!s_pos_before_valid) return 0;
+
+    rel_p[0] = s_pos_before[root_b][0] - s_pos_before[root_a][0];
+    rel_p[1] = s_pos_before[root_b][1] - s_pos_before[root_a][1];
+    rel_p[2] = s_pos_before[root_b][2] - s_pos_before[root_a][2];
+    if (rel_p[0]*rel_p[0] + rel_p[1]*rel_p[1] + rel_p[2]*rel_p[2] <= rr*rr)
+        return 1;
+
+    rel_d[0] = rel_q[0] - rel_p[0];
+    rel_d[1] = rel_q[1] - rel_p[1];
+    rel_d[2] = rel_q[2] - rel_p[2];
+    dd = dot3d(rel_d, rel_d);
+    if (dd <= 1e-18) return 0;
+
+    t = -dot3d(rel_p, rel_d) / dd;
+    if (t < 0.0) t = 0.0;
+    if (t > 1.0) t = 1.0;
+
+    c[0] = rel_p[0] + rel_d[0] * t;
+    c[1] = rel_p[1] + rel_d[1] * t;
+    c[2] = rel_p[2] + rel_d[2] * t;
+    return dot3d(c, c) <= rr*rr;
 }
 
 static double pair_check_dt(int a, int b)
@@ -1700,6 +1871,10 @@ static double pair_check_dt(int a, int b)
 static int swept_spheres_collide(int a, int b, double dt, double *out_speed,
                                  double *out_hit_t)
 {
+    if (g_bodies[a].is_star && g_bodies[b].is_star &&
+        star_pair_swept_collide(a, b, dt, out_speed, out_hit_t))
+        return 1;
+
     double rel_now[3] = {
         g_bodies[b].pos[0] - g_bodies[a].pos[0],
         g_bodies[b].pos[1] - g_bodies[a].pos[1],
