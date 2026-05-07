@@ -316,7 +316,7 @@ static int app_init(void) {
     SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
     SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, 4);
 
-    s_win = SDL_CreateWindow("verse",
+    s_win = SDL_CreateWindow("OpenVerse Simulator",
                              SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                              DEFAULT_WIN_W, DEFAULT_WIN_H,
                              SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN |
@@ -324,6 +324,16 @@ static int app_init(void) {
     if (!s_win) {
         fprintf(stderr, "[Main] SDL_CreateWindow: %s\n", SDL_GetError());
         return 0;
+    }
+
+    {
+        SDL_Surface *icon = SDL_LoadBMP("assets/window_icon.bmp");
+        if (!icon) {
+            fprintf(stderr, "[Main] window icon: %s\n", SDL_GetError());
+        } else {
+            SDL_SetWindowIcon(s_win, icon);
+            SDL_FreeSurface(icon);
+        }
     }
 
     s_ctx = SDL_GL_CreateContext(s_win);
