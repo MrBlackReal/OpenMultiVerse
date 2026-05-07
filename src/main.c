@@ -61,7 +61,7 @@ static int s_fullscreen = 0;
 /* ── input state ──────────────────────────────────────────────────────────── */
 static int   s_freelook   = 0;       /* 1 = free-look active, mouse captured */
 static float s_mouse_sens = 0.25f;   /* degrees per pixel */
-static int   s_vsync_enabled = 0;
+static int   s_vsync_enabled = 1;
 
 /* ── pause menu ───────────────────────────────────────────────────────────── */
 static int s_pause_menu_open = 0;
@@ -333,7 +333,7 @@ static int app_init(void) {
     }
 
     boot_log("Configuring swap interval");
-    set_vsync(0);
+    set_vsync(1);
 
     /* GLEW */
     boot_log("Initializing GLEW");

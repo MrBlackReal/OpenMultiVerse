@@ -450,7 +450,7 @@ int supernova_render_events(SupernovaRenderEvent *out, int max_events,
         double flash_radius, core_radius, cloud_radius, inner_ratio;
         double core_growth, cloud_growth, cavity_growth;
         double cloud_rise, cloud_fade;
-        double cloud_impulse, cloud_spread, end_fade;
+        double cloud_impulse, cloud_spread, end_fade, tail_fade;
         double age = e->age;
 
         if (!e->active) continue;
@@ -464,13 +464,15 @@ int supernova_render_events(SupernovaRenderEvent *out, int max_events,
         cloud_impulse = 1.0 - exp(-age / (DAY * 0.11));
         cloud_spread = pow(1.0 + age / (DAY * 0.85), 0.82) - 1.0;
         end_fade = 1.0 - smoothstepd_local(0.58, 1.0, cloud_t);
+        tail_fade = 1.0 - smoothstepd_local(0.60, 1.0, cloud_t);
+        tail_fade = tail_fade * tail_fade * tail_fade;
 
         flash_alpha = 1.28 * rise_and_fall(age, DAY * 0.012, DAY * 0.42)
                     + 0.18 * exp(-age / (DAY * 2.2));
         core_alpha = 0.96 * rise_and_fall(age, DAY * 0.05, DAY * 7.5)
                    + 0.10 * exp(-age / (DAY * 32.0));
-        cloud_alpha = 0.90 * (0.26 + 0.74 * cloud_rise) * cloud_fade * end_fade * end_fade;
-        hot_alpha = 1.00 * rise_and_fall(age, DAY * 0.03, DAY * 18.0) * end_fade * end_fade;
+        cloud_alpha = 0.90 * (0.26 + 0.74 * cloud_rise) * cloud_fade * end_fade * end_fade * tail_fade;
+        hot_alpha = 1.00 * rise_and_fall(age, DAY * 0.03, DAY * 18.0) * end_fade * end_fade * tail_fade;
         core_alpha *= end_fade * end_fade;
         flash_alpha *= end_fade * end_fade;
 
