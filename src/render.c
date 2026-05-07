@@ -195,6 +195,7 @@ static GLint  s_sn_core_ratio = -1;
 static GLint  s_sn_core_time = -1;
 static GLint  s_sn_core_seed = -1;
 static GLint  s_sn_core_bill = -1;
+static GLint  s_sn_core_fullscreen = -1;
 static GLint  s_sn_core_fov_tan = -1;
 static GLint  s_sn_core_aspect = -1;
 static GLint  s_sn_core_screen = -1;
@@ -212,6 +213,7 @@ static GLint  s_sn_cloud_hot = -1;
 static GLint  s_sn_cloud_time = -1;
 static GLint  s_sn_cloud_seed = -1;
 static GLint  s_sn_cloud_bill = -1;
+static GLint  s_sn_cloud_fullscreen = -1;
 static GLint  s_sn_cloud_fov_tan = -1;
 static GLint  s_sn_cloud_aspect = -1;
 static GLint  s_sn_cloud_screen = -1;
@@ -342,6 +344,31 @@ static float clampf_local(float v, float lo, float hi)
     if (v < lo) return lo;
     if (v > hi) return hi;
     return v;
+}
+
+/*
+ * supernova_fullscreen_raster_local - choose whether a volumetric supernova
+ * pass should rasterize via a fullscreen quad instead of a world-space
+ * billboard.
+ *
+ * The fragment shader already computes the true camera ray from gl_FragCoord
+ * and marches against u_oc, so the draw primitive is only there to generate
+ * fragments. When the observer is inside or very near the volume, the 3D
+ * billboard can expose its own edges as the camera pans. Switching to a
+ * fullscreen quad removes those layer-specific clip boundaries entirely.
+ */
+static int supernova_fullscreen_raster_local(const float center[3],
+                                             const float cam_fwd[3],
+                                             float coverage_radius,
+                                             float bill_scale)
+{
+    const float edge_overscan = 2.0f; /* keep in sync with supernova_billboard.vert */
+    float eye_z = center[0] * cam_fwd[0]
+                + center[1] * cam_fwd[1]
+                + center[2] * cam_fwd[2];
+    float half_extent = coverage_radius * bill_scale * edge_overscan;
+    float min_eye_z = fmaxf(half_extent * 1.05f, 0.18f);
+    return eye_z < min_eye_z;
 }
 
 /* Visual render radius in AU-units (= metres × RS), accounting for collision
@@ -617,6 +644,7 @@ void render_init(void) {
         s_sn_core_time = glGetUniformLocation(s_supernova_core_shader, "u_time");
         s_sn_core_seed = glGetUniformLocation(s_supernova_core_shader, "u_seed");
         s_sn_core_bill = glGetUniformLocation(s_supernova_core_shader, "u_bill_scale");
+        s_sn_core_fullscreen = glGetUniformLocation(s_supernova_core_shader, "u_fullscreen");
         s_sn_core_fov_tan = glGetUniformLocation(s_supernova_core_shader, "u_fov_tan");
         s_sn_core_aspect = glGetUniformLocation(s_supernova_core_shader, "u_aspect");
         s_sn_core_screen = glGetUniformLocation(s_supernova_core_shader, "u_screen");
@@ -641,6 +669,7 @@ void render_init(void) {
         s_sn_cloud_time = glGetUniformLocation(s_supernova_cloud_shader, "u_time");
         s_sn_cloud_seed = glGetUniformLocation(s_supernova_cloud_shader, "u_seed");
         s_sn_cloud_bill = glGetUniformLocation(s_supernova_cloud_shader, "u_bill_scale");
+        s_sn_cloud_fullscreen = glGetUniformLocation(s_supernova_cloud_shader, "u_fullscreen");
         s_sn_cloud_fov_tan = glGetUniformLocation(s_supernova_cloud_shader, "u_fov_tan");
         s_sn_cloud_aspect = glGetUniformLocation(s_supernova_cloud_shader, "u_aspect");
         s_sn_cloud_screen = glGetUniformLocation(s_supernova_cloud_shader, "u_screen");
@@ -1272,8 +1301,14 @@ void render_frame(const float view[16], const float proj[16],
 
         for (int i = 0; i < sn_count; i++) {
             const SupernovaRenderEvent *e = &sn_events[i];
+            float cloud_bill_scale = 1.34f;
+            int fullscreen_raster;
             if (e->cloud_intensity <= 0.00005f || e->cloud_radius <= 0.0f) continue;
 
+            fullscreen_raster = supernova_fullscreen_raster_local(e->pos, cam_fwd,
+                                                                  e->cloud_radius,
+                                                                  cloud_bill_scale);
+            glUniform1f(s_sn_cloud_fullscreen, fullscreen_raster ? 1.0f : 0.0f);
             glUniform3f(s_sn_cloud_center, e->pos[0], e->pos[1], e->pos[2]);
             glUniform1f(s_sn_cloud_radius, e->cloud_radius);
             glUniform3f(s_sn_cloud_oc, -e->pos[0], -e->pos[1], -e->pos[2]);
@@ -1284,7 +1319,7 @@ void render_frame(const float view[16], const float proj[16],
             glUniform1f(s_sn_cloud_hot, e->hot_shell_intensity);
             glUniform1f(s_sn_cloud_time, e->time_days);
             glUniform1f(s_sn_cloud_seed, e->seed);
-            glUniform1f(s_sn_cloud_bill, 1.34f);
+            glUniform1f(s_sn_cloud_bill, cloud_bill_scale);
             glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
         }
 
@@ -1313,10 +1348,24 @@ void render_frame(const float view[16], const float proj[16],
             const SupernovaRenderEvent *e = &sn_events[i];
             float dist = sqrtf(e->pos[0]*e->pos[0] + e->pos[1]*e->pos[1] + e->pos[2]*e->pos[2]);
             float core_bill_scale;
+            int fullscreen_raster;
+            float coverage_radius;
 
             if (e->flash_intensity <= 0.00005f && e->core_intensity <= 0.00005f)
                 continue;
 
+            if (dist > e->flash_radius * 1.01f) {
+                float denom = sqrtf(fmaxf(dist * dist - e->flash_radius * e->flash_radius, 1e-6f));
+                core_bill_scale = dist / denom;
+            } else {
+                core_bill_scale = 8.0f;
+            }
+            core_bill_scale = clampf_local(core_bill_scale * 1.10f, 1.18f, 8.0f);
+            coverage_radius = e->cloud_radius > e->flash_radius ? e->cloud_radius : e->flash_radius;
+            fullscreen_raster = supernova_fullscreen_raster_local(e->pos, cam_fwd,
+                                                                  coverage_radius,
+                                                                  core_bill_scale);
+            glUniform1f(s_sn_core_fullscreen, fullscreen_raster ? 1.0f : 0.0f);
             glUniform3f(s_sn_core_center, e->pos[0], e->pos[1], e->pos[2]);
             glUniform1f(s_sn_core_radius, e->flash_radius);
             glUniform3f(s_sn_core_oc, -e->pos[0], -e->pos[1], -e->pos[2]);
@@ -1327,13 +1376,6 @@ void render_frame(const float view[16], const float proj[16],
                         e->flash_radius > 1e-6f ? e->core_radius / e->flash_radius : 0.32f);
             glUniform1f(s_sn_core_time, e->time_days);
             glUniform1f(s_sn_core_seed, e->seed);
-            if (dist > e->flash_radius * 1.01f) {
-                float denom = sqrtf(fmaxf(dist * dist - e->flash_radius * e->flash_radius, 1e-6f));
-                core_bill_scale = dist / denom;
-            } else {
-                core_bill_scale = 8.0f;
-            }
-            core_bill_scale = clampf_local(core_bill_scale * 1.10f, 1.18f, 8.0f);
             glUniform1f(s_sn_core_bill, core_bill_scale);
             glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
         }
