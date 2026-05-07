@@ -1,5 +1,5 @@
 /*
- * main.c - application entry point
+ * main.c — application entry point
  *
  * Responsibilities:
  *   - SDL2 window + OpenGL 3.3 Core context
@@ -12,10 +12,24 @@
  *   A/D        - strafe left / right
  *   Q/E        - move down / up
  *   Mouse drag - look (yaw/pitch)
- *   Scroll     - speed multiplier
+ *   Scroll     - speed multiplier (×1.3 per notch)
  *   Space      - pause / resume simulation
  *   R          - reset camera
  *   +/-        - simulation speed up / down
+ *   T          - toggle warp mode (interstellar camera speed)
+ *   B          - toggle build mode
+ *   F11/Alt+↵  - toggle fullscreen
+ *
+ * Physics integration overview (see physics.c for full detail):
+ *   The simulation uses a two-rate RESPA integrator with per-system timesteps.
+ *   Each planetary system runs independently with its own dt_outer / dt_inner.
+ *   The main loop caps the per-frame sim time to MAX_OUTER_STEPS × dt_outer to
+ *   prevent spiral-of-death when the frame rate drops.
+ *
+ * Warp mode:
+ *   Camera speed range normally is [0.00001, 200] AU/s. Pressing T switches to
+ *   the warp range [200, 63241] AU/s (≈ [0.003, 1] ly/s). Warp does not affect
+ *   the simulation clock; only camera movement speed changes.
  */
 #include "common.h"
 #include "math3d.h"
@@ -32,22 +46,24 @@
 #include "ui.h"
 #include "build.h"
 #include "collision.h"
+#include "supernova.h"
 #ifdef _OPENMP
 #include <omp.h>
 #endif
 
-/* ------------------------------------------------------------------ globals */
+/* ── window / context ─────────────────────────────────────────────────────── */
 static SDL_Window   *s_win = NULL;
 static SDL_GLContext s_ctx = NULL;
 int g_win_w = DEFAULT_WIN_W;
 int g_win_h = DEFAULT_WIN_H;
 static int s_fullscreen = 0;
 
-/* Mouse state */
+/* ── input state ──────────────────────────────────────────────────────────── */
 static int   s_freelook   = 0;       /* 1 = free-look active, mouse captured */
 static float s_mouse_sens = 0.25f;   /* degrees per pixel */
-static int   s_vsync_enabled = 0;
+static int   s_vsync_enabled = 1;
 
+/* ── pause menu ───────────────────────────────────────────────────────────── */
 static int s_pause_menu_open = 0;
 static int s_pause_menu_selected = 0;
 static int s_pause_menu_prev_paused = 0;
@@ -63,7 +79,10 @@ enum {
 /* Movement keys held */
 static int s_key_w, s_key_s, s_key_a, s_key_d, s_key_q, s_key_e;
 
-/* Sim-speed table - clean display values, 0.1 days/s as first non-zero step */
+/* ── simulation speed table ───────────────────────────────────────────────── */
+/* Clean display values in days/s. Index 4 (1.0 days/s) is the default.
+ * The lowest non-zero entry (0.1 days/s) still lets the user watch fast orbiters.
+ * The highest (365 days/s) runs one Earth year per real second. */
 static const double SPEED_TABLE[] = {
     0.0,
     0.1, 0.25, 0.5,
@@ -73,14 +92,17 @@ static const double SPEED_TABLE[] = {
 #define SPEED_TABLE_LEN (int)(sizeof(SPEED_TABLE)/sizeof(SPEED_TABLE[0]))
 static int s_speed_idx = 4;   /* start at 1.0 days/s */
 
-/* Warp mode (T key) - variable interstellar speed, adjustable via scroll wheel.
- * The speed range shifts from the normal [0.00001, 200] AU/s to the warp
- * range [200, 63241] AU/s (= [0.0032 ly/s, 1 ly/s]).                        */
+/* ── warp mode ────────────────────────────────────────────────────────────── */
+/* Warp mode (T key) — variable interstellar camera speed.
+ * Normal range : [0.00001, 200] AU/s  (0.00001 AU/s ≈ walking pace near Earth)
+ * Warp range   : [200, 63241] AU/s    (63241 AU/s = 1 ly/s, i.e. full warp)
+ * Pressing T clamps the current speed to the warp range and shows "WARP" in HUD. */
 #define WARP_SPEED_MIN_AU    200.0f
 #define WARP_SPEED_MAX_AU  63241.0f
 int s_warp = 0;
 int g_warp = 0;
 
+/* ── logging helpers ──────────────────────────────────────────────────────── */
 static void boot_log(const char *msg) {
     fprintf(stdout, "[Boot] %s\n", msg);
     fflush(stdout);
@@ -136,6 +158,30 @@ static void move_pause_menu_selection(int delta) {
     sync_pause_menu_ui();
 }
 
+/* ── pre-simulation (warm-up) ─────────────────────────────────────────────── */
+/*
+ * warmup_universe — pre-simulate 2 years of physics before the first frame.
+ *
+ * Without a warm-up, freshly loaded elliptical orbits start at t=0 (periapsis)
+ * and moons/rings appear bunched up at the same orbital phase. Running 2 years
+ * of sim time spreads bodies to realistic positions.
+ *
+ * Per-system parallelism (OpenMP):
+ *   Each planetary system runs independently; systems share no state during
+ *   integration. OpenMP distributes systems across threads. Progress is reported
+ *   from a critical section so console output isn't interleaved.
+ *
+ * Timestep model:
+ *   Each system uses its own outer and inner timestep limits, queried from the
+ *   physics module. n_inner = ceil(dt_outer / dt_inner) ensures the inner loop
+ *   always covers the full outer step. outer_total = floor(WARMUP_DT / dt_outer).
+ *   Trails are ticked alongside the integrator so the ring buffer is populated;
+ *   otherwise the first frame would show empty trails.
+ *
+ * physics_advance_time() updates the global simulation clock after all systems
+ * are done. It must be called once, not once per system, to keep g_sim_time
+ * consistent with all bodies' state.
+ */
 static void warmup_universe(void) {
     const double WARMUP_DT = 365.0 * 2.0 * DAY;
     int sys_n = physics_system_count();
@@ -176,6 +222,7 @@ static void warmup_universe(void) {
     boot_log("Warm-up complete");
 }
 
+/* ── world init / shutdown ────────────────────────────────────────────────── */
 static void init_runtime_world(void) {
     boot_log("Preparing runtime world");
     universe_load("assets/universe.json");
@@ -211,9 +258,11 @@ static void shutdown_runtime_world(void) {
     universe_shutdown();
 }
 
+/* Tear down and rebuild everything (triggered by "Reset Universe" menu item). */
 static void reset_universe_state(void) {
     shutdown_runtime_world();
     collision_reset();
+    supernova_reset();
     clear_movement_keys();
     s_freelook = 0;
     s_warp = 0;
@@ -230,7 +279,7 @@ static void reset_universe_state(void) {
     init_runtime_world();
 }
 
-/* ------------------------------------------------------------------ init / quit */
+/* ── init / quit ──────────────────────────────────────────────────────────── */
 static void update_viewport_size(void) {
     int w = DEFAULT_WIN_W;
     int h = DEFAULT_WIN_H;
@@ -284,7 +333,7 @@ static int app_init(void) {
     }
 
     boot_log("Configuring swap interval");
-    set_vsync(0);
+    set_vsync(1);
 
     /* GLEW */
     boot_log("Initializing GLEW");
@@ -317,7 +366,7 @@ static void app_quit(void) {
     SDL_Quit();
 }
 
-/* ------------------------------------------------------------------ event handling */
+/* ── event handling ───────────────────────────────────────────────────────── */
 static void activate_pause_menu_action(int *running) {
     switch (s_pause_menu_selected) {
     case PAUSE_MENU_CONTINUE:
@@ -427,6 +476,7 @@ static void handle_event(const SDL_Event *e, float dt, int *running) {
             build_set_tab_held(1);
             break;
         case SDLK_t:
+            /* Toggle warp mode, clamping speed into the appropriate range. */
             s_warp = !s_warp;
             g_warp = s_warp;
             if (s_warp) {
@@ -505,6 +555,7 @@ static void handle_event(const SDL_Event *e, float dt, int *running) {
             build_scroll(e->wheel.y);
             break;
         }
+        /* Speed steps by ×1.3 per notch; clamped to the active range. */
         g_cam.speed *= (e->wheel.y > 0) ? 1.3f : (1.0f / 1.3f);
         if (s_warp) {
             if (g_cam.speed < WARP_SPEED_MIN_AU) g_cam.speed = WARP_SPEED_MIN_AU;
@@ -528,20 +579,25 @@ static void handle_event(const SDL_Event *e, float dt, int *running) {
     (void)dt;
 }
 
-/* ------------------------------------------------------------------ camera movement */
+/* ── camera movement ──────────────────────────────────────────────────────── */
+/*
+ * camera_move — apply WASDQE movement each frame.
+ *
+ * Position is stored as double-precision AU. Speed is in AU/s. Delta is
+ * computed as double so that small increments (slow camera near planets) are
+ * not lost to float32 ULP at large absolute coordinates. The right vector is
+ * derived from (forward × Y_up) projected onto the XZ plane — this keeps
+ * Q/E purely vertical regardless of pitch.
+ */
 static void camera_move(float dt) {
     float fdx, fdy, fdz;
     cam_get_dir(&fdx, &fdy, &fdz);
 
-    /* Right vector: cross(forward, world_up) */
+    /* Right vector: cross(forward, world_up) projected to XZ */
     float rx = -fdz, rz = fdx;
     float rlen = sqrtf(rx*rx + rz*rz);
     if (rlen > 1e-6f) { rx /= rlen; rz /= rlen; }
 
-    /* Compute delta in double so that pos (double) += tiny_delta never loses
-     * the increment due to float32 ULP at large orbital distances.
-     * Both normal and warp modes use g_cam.speed directly; the scroll wheel
-     * and T-key clamp it to the appropriate range. */
     double dspd = (double)g_cam.speed * (double)dt;
 
     if (s_key_w) { g_cam.pos[0] += (double)fdx*dspd; g_cam.pos[1] += (double)fdy*dspd; g_cam.pos[2] += (double)fdz*dspd; }
@@ -552,7 +608,37 @@ static void camera_move(float dt) {
     if (s_key_q) { g_cam.pos[1] -= dspd; }
 }
 
-/* ------------------------------------------------------------------ main */
+/* ── main loop ────────────────────────────────────────────────────────────── */
+/*
+ * Physics integration loop (inside main):
+ *
+ * Per-frame sim time (sim_dt = g_sim_speed × dt_real) is capped to
+ * MAX_OUTER_STEPS × dt_outer_max per system. This prevents the simulation
+ * from freezing under low frame rates or high sim speeds.
+ *
+ * effective_sim_dt: the minimum of all systems' caps. All systems advance by
+ * the same wall-clock step so g_sim_time stays consistent.
+ *
+ * Close-approach subdivision:
+ *   collision_system_close_approach_subdivide() returns a factor > 1 when
+ *   bodies in a system are near a collision threshold. outer_steps and dt_outer
+ *   are refined by this factor, ensuring the collision detector sees smaller
+ *   steps and can pinpoint the impact time accurately.
+ *
+ * Local encounter re-snapshot:
+ *   collision_system_maybe_has_encounter() checks if any pair in the system
+ *   is within encounter range for this outer step. If so, a new frame snapshot
+ *   is taken (trails + positions) at the start of that step, so rollback on
+ *   collision is accurate to within one dt_outer rather than one full frame.
+ *
+ * View matrices:
+ *   'view'     — full lookAt including translation (float eye). Used only for
+ *                ring rendering which is already in float world coordinates.
+ *   'view_rot' — lookAt from the origin with direction only (no translation).
+ *                Combined with proj to form vp_camrel = proj × view_rot, which
+ *                is what render_frame() uses for all distant geometry. Avoids
+ *                float32 cancellation at interstellar distances.
+ */
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
@@ -560,6 +646,8 @@ int main(int argc, char **argv) {
 
     boot_log("Resetting collision state");
     collision_reset();
+    boot_log("Resetting supernova state");
+    supernova_reset();
     boot_log("Initializing UI");
     ui_init();
     sync_pause_menu_ui();
@@ -573,7 +661,7 @@ int main(int argc, char **argv) {
     while (running) {
         Uint64 now = SDL_GetPerformanceCounter();
         float  dt  = (float)((double)(now - prev) / (double)freq);
-        if (dt > 0.1f) dt = 0.1f;
+        if (dt > 0.1f) dt = 0.1f;  /* clamp: don't spiral if a frame takes > 100 ms */
         prev = now;
 
         SDL_Event e;
@@ -585,7 +673,7 @@ int main(int argc, char **argv) {
         if (!s_pause_menu_open)
             camera_move(dt);
 
-        /* Physics - RESPA hierarchical integrator */
+        /* Physics — RESPA hierarchical integrator */
         if (!g_paused && g_sim_speed > 0.0) {
             const int MAX_OUTER_STEPS = 120;
             physics_refresh_timestep_model();
@@ -594,6 +682,7 @@ int main(int argc, char **argv) {
                 double sim_dt = g_sim_speed * dt;
                 double effective_sim_dt = sim_dt;
 
+                /* Find the most constrained system and cap all systems to it. */
                 for (int s = 0; s < sys_n; s++) {
                     double dt_outer_max = physics_system_outer_dt_limit(s);
                     double sys_cap = dt_outer_max * MAX_OUTER_STEPS;
@@ -611,13 +700,17 @@ int main(int argc, char **argv) {
 
                     int outer_steps = (int)(sys_dt / dt_outer_max) + 1;
                     double dt_outer = sys_dt / outer_steps;
+
+                    /* Subdivide further if a close approach is detected */
                     int ca_factor = collision_system_close_approach_subdivide(root, dt_outer);
                     outer_steps *= ca_factor;
                     dt_outer    /= ca_factor;
+
                     int n_inner = (int)(dt_outer / dt_inner_max) + 1;
                     double dt_inner = dt_outer / n_inner;
 
                     for (int o = 0; o < outer_steps; o++) {
+                        /* Re-snapshot at encounter onset for sub-frame rollback */
                         int local_encounter = collision_system_maybe_has_encounter(root, dt_outer);
                         if (local_encounter) {
                             trails_begin_frame_snapshot();
@@ -635,13 +728,18 @@ int main(int argc, char **argv) {
                     }
                 }
                 physics_advance_time(effective_sim_dt);
+                supernova_step(effective_sim_dt);
                 collision_step(effective_sim_dt);
                 asteroids_step(effective_sim_dt);
                 rings_tick(effective_sim_dt);
             }
         }
 
-        /* Build matrices */
+        /* Build matrices.
+         * view_rot: rotation-only lookAt (origin as eye). Used for all distant
+         *           geometry via vp_camrel = proj × view_rot.
+         * view:     full lookAt with float eye. Only used for ring rendering
+         *           (rings.c operates in float world space).                  */
         Mat4 proj, view, view_rot;
 
         float aspect = (float)WIN_W / (float)WIN_H;
@@ -655,7 +753,6 @@ int main(int argc, char **argv) {
         float zero3[3] = { 0.0f, 0.0f, 0.0f };
         mat4_lookAt(view_rot, zero3, dir, up);
 
-        /* Full view matrix with float eye - kept for ring rendering. */
         {
             float eye[3] = { (float)g_cam.pos[0], (float)g_cam.pos[1], (float)g_cam.pos[2] };
             float ctr[3] = { eye[0]+fdx,          eye[1]+fdy,          eye[2]+fdz          };

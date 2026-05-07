@@ -3,6 +3,20 @@
  *
  * Supports: objects, arrays, strings, numbers (including scientific
  * notation handled by strtod), booleans, null, and // line comments.
+ *
+ * Tree structure:
+ *   Nodes form a singly-linked forest.  Inside an object or array,
+ *   children are connected via the ->next pointer (sibling chain).
+ *   ->first_child points to the first element of that chain.
+ *   For object children, ->key holds the heap-allocated key string.
+ *   All strings (keys and values) are heap-allocated and freed by json_free().
+ *
+ * Unicode:
+ *   \uXXXX escapes are consumed but replaced with '?' — full UTF-8
+ *   transcoding is not needed since the simulator only reads ASCII keys.
+ *
+ * Trailing commas:
+ *   Allowed before ] and } to make hand-editing universe.json less error-prone.
  */
 #include "json.h"
 #include <stdio.h>
@@ -11,29 +25,29 @@
 #include <ctype.h>
 #include <math.h>
 
-/* ------------------------------------------------------------------ parser state */
+/* ---------------------------------------------------------------- parser state */
 
 typedef struct {
-    const char *src;   /* full input text */
-    const char *p;     /* current position */
-    int         line;  /* 1-based line number for error messages */
-    int         error; /* set to 1 on first error */
+    const char *src;   /* full input text (for reference, not re-read) */
+    const char *p;     /* current read position */
+    int         line;  /* 1-based line counter for error messages       */
+    int         error; /* set to 1 on first error; further errors silent */
 } Parser;
 
-/* ------------------------------------------------------------------ forward decls */
+/* ---------------------------------------------------------------- forward decls */
 static JsonNode *parse_value(Parser *ps);
 
-/* ------------------------------------------------------------------ helpers */
+/* ---------------------------------------------------------------- helpers */
 
+/* Advance past whitespace and // line comments.
+ * Loop is required because a comment may be followed by more whitespace. */
 static void skip_whitespace_and_comments(Parser *ps)
 {
     for (;;) {
-        /* skip ordinary whitespace */
         while (*ps->p && (unsigned char)*ps->p <= ' ') {
             if (*ps->p == '\n') ps->line++;
             ps->p++;
         }
-        /* skip // line comments */
         if (ps->p[0] == '/' && ps->p[1] == '/') {
             while (*ps->p && *ps->p != '\n') ps->p++;
             continue;
@@ -42,6 +56,8 @@ static void skip_whitespace_and_comments(Parser *ps)
     }
 }
 
+/* Record the first error; subsequent errors are silently ignored so the
+ * parser can keep running and free any nodes already allocated. */
 static void parse_error(Parser *ps, const char *msg)
 {
     if (!ps->error) {
@@ -56,12 +72,16 @@ static JsonNode *alloc_node(void)
     return n;
 }
 
-/* ------------------------------------------------------------------ string parsing */
+/* ---------------------------------------------------------------- string parsing */
 
 /*
  * parse_string — consume a JSON "..." string starting at ps->p (which
  * must already point at the opening quote).  Returns heap-allocated
  * NUL-terminated string, or NULL on error.
+ *
+ * Two-pass design: first pass counts the output byte length accounting for
+ * escape sequences (which shrink the string), then a second pass copies
+ * with escape expansion.  This avoids a realloc or worst-case over-allocation.
  */
 static char *parse_string(Parser *ps)
 {
@@ -71,7 +91,7 @@ static char *parse_string(Parser *ps)
     }
     ps->p++;  /* skip opening quote */
 
-    /* first pass: measure length */
+    /* first pass: measure output length */
     const char *start = ps->p;
     size_t len = 0;
     const char *q = ps->p;
@@ -87,7 +107,7 @@ static char *parse_string(Parser *ps)
     char *buf = (char *)malloc(len + 1);
     if (!buf) { parse_error(ps, "out of memory"); return NULL; }
 
-    /* second pass: copy with escape handling */
+    /* second pass: copy with escape expansion */
     char *out = buf;
     while (*ps->p && *ps->p != '"') {
         if (*ps->p == '\\') {
@@ -128,8 +148,10 @@ static char *parse_string(Parser *ps)
     return buf;
 }
 
-/* ------------------------------------------------------------------ value parsers */
+/* ---------------------------------------------------------------- value parsers */
 
+/* parse_object — consume { "key": value, ... }.
+ * Children are appended to a singly-linked list via last_child->next. */
 static JsonNode *parse_object(Parser *ps)
 {
     if (*ps->p != '{') { parse_error(ps, "expected '{'"); return NULL; }
@@ -141,7 +163,7 @@ static JsonNode *parse_object(Parser *ps)
     JsonNode *last_child = NULL;
 
     skip_whitespace_and_comments(ps);
-    if (*ps->p == '}') { ps->p++; return node; }
+    if (*ps->p == '}') { ps->p++; return node; }   /* empty object */
 
     for (;;) {
         skip_whitespace_and_comments(ps);
@@ -160,6 +182,7 @@ static JsonNode *parse_object(Parser *ps)
         if (!child || ps->error) { free(key); break; }
         child->key = key;
 
+        /* Append to sibling chain */
         if (last_child) last_child->next = child;
         else            node->first_child = child;
         last_child = child;
@@ -182,6 +205,8 @@ static JsonNode *parse_object(Parser *ps)
     return node;
 }
 
+/* parse_array — consume [ value, value, ... ].
+ * Array elements carry no key; they are accessed by position via json_idx(). */
 static JsonNode *parse_array(Parser *ps)
 {
     if (*ps->p != '[') { parse_error(ps, "expected '['"); return NULL; }
@@ -193,7 +218,7 @@ static JsonNode *parse_array(Parser *ps)
     JsonNode *last_child = NULL;
 
     skip_whitespace_and_comments(ps);
-    if (*ps->p == ']') { ps->p++; return node; }
+    if (*ps->p == ']') { ps->p++; return node; }   /* empty array */
 
     for (;;) {
         skip_whitespace_and_comments(ps);
@@ -224,6 +249,7 @@ static JsonNode *parse_array(Parser *ps)
     return node;
 }
 
+/* parse_value — dispatch to the appropriate parser based on the current char. */
 static JsonNode *parse_value(Parser *ps)
 {
     skip_whitespace_and_comments(ps);
@@ -242,7 +268,6 @@ static JsonNode *parse_value(Parser *ps)
         return node;
     }
 
-    /* true / false / null */
     if (strncmp(ps->p, "true", 4) == 0) {
         ps->p += 4;
         JsonNode *node = alloc_node();
@@ -264,7 +289,7 @@ static JsonNode *parse_value(Parser *ps)
         return node;
     }
 
-    /* number */
+    /* strtod handles integer, decimal, and scientific notation uniformly */
     if (c == '-' || (c >= '0' && c <= '9')) {
         char *end;
         double val = strtod(ps->p, &end);
@@ -280,8 +305,10 @@ static JsonNode *parse_value(Parser *ps)
     return NULL;
 }
 
-/* ------------------------------------------------------------------ public API */
+/* ---------------------------------------------------------------- public API */
 
+/* Parse a NUL-terminated JSON string and return the root node, or NULL on error.
+ * The returned tree must be freed with json_free(). */
 JsonNode *json_parse(const char *text)
 {
     Parser ps;
@@ -299,6 +326,8 @@ JsonNode *json_parse(const char *text)
     return root;
 }
 
+/* Read an entire file into memory, parse it, and return the root node.
+ * Convenience wrapper around json_parse() — still requires json_free(). */
 JsonNode *json_parse_file(const char *path)
 {
     FILE *f = fopen(path, "rb");
@@ -327,10 +356,11 @@ JsonNode *json_parse_file(const char *path)
     return root;
 }
 
+/* Recursively free all nodes reachable from root, including siblings.
+ * Passing NULL is safe. */
 void json_free(JsonNode *root)
 {
     if (!root) return;
-    /* free all siblings */
     JsonNode *n = root;
     while (n) {
         JsonNode *next = n->next;
@@ -342,6 +372,8 @@ void json_free(JsonNode *root)
     }
 }
 
+/* O(n) linear search through an object's child list by key name.
+ * Returns NULL if obj is not an object or the key is not found. */
 JsonNode *json_get(const JsonNode *obj, const char *key)
 {
     if (!obj || obj->type != JSON_OBJECT) return NULL;
@@ -353,6 +385,8 @@ JsonNode *json_get(const JsonNode *obj, const char *key)
     return NULL;
 }
 
+/* O(n) indexed access into an array's child list.
+ * Returns NULL if arr is not an array or i is out of range. */
 JsonNode *json_idx(const JsonNode *arr, int i)
 {
     if (!arr || arr->type != JSON_ARRAY) return NULL;
@@ -366,6 +400,7 @@ JsonNode *json_idx(const JsonNode *arr, int i)
     return NULL;
 }
 
+/* Accessor helpers — return def if the node is absent or has the wrong type. */
 double json_num(const JsonNode *node, double def)
 {
     if (!node || node->type != JSON_NUMBER) return def;

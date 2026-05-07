@@ -1,41 +1,47 @@
 /*
- * universe.c — flat-bodies universe loader
+ * universe.c — flat-body universe loader and runtime management
  *
  * JSON schema (top-level keys):
  *
  *   "bodies"         — flat array of all bodies (stars, planets, moons)
- *   "rings"          — ring-system descriptors (unchanged)
- *   "asteroid_belts" — belt descriptors (unchanged)
+ *   "rings"          — ring-system descriptors (passed through unchanged)
+ *   "asteroid_belts" — belt descriptors (passed through unchanged)
  *
  * Body placement rules by "type":
  *
- *   "star"                       — placed at absolute position given by
- *                                  "pos_ly" (light-years from origin).
- *                                  Optional "velocity_km_s" sets bulk
- *                                  proper-motion velocity for the whole system.
+ *   "star"                       — placed at absolute world position given by
+ *                                  "pos_ly" ([x,y,z] in light-years from origin).
+ *                                  Optional "velocity_km_s" sets bulk proper-motion
+ *                                  velocity for the whole system (applied last).
  *
  *   "planet" / "dwarf_planet"    — Keplerian orbit around "parent" star.
- *                                  "parent" must name a star already loaded.
+ *                                  "parent" must name a star already loaded in Pass 1.
  *
- *   "moon"                       — parent-relative orbit around "parent"
- *                                  planet/moon using "moon_keplerian" elements.
+ *   "moon"                       — parent-relative orbit around "parent" planet/moon
+ *                                  using "moon_keplerian" elements (a in km, GM of parent).
  *
- * Three-pass load order:
- *   Pass 1 — stars          (need absolute positions before anything else)
- *   Pass 2 — planets / dwarf_planets
- *   Pass 3 — moons
+ * Three-pass load order (why passes matter):
+ *   Pass 1 — stars first, so absolute world positions exist before any body tries
+ *             to reference a star as its parent.
+ *   Pass 2 — planets/dwarf_planets: find_body_index() can locate the parent star
+ *             because all stars are already in g_bodies[].
+ *   Pass 3 — moons: parent planets are fully positioned so moon_to_state() receives
+ *             the correct world-space parent GM and can add the parent offset.
  *
  * Post-processing per star (after all bodies loaded):
- *   1. Centre-of-mass velocity correction (zero internal momentum)
- *   2. Apply bulk velocity to all bodies in system
+ *   1. Centre-of-mass velocity correction: the star's velocity is adjusted so the
+ *      total linear momentum of the system is zero in the star's frame.  Only the
+ *      star is adjusted because M_star >> M_planets, making the correction exact
+ *      enough for long-term stability without touching every planet velocity.
+ *   2. Apply bulk velocity (proper motion): "velocity_km_s" from the JSON is added
+ *      uniformly to every body in the system, translating the whole system through
+ *      world space at the correct stellar drift speed.
  *
  * Parent chain convention (Body.parent field):
- *   stars        — parent = -1
+ *   stars        — parent = -1   (root of the chain)
  *   planets      — parent = star body index
  *   moons        — parent = planet body index
- *
- * The root_star_of() helper walks this chain to find the owning star,
- * which is used for per-system post-processing and physics grouping.
+ *   The root_star_of() helper walks this chain upward until parent == -1.
  */
 #include "universe.h"
 #include "body.h"
@@ -48,6 +54,14 @@
 
 /* ------------------------------------------------------------------ helpers */
 
+/*
+ * ensure_capacity — grow g_bodies[] to hold at least `needed` entries.
+ *
+ * Doubling strategy: capacity starts at MAX_BODIES, then doubles each time the
+ * limit is reached.  This amortises realloc cost to O(1) per insertion.
+ * The process exits on allocation failure — there is no graceful recovery path
+ * since a partially-loaded universe is unusable.
+ */
 static void ensure_capacity(int needed)
 {
     if (needed <= g_bodies_cap) return;
@@ -59,6 +73,26 @@ static void ensure_capacity(int needed)
     g_bodies_cap = new_cap;
 }
 
+/*
+ * alloc_trail — allocate and zero-initialise all trail state for a body.
+ *
+ * Two parallel trail systems live side-by-side:
+ *
+ *   Simulation trail ("trail_*"):
+ *     The authoritative, accumulated path.  TRAIL_LEN double[3] positions plus
+ *     per-segment arc lengths.  Used by trails_render() for the visible ribbon.
+ *
+ *   Frame-snapshot trail ("trail_frame_*"):
+ *     A snapshot of the trail state as it was at the start of the current
+ *     physics frame.  The collision system uses this to roll back and re-emit
+ *     the trail from its pre-impact state when two bodies merge, preventing
+ *     a visual glitch where the trail suddenly jumps to the collision point.
+ *
+ * Both systems share the same circular-buffer structure (head, count, accum,
+ * total_len) and a "prev" sample for Hermite spline tangent computation.
+ * Initialising prev_pos/vel to the body's current position and velocity at
+ * load time ensures the first trail segment has a valid tangent.
+ */
 static void alloc_trail(Body *bo)
 {
     bo->trail = (double(*)[3])calloc(TRAIL_LEN, 3 * sizeof(double));
@@ -97,6 +131,8 @@ static void alloc_trail(Body *bo)
     bo->trail_frame_prev_vel[2] = bo->trail_prev_vel[2];
 }
 
+/* O(n) linear search through g_bodies[0..n-1] by name.  Only called during
+ * loading (Pass 2 and Pass 3), never in the hot path. */
 static int find_body_index(const char *name, int n)
 {
     int i;
@@ -105,6 +141,7 @@ static int find_body_index(const char *name, int n)
     return -1;
 }
 
+/* Read a [r, g, b] JSON array into a float[3].  Missing elements default to 0. */
 static void read_color(const JsonNode *arr, float col[3])
 {
     col[0] = (float)json_num(json_idx(arr, 0), 0.0);
@@ -112,6 +149,8 @@ static void read_color(const JsonNode *arr, float col[3])
     col[2] = (float)json_num(json_idx(arr, 2), 0.0);
 }
 
+/* Zero a Body struct and set safe scalar defaults: alive=1, parent=-1,
+ * atm_scale=1.0 (no atmosphere still renders correctly at unit scale). */
 static void body_defaults(Body *bo)
 {
     memset(bo, 0, sizeof(*bo));
@@ -120,6 +159,8 @@ static void body_defaults(Body *bo)
     bo->atm_scale = 1.0f;
 }
 
+/* Read obliquity and rotation period from JSON.
+ * rotation_rate is stored in rad/s: 2π / (period_days × DAY). */
 static void read_rotation(const JsonNode *bn, Body *bo)
 {
     JsonNode *obl = json_get(bn, "obliquity_deg");
@@ -129,6 +170,7 @@ static void read_rotation(const JsonNode *bn, Body *bo)
         bo->rotation_rate = (2.0 * PI) / (json_num(rot, 1.0) * DAY);
 }
 
+/* Read the optional "atmosphere" sub-object: color, intensity, and scale. */
 static void read_atmosphere(const JsonNode *bn, Body *bo)
 {
     JsonNode *atm = json_get(bn, "atmosphere");
@@ -142,10 +184,10 @@ static void read_atmosphere(const JsonNode *bn, Body *bo)
 }
 
 /*
- * root_star_of — walk the parent chain to find the owning star.
- *   Stars (parent=-1) return themselves immediately.
+ * root_star_of — thin wrapper for body_root_star() (defined in body.c).
+ *   Stars (parent=-1) return themselves in zero hops.
  *   Planets (parent=star) return the star in one hop.
- *   Moons  (parent=planet, parent=star) return the star in two hops.
+ *   Moons (parent=planet, parent=star) return the star in two hops.
  */
 static int root_star_of(int i) { return body_root_star(i); }
 
@@ -170,14 +212,18 @@ void universe_load(const char *path)
 
     g_nbodies = 0;
 
-    /* Bulk velocity per body slot (set for stars during Pass 1, zero otherwise) */
+    /* Bulk velocity per body slot.  Set for star indices during Pass 1;
+     * zero everywhere else.  Applied in post-processing after CoM correction. */
     double bv[MAX_BODIES][3];
     for (i = 0; i < MAX_BODIES; i++) bv[i][0] = bv[i][1] = bv[i][2] = 0.0;
 
     /* ================================================================
      * Pass 1 — Stars
-     * Placed at their absolute position (pos_ly → metres).
-     * Bulk velocity stashed in bv[]; applied in post-processing.
+     *
+     * Stars are placed at absolute world positions (pos_ly × LY → metres).
+     * The bulk velocity vector (velocity_km_s) is stashed in bv[star_idx]
+     * and applied after the full system is loaded so that the CoM correction
+     * can be computed first against the orbital velocities alone.
      * ================================================================ */
     fprintf(stdout, "[Boot] Universe pass 1/3: stars\n");
     fflush(stdout);
@@ -212,7 +258,7 @@ void universe_load(const char *path)
             bo->is_star        = 1;
             read_rotation(bn, bo);
 
-            /* Stash bulk velocity for post-processing */
+            /* Stash bulk velocity; convert km/s → m/s */
             JsonNode *vn = json_get(bn, "velocity_km_s");
             if (vn) {
                 bv[g_nbodies][0] = json_num(json_idx(vn, 0), 0.0) * 1000.0;
@@ -227,9 +273,18 @@ void universe_load(const char *path)
 
     /* ================================================================
      * Pass 2 — Planets and dwarf_planets
-     * Keplerian orbit around "parent" star.
-     * Body.parent is set to the star's index so root_star_of() works
-     * and the physics engine correctly skips planet–star fast forces.
+     *
+     * keplerian_to_state() returns a heliocentric position/velocity in SI
+     * units (metres, m/s) relative to the parent star.  The star's world
+     * position is then added to convert to absolute world coordinates.
+     *
+     * GM of the parent star must be expressed in AU³/day² to match the
+     * JPL table convention used by keplerian_to_state():
+     *   gm_star_au2 = G × M_star / AU³ × DAY²
+     *
+     * All parent data is read before the ensure_capacity() call: while
+     * ensure_capacity uses an integer index (par_idx) that survives realloc,
+     * taking a pointer to g_bodies[par_idx] before realloc would be UB.
      * ================================================================ */
     fprintf(stdout, "[Boot] Universe pass 2/3: planets and dwarf planets\n");
     fflush(stdout);
@@ -254,7 +309,7 @@ void universe_load(const char *path)
                 json_free(root); exit(1);
             }
 
-            /* GM of parent star in AU³/day² — used for both velocity and trail */
+            /* GM of parent star in AU³/day² for keplerian_to_state() */
             double gm_star_au2 = G_CONST * g_bodies[par_idx].mass
                                  / (AU * AU * AU) * (DAY * DAY);
 
@@ -270,7 +325,7 @@ void universe_load(const char *path)
                 double L = json_num(json_get(kep, "L"),            0.0);
                 keplerian_to_state(a, e, ii, O, w, L, gm_star_au2, p, v);
             }
-            /* Offset by parent star's world position */
+            /* Convert heliocentric → world coordinates */
             p[0] += g_bodies[par_idx].pos[0];
             p[1] += g_bodies[par_idx].pos[1];
             p[2] += g_bodies[par_idx].pos[2];
@@ -293,7 +348,15 @@ void universe_load(const char *path)
 
     /* ================================================================
      * Pass 3 — Moons
-     * Parent-relative orbit; parent must be a planet already loaded.
+     *
+     * moon_to_state() returns a parent-relative position/velocity (metres,
+     * m/s) in the GL frame.  The parent's world position and velocity are
+     * added to get absolute state.
+     *
+     * The parent's position and velocity are cached in local arrays BEFORE
+     * ensure_capacity() is called.  ensure_capacity() may realloc g_bodies[],
+     * invalidating any raw pointer taken from it.  Using cached scalar copies
+     * avoids any dependency on the old pointer after realloc.
      * ================================================================ */
     fprintf(stdout, "[Boot] Universe pass 3/3: moons\n");
     fflush(stdout);
@@ -317,7 +380,7 @@ void universe_load(const char *path)
                 json_free(root); exit(1);
             }
 
-            /* Cache parent state before potential realloc */
+            /* Cache parent state before potential realloc in ensure_capacity() */
             double gm_par   = G_CONST * g_bodies[par_idx].mass;
             double par_p[3] = { g_bodies[par_idx].pos[0],
                                 g_bodies[par_idx].pos[1],
@@ -361,9 +424,20 @@ void universe_load(const char *path)
     }
 
     /* ================================================================
-     * Post-processing — per star:
-     *   1. Centre-of-mass velocity correction (zero internal momentum).
-     *   2. Apply bulk velocity (proper motion) to all bodies in system.
+     * Post-processing — per star system:
+     *
+     * Step 1 — Centre-of-mass velocity correction.
+     *   After keplerian_to_state(), each planet has a heliocentric velocity
+     *   that assumes the star is stationary.  Summing p·v over all planets
+     *   gives a net momentum; this is removed by nudging the star velocity:
+     *     v_star -= Σ (M_i / M_star) × v_i
+     *   Only the star is adjusted (M_star >> M_planets), so the correction
+     *   is negligible for the planets and exact for the total momentum.
+     *
+     * Step 2 — Bulk velocity (proper motion).
+     *   The stellar "velocity_km_s" from JSON is the system's velocity through
+     *   the galaxy.  After CoM correction, this is added uniformly to every
+     *   body in the system so the system drifts as a rigid unit.
      * ================================================================ */
     fprintf(stdout, "[Boot] Universe post-processing: system velocities\n");
     fflush(stdout);
@@ -372,8 +446,7 @@ void universe_load(const char *path)
         if (!g_bodies[s].is_star) continue;
         n_stars++;
 
-        /* CoM correction: adjust star velocity to zero total system momentum.
-         * Star mass >> planet masses so adjusting only the star is sufficient. */
+        /* CoM correction: zero net internal momentum by adjusting only the star */
         for (i = 0; i < g_nbodies; i++) {
             if (i == s || root_star_of(i) != s) continue;
             g_bodies[s].vel[0] -=
@@ -384,7 +457,7 @@ void universe_load(const char *path)
                 g_bodies[i].mass * g_bodies[i].vel[2] / g_bodies[s].mass;
         }
 
-        /* Apply bulk velocity to all bodies in this system */
+        /* Apply bulk proper-motion velocity uniformly to the whole system */
         if (bv[s][0] != 0.0 || bv[s][1] != 0.0 || bv[s][2] != 0.0) {
             for (i = 0; i < g_nbodies; i++) {
                 if (root_star_of(i) != s) continue;
@@ -394,7 +467,6 @@ void universe_load(const char *path)
             }
         }
 
-        /* Log */
         int cnt = 0;
         for (i = 0; i < g_nbodies; i++)
             if (root_star_of(i) == s) cnt++;
@@ -414,6 +486,13 @@ void universe_load(const char *path)
     json_free(root);
 }
 
+/*
+ * universe_add_body — create a body at runtime from a BodyCreateSpec.
+ *
+ * Used by the build system to add stars, planets, and moons interactively.
+ * Mirrors the three-pass loader but operates on a single pre-filled spec.
+ * Returns the new body's index in g_bodies[], or -1 on failure.
+ */
 int universe_add_body(const BodyCreateSpec *spec)
 {
     if (!spec) return -1;
@@ -455,6 +534,21 @@ int universe_add_body(const BodyCreateSpec *spec)
     return idx;
 }
 
+/*
+ * universe_rebind_to_nearest_stars — reassign planet parent pointers after a
+ * star has been added or moved by the build system.
+ *
+ * Only star-orbiting bodies are eligible for rebinding:
+ *   - Skips dead bodies and stars (they manage their own parent = -1).
+ *   - Skips moons: if a body's current parent is not a star (i.e. parent is a
+ *     planet or another moon), its orbital hierarchy is left intact.
+ *   - Parentless non-stars (parent == -1) are also candidates — they adopt the
+ *     nearest star.
+ *
+ * Use case: the user drops a new star near an existing solar system in build
+ * mode.  The planets whose nearest star is now the new one should switch their
+ * parent pointer so that physics grouping and LOD decisions stay correct.
+ */
 void universe_rebind_to_nearest_stars(void)
 {
     for (int i = 0; i < g_nbodies; i++) {
@@ -483,6 +577,7 @@ void universe_rebind_to_nearest_stars(void)
     }
 }
 
+/* Free all trail buffers and the body array itself, then reset globals. */
 void universe_shutdown(void)
 {
     int i;
@@ -497,4 +592,3 @@ void universe_shutdown(void)
     g_nbodies    = 0;
     g_bodies_cap = 0;
 }
-

@@ -1,9 +1,22 @@
 /*
- * gl_utils.c — OpenGL helpers: shader loading, buffer creation
+ * gl_utils.c — thin wrappers around common OpenGL object creation
+ *
+ * All functions return 0 / NULL on failure and print a diagnostic to stderr.
+ * Ownership: the caller is responsible for deleting returned objects
+ * (glDeleteProgram, glDeleteVertexArrays, glDeleteBuffers).
+ *
+ * VAO/VBO binding convention:
+ *   gl_vao_create() leaves the new VAO bound.
+ *   gl_vbo_create() / gl_ebo_create() leave the new buffer bound to its
+ *   target. The caller sets up vertex attribute pointers, then unbinds
+ *   the VAO with glBindVertexArray(0).
  */
 #include "gl_utils.h"
 
-/* ------------------------------------------------------------------ internal */
+/* ---------------------------------------------------------------- private */
+
+/* Read an entire file into a heap-allocated NUL-terminated string.
+ * Uses binary mode so line endings are preserved as-is for GLSL. */
 static char *read_file(const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) { fprintf(stderr, "[GL] cannot open '%s'\n", path); return NULL; }
@@ -18,6 +31,9 @@ static char *read_file(const char *path) {
     return buf;
 }
 
+/* Compile a single shader stage and return its handle, or 0 on failure.
+ * The info log (up to 1 KB) is printed to stderr on compile error.
+ * path is used only for the error message — it is not re-read here. */
 static GLuint compile_shader(GLenum type, const char *src, const char *path) {
     GLuint s = glCreateShader(type);
     glShaderSource(s, 1, &src, NULL);
@@ -34,7 +50,11 @@ static GLuint compile_shader(GLenum type, const char *src, const char *path) {
     return s;
 }
 
-/* ------------------------------------------------------------------ public */
+/* ---------------------------------------------------------------- public */
+
+/* Load, compile, and link a vertex+fragment shader pair from disk.
+ * Shader objects are deleted after linking — only the program handle survives.
+ * Returns the linked program, or 0 on any failure. */
 GLuint gl_shader_load(const char *vert_path, const char *frag_path) {
     char *vsrc = read_file(vert_path);
     char *fsrc = read_file(frag_path);
@@ -49,6 +69,7 @@ GLuint gl_shader_load(const char *vert_path, const char *frag_path) {
     glAttachShader(prog, vs);
     glAttachShader(prog, fs);
     glLinkProgram(prog);
+    /* Shader objects are no longer needed once the program is linked */
     glDeleteShader(vs);
     glDeleteShader(fs);
 
@@ -65,6 +86,8 @@ GLuint gl_shader_load(const char *vert_path, const char *frag_path) {
     return prog;
 }
 
+/* Create and bind a VAO.  The caller must set up vertex attribute pointers
+ * before calling glBindVertexArray(0). */
 GLuint gl_vao_create(void) {
     GLuint vao;
     glGenVertexArrays(1, &vao);
@@ -72,6 +95,9 @@ GLuint gl_vao_create(void) {
     return vao;
 }
 
+/* Create and bind a VBO, optionally uploading initial data.
+ * data may be NULL for a zero-initialised or to-be-filled buffer.
+ * usage is typically GL_STATIC_DRAW or GL_DYNAMIC_DRAW. */
 GLuint gl_vbo_create(size_t bytes, const void *data, GLenum usage) {
     GLuint vbo;
     glGenBuffers(1, &vbo);
@@ -80,6 +106,8 @@ GLuint gl_vbo_create(size_t bytes, const void *data, GLenum usage) {
     return vbo;
 }
 
+/* Create and bind an EBO (index buffer) with static data.
+ * Must be called while a VAO is bound so the binding is captured. */
 GLuint gl_ebo_create(size_t bytes, const unsigned int *data) {
     GLuint ebo;
     glGenBuffers(1, &ebo);

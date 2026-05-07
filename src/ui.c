@@ -3,9 +3,38 @@
  *
  * Layout (top bar, full width, BAR_H pixels tall):
  *   - Background: semi-transparent dark strip
- *   - Blue fill:  log-normalised camera movement speed (left → right)
+ *   - White fill:  log-normalised camera movement speed (left → right)
  *   - Centre text: physical movement speed  ("0.50 AU/s")
  *   - Right text:  simulation speed         ("365 days/s")
+ *   - Left text:   nearest body and distance
+ *   - Top-right:   FPS counter
+ *
+ * Speed bar normalisation:
+ *   Camera speed spans ~7 orders of magnitude (0.00001 → 200 AU/s in normal
+ *   mode, 200 → 63241 AU/s in warp). A linear bar would be useless — the fill
+ *   fraction is computed as t = log(speed/min) / log(max/min), compressing
+ *   the full range into the bar width.
+ *
+ * Text caching (TextCache):
+ *   SDL_TTF re-rendering is expensive. Each text element stores the last
+ *   rendered string and colour; a strcmp check skips re-rendering when the
+ *   content hasn't changed. Only a new string triggers a GL texture upload.
+ *
+ * FPS smoothing:
+ *   An exponential moving average with α=0.1 (~10-frame effective window)
+ *   damps per-frame jitter. The EMA is updated once per ui_render() call
+ *   using SDL_GetPerformanceCounter for sub-millisecond resolution.
+ *
+ * Build bar slide-in animation:
+ *   When build mode is entered, s_build_anim_t ramps from 0 to 1 over 0.22 s.
+ *   An ease-out cubic (1 - (1-t)³) starts fast and settles smoothly so the
+ *   panel doesn't abruptly appear. The x-offset is (ease - 1) × panel_width,
+ *   which moves the panel from off-screen left to its final position.
+ *
+ * Pause menu:
+ *   A centred modal panel drawn over a 38%-alpha full-screen dark overlay.
+ *   Hit-testing uses the same PauseMenuLayout struct as drawing, so mouse
+ *   hover and click coordinates map to the same item rectangles.
  */
 #include "ui.h"
 #include "camera.h"
@@ -18,7 +47,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* ------------------------------------------------------------------ layout */
+/* ── layout constants ─────────────────────────────────────────────────────── */
 #define BAR_H         4       /* bar height, pixels                 */
 #define BAR_W_FRAC    0.5f    /* fraction of screen width           */
 #define BAR_TOP       12.0f   /* distance from top of screen        */
@@ -35,12 +64,12 @@
 #define PAUSE_MENU_ITEM_ACTIVE_H 42.0f
 #define PAUSE_MENU_ITEM_GAP 10.0f
 
-/* Camera speed range (AU / real-second) */
+/* Camera speed range (AU / real-second) for log-normalised bar */
 #define CAM_MIN       0.00001f
 #define CAM_MAX       200.0f       /* normal max = warp min */
 #define WARP_MAX  63241.0f         /* 1 ly/s */
 
-/* ------------------------------------------------------------------ GL */
+/* ── GL objects ───────────────────────────────────────────────────────────── */
 static GLuint s_shader     = 0;
 static GLuint s_vao        = 0;
 static GLuint s_vbo        = 0;    /* 6 vertices × 4 floats (x,y,u,v)  */
@@ -54,7 +83,11 @@ static TTF_Font *s_build_item_font = NULL;
 static TTF_Font *s_menu_font = NULL;
 static TTF_Font *s_menu_title_font = NULL;
 
-/* ------------------------------------------------------------------ text cache */
+/* ── text cache ───────────────────────────────────────────────────────────── */
+/* Each TextCache entry holds a GL texture, its pixel dimensions, the last
+ * rendered string, and the last colour. update_text_with_font() compares the
+ * incoming string and colour against the cached values; only on a mismatch
+ * does it call TTF_RenderText_Blended() and upload a new texture. */
 typedef struct {
     GLuint tex;
     int w, h;
@@ -76,6 +109,7 @@ static int s_pause_menu_visible = 0;
 static int s_pause_menu_selected = 0;
 static int s_pause_menu_vsync = 0;
 
+/* Layout structs computed fresh each frame so resizing is free. */
 typedef struct {
     int n;
     float item_w;
@@ -107,19 +141,21 @@ typedef struct {
     float panel_h;
 } BuildBarLayout;
 
-/* ------------------------------------------------------------------ build slide-in animation */
+/* ── build bar slide-in animation ─────────────────────────────────────────── */
+/* s_build_anim_t: normalised progress [0, 1] of the slide-in animation.
+ * Advances at rate 1/0.22 s (reaches 1.0 after 220 ms).
+ * Resets to 0.0 each time build mode is entered (s_build_prev_mode flips). */
 static float  s_build_anim_t    = 0.0f;
 static Uint64 s_build_anim_ts   = 0;
 static int    s_build_prev_mode = 0;
 
-/* ------------------------------------------------------------------ FPS smoothing */
-/* Exponential moving average over ~30 frames, updated every UI frame.
- * We manage time internally so the ui_render() signature stays unchanged. */
+/* ── FPS smoothing ────────────────────────────────────────────────────────── */
+/* Exponential moving average over ~10 frames (α=0.1).
+ * Updated every ui_render() call; timer state managed internally. */
 static Uint64 s_fps_prev  = 0;
 static float  s_fps_smooth = 0.0f;
 
-/* ------------------------------------------------------------------ helpers */
-
+/* ── layout helpers ───────────────────────────────────────────────────────── */
 static PauseMenuLayout pause_menu_layout(float W, float H)
 {
     PauseMenuLayout layout;
@@ -167,6 +203,10 @@ static BuildBarLayout build_bar_layout(float W)
     return layout;
 }
 
+/* ── GL texture helpers ───────────────────────────────────────────────────── */
+/* surf_to_tex — convert an SDL_Surface to an RGBA GL texture.
+ * Converts to ABGR8888 first because that matches GL_RGBA / GL_UNSIGNED_BYTE
+ * on little-endian platforms without a swizzle. */
 static GLuint surf_to_tex(SDL_Surface *surf, int *w, int *h) {
     SDL_Surface *c = SDL_ConvertSurfaceFormat(surf, SDL_PIXELFORMAT_ABGR8888, 0);
     SDL_FreeSurface(surf);
@@ -185,7 +225,7 @@ static GLuint surf_to_tex(SDL_Surface *surf, int *w, int *h) {
     return tex;
 }
 
-/* Re-render text texture only when the string changes */
+/* Re-render text texture only when the string or colour changes. */
 static void update_text_with_font(TextCache *tc, TTF_Font *font,
                                   const char *str, SDL_Color col) {
     if (!font) return;
@@ -204,6 +244,9 @@ static void update_text(TextCache *tc, const char *str, SDL_Color col) {
     update_text_with_font(tc, s_font, str, col);
 }
 
+/* ── pause menu hit testing ───────────────────────────────────────────────── */
+/* Returns the item index under (mx, my), or -1 if outside all items.
+ * Uses the same PauseMenuLayout as drawing for consistent coordinates. */
 static int pause_menu_item_at(float mx, float my)
 {
     PauseMenuLayout layout = pause_menu_layout((float)WIN_W, (float)WIN_H);
@@ -222,6 +265,8 @@ static int pause_menu_item_at(float mx, float my)
     return -1;
 }
 
+/* ── distance formatting ──────────────────────────────────────────────────── */
+/* Auto-scales to km / AU / ly based on magnitude. */
 static void format_distance(double au, char *buf, size_t n)
 {
     if (au < 0.001)
@@ -234,6 +279,15 @@ static void format_distance(double au, char *buf, size_t n)
         snprintf(buf, n, "%.3f ly", au / 63241.0);
 }
 
+/*
+ * nearest_body_distance_string — find the nearest body to the camera and
+ * format a "name  distance" label.
+ *
+ * Two-pass logic: the first pass searches all bodies. If the nearest is more
+ * than 1000 AU away (i.e. interstellar distances), a second pass finds only
+ * the nearest star so the label always shows the most relevant body, not a
+ * dead planet orbiting a distant star.
+ */
 static void nearest_body_distance_string(char *buf, size_t n)
 {
     int best = -1;
@@ -251,6 +305,7 @@ static void nearest_body_distance_string(char *buf, size_t n)
         }
     }
 
+    /* Fall back to nearest star if everything is > 1000 AU away */
     if (best >= 0 && best_d > 1000.0) {
         best = -1;
         best_d = 1e300;
@@ -277,7 +332,8 @@ static void nearest_body_distance_string(char *buf, size_t n)
     }
 }
 
-/* Upload 2 triangles and draw */
+/* ── quad drawing ─────────────────────────────────────────────────────────── */
+/* Upload 2 triangles and draw. UV [0,1]² for textured quads. */
 static void draw_quad(float x, float y, float w, float h) {
     float v[24] = {
         x,   y,   0,0,
@@ -298,6 +354,9 @@ static void draw_rect(float x, float y, float w, float h,
     draw_quad(x, y, w, h);
 }
 
+/* draw_tex — render a TextCache entry at pixel position (x, y) with a given
+ * height in pixels. Width is computed from the texture's aspect ratio so
+ * glyphs are never stretched. */
 static void draw_tex(TextCache *tc, float x, float y, float h) {
     if (!tc || !tc->tex) return;
     float w = h * (float)tc->w / (float)tc->h;
@@ -307,6 +366,22 @@ static void draw_tex(TextCache *tc, float x, float y, float h) {
     draw_quad(x, y, w, h);
 }
 
+/* ── build bar ────────────────────────────────────────────────────────────── */
+/*
+ * draw_build_bar — render the preset selector panel on the left side of screen.
+ *
+ * Slide-in animation:
+ *   s_build_anim_t is advanced each call by dt/0.22. Ease-out cubic:
+ *     ease = 1 - (1 - t)³
+ *   The panel offset ox = (ease - 1) × (panel_x + panel_w) translates from
+ *   fully off-screen left (ease=0 → ox = -panel_right) to final position
+ *   (ease=1 → ox = 0).
+ *
+ * Active item indication:
+ *   The colour strip to the left of each item expands from strip_w to
+ *   strip_active_w for the selected item. The item background alpha is 1.0
+ *   (fully opaque white) for the active item, 0.72 for inactive.
+ */
 static void draw_build_bar(float W)
 {
     if (!g_build_mode) {
@@ -315,7 +390,7 @@ static void draw_build_bar(float W)
         return;
     }
 
-    /* Slide-in animation ------------------------------------------------ */
+    /* Slide-in animation: start timer on mode entry */
     if (!s_build_prev_mode) {
         s_build_anim_t  = 0.0f;
         s_build_anim_ts = SDL_GetPerformanceCounter();
@@ -350,6 +425,7 @@ static void draw_build_bar(float W)
 
     draw_rect(layout.panel_x + ox, layout.panel_y, layout.panel_w, layout.panel_h,
               UI_ACCENT_R, UI_ACCENT_G, UI_ACCENT_B, 1.0f);
+    /* White top border strip */
     draw_rect(layout.panel_x + ox, layout.panel_y, layout.panel_w, 5.0f, 1.0f, 1.0f, 1.0f, 1.0f);
 
     if (s_tc_build_title.tex) {
@@ -396,6 +472,7 @@ static void draw_build_bar(float W)
     }
 }
 
+/* ── pause menu ───────────────────────────────────────────────────────────── */
 static void draw_pause_menu(float W, float H)
 {
     if (!s_pause_menu_visible) return;
@@ -417,6 +494,7 @@ static void draw_pause_menu(float W, float H)
     for (int i = 0; i < 4; i++)
         update_text_with_font(&s_tc_pause_items[i], s_menu_font, labels[i], item_col);
 
+    /* Full-screen dark overlay at 38% opacity to focus attention on menu */
     draw_rect(0.0f, 0.0f, W, H, 0.0f, 0.0f, 0.0f, 0.38f);
     draw_rect(layout.panel_x, layout.panel_y, layout.panel_w, layout.panel_h,
               UI_ACCENT_R, UI_ACCENT_G, UI_ACCENT_B, 1.0f);
@@ -457,7 +535,7 @@ static void draw_pause_menu(float W, float H)
     }
 }
 
-/* ------------------------------------------------------------------ public */
+/* ── public API ───────────────────────────────────────────────────────────── */
 void ui_init(void) {
     s_shader = gl_shader_load("assets/shaders/ui.vert",
                               "assets/shaders/ui.frag");
@@ -469,6 +547,7 @@ void ui_init(void) {
     s_loc_tex     = glGetUniformLocation(s_shader, "u_tex");
 
     s_vao = gl_vao_create();
+    /* Single VBO for 6 vertices (2 triangles); re-uploaded per draw_quad call. */
     s_vbo = gl_vbo_create(24 * sizeof(float), NULL, GL_DYNAMIC_DRAW);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void*)0);
@@ -477,7 +556,7 @@ void ui_init(void) {
                           (void*)(2*sizeof(float)));
     glBindVertexArray(0);
 
-    /* u_screen and u_tex are frame-constant */
+    /* u_screen and u_tex are frame-constant; set once */
     glUseProgram(s_shader);
     glUniform2f(s_loc_screen, (float)WIN_W, (float)WIN_H);
     glUniform1i(s_loc_tex, 0);
@@ -492,6 +571,7 @@ void ui_init(void) {
     if (!s_build_item_font) s_build_item_font = s_font;
     if (!s_menu_font) s_menu_font = s_font;
     if (!s_menu_title_font) s_menu_title_font = s_menu_font;
+    /* Bold title only when it's a distinct font object (avoid double-bolding) */
     if (s_menu_title_font && s_menu_title_font != s_menu_font && s_menu_title_font != s_font)
         TTF_SetFontStyle(s_menu_title_font, TTF_STYLE_BOLD);
 }
@@ -508,14 +588,33 @@ int ui_pause_menu_hit_test(int mouse_x, int mouse_y)
     return pause_menu_item_at((float)mouse_x, (float)mouse_y);
 }
 
+/*
+ * ui_render — draw the full HUD for the current frame.
+ *
+ * Draw order:
+ *   1. Speed bar background + fill
+ *   2. Movement speed text (centred below bar)
+ *   3. Sim speed text (right-aligned below bar)
+ *   4. FPS counter (top-right corner)
+ *   5. Nearest body label (left-aligned below bar)
+ *   6. Build bar (left panel, if build mode active)
+ *   7. Pause menu (centre modal, if open)
+ *
+ * Speed bar fill fraction:
+ *   In normal mode:  t = log(speed / CAM_MIN) / log(CAM_MAX / CAM_MIN)
+ *   In warp mode:    t = log(speed / CAM_MAX) / log(WARP_MAX / CAM_MAX)
+ *   Both map [min, max] → [0, 1] logarithmically.
+ *
+ * GL state: depth test disabled, depth writes off, alpha blending on for all
+ * 2D drawing; restored to 3D defaults (depth test on, writes on) at end.
+ */
 void ui_render(void) {
     if (!s_shader || !s_font) return;
 
     const float W  = (float)WIN_W;
     const float TH = (float)FONT_SIZE;
 
-    /* Log-normalised camera speed → fill fraction.
-     * In warp mode the bar uses the warp range [CAM_MAX, WARP_MAX]. */
+    /* Log-normalised camera speed → fill fraction */
     float spd = g_cam.speed;
     float t;
     if (g_warp) {
@@ -556,7 +655,8 @@ void ui_render(void) {
             snprintf(ss_str, sizeof(ss_str), "%.0f days/s", days);
     }
 
-    /* FPS — exponential moving average, alpha=0.1 (≈ 10-frame window) */
+    /* FPS — exponential moving average, α=0.1 (≈ 10-frame window).
+     * First frame bootstraps the EMA directly to the instantaneous value. */
     Uint64 now  = SDL_GetPerformanceCounter();
     Uint64 freq = SDL_GetPerformanceFrequency();
     if (s_fps_prev != 0 && freq > 0) {
@@ -578,14 +678,14 @@ void ui_render(void) {
     update_text(&s_tc_fps,  fps_str, white);
     update_text(&s_tc_nearest, nearest_str, white);
 
-    /* ---- layout ---- */
+    /* Layout */
     const float BH   = (float)BAR_H;
     const float BW   = W * BAR_W_FRAC;
-    const float BX   = (W - BW) * 0.5f;     /* centered */
+    const float BX   = (W - BW) * 0.5f;     /* centred horizontally */
     const float BY   = BAR_TOP;
     const float TY   = BY + BH + TEXT_GAP;  /* text baseline below bar */
 
-    /* ---- GL state ---- */
+    /* GL state for 2D overlay */
     glDisable(GL_DEPTH_TEST);
     glDepthMask(GL_FALSE);
     glEnable(GL_BLEND);
@@ -596,10 +696,8 @@ void ui_render(void) {
     glBindVertexArray(s_vao);
     glBindBuffer(GL_ARRAY_BUFFER, s_vbo);
 
-    /* Bar background (dark, full width of bar) */
+    /* Bar background (dim white), then fill */
     draw_rect(BX, BY, BW, BH, 1.0f, 1.0f, 1.0f, 0.15f);
-
-    /* Bar fill */
     draw_rect(BX, BY, BW * t, BH, 1.0f, 1.0f, 1.0f, 0.85f);
 
     /* Movement speed — centred below bar */
@@ -608,7 +706,7 @@ void ui_render(void) {
         draw_tex(&s_tc_move, (W - tw) * 0.5f, TY, TH);
     }
 
-    /* Sim speed — right-aligned below bar */
+    /* Sim speed — right-aligned to bar right edge */
     if (s_tc_sim.tex) {
         float tw = TH * (float)s_tc_sim.w / (float)s_tc_sim.h;
         draw_tex(&s_tc_sim, BX + BW - tw, TY, TH);
@@ -628,7 +726,7 @@ void ui_render(void) {
     draw_build_bar(W);
     draw_pause_menu(W, (float)WIN_H);
 
-    /* ---- restore ---- */
+    /* Restore 3D state */
     glBindVertexArray(0);
     glDisable(GL_BLEND);
     glDepthMask(GL_TRUE);
@@ -650,6 +748,7 @@ void ui_shutdown(void) {
     if (s_vbo)  glDeleteBuffers(1, &s_vbo);
     if (s_vao)  glDeleteVertexArrays(1, &s_vao);
     if (s_shader) glDeleteProgram(s_shader);
+    /* Close distinct font objects; shared fallback pointers must not be closed twice */
     if (s_menu_title_font && s_menu_title_font != s_menu_font && s_menu_title_font != s_font)
         TTF_CloseFont(s_menu_title_font);
     if (s_build_item_font && s_build_item_font != s_font)
