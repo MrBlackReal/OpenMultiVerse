@@ -346,6 +346,8 @@ static float clampf_local(float v, float lo, float hi)
     return v;
 }
 
+static double smoothstepd(double edge0, double edge1, double x);
+
 /*
  * supernova_fullscreen_raster_local - choose whether a volumetric supernova
  * pass should rasterize via a fullscreen quad instead of a world-space
@@ -369,6 +371,30 @@ static int supernova_fullscreen_raster_local(const float center[3],
     float half_extent = coverage_radius * bill_scale * edge_overscan;
     float min_eye_z = fmaxf(half_extent * 1.05f, 0.18f);
     return eye_z < min_eye_z;
+}
+
+static int supernova_far_raster_local(const float center[3],
+                                      const float cam_fwd[3],
+                                      float coverage_radius,
+                                      float bill_scale)
+{
+    const float edge_overscan = 2.0f; /* keep in sync with supernova_billboard.vert */
+    const float far_guard = 1850.0f;
+    float eye_z = center[0] * cam_fwd[0]
+                + center[1] * cam_fwd[1]
+                + center[2] * cam_fwd[2];
+    float half_extent = coverage_radius * bill_scale * edge_overscan;
+    return eye_z + half_extent >= far_guard;
+}
+
+static float supernova_distance_fade_local(float dist, float radius)
+{
+    float fade_start = 2600.0f + radius * 2.5f;
+    float fade_end = 18000.0f + radius * 18.0f;
+    if (fade_end <= fade_start + 1.0f) fade_end = fade_start + 1.0f;
+    if (dist <= fade_start) return 1.0f;
+    if (dist >= fade_end) return 0.0f;
+    return 1.0f - (float)smoothstepd(fade_start, fade_end, dist);
 }
 
 /* Visual render radius in AU-units (= metres × RS), accounting for collision
@@ -1302,12 +1328,23 @@ void render_frame(const float view[16], const float proj[16],
         for (int i = 0; i < sn_count; i++) {
             const SupernovaRenderEvent *e = &sn_events[i];
             float cloud_bill_scale = 1.34f;
+            float dist;
+            float dist_fade;
+            float cloud_density;
             int fullscreen_raster;
             if (e->cloud_intensity <= 0.00005f || e->cloud_radius <= 0.0f) continue;
 
+            dist = sqrtf(e->pos[0]*e->pos[0] + e->pos[1]*e->pos[1] + e->pos[2]*e->pos[2]);
+            dist_fade = supernova_distance_fade_local(dist, e->cloud_radius);
+            cloud_density = e->cloud_intensity * dist_fade;
+            if (cloud_density <= 0.00005f) continue;
+
             fullscreen_raster = supernova_fullscreen_raster_local(e->pos, cam_fwd,
                                                                   e->cloud_radius,
-                                                                  cloud_bill_scale);
+                                                                  cloud_bill_scale)
+                             || supernova_far_raster_local(e->pos, cam_fwd,
+                                                           e->cloud_radius,
+                                                           cloud_bill_scale);
             glUniform1f(s_sn_cloud_fullscreen, fullscreen_raster ? 1.0f : 0.0f);
             glUniform3f(s_sn_cloud_center, e->pos[0], e->pos[1], e->pos[2]);
             glUniform1f(s_sn_cloud_radius, e->cloud_radius);
@@ -1315,8 +1352,8 @@ void render_frame(const float view[16], const float proj[16],
             glUniform3f(s_sn_cloud_color, e->color[0], e->color[1], e->color[2]);
             glUniform1f(s_sn_cloud_inner,
                         e->cloud_radius > 1e-6f ? e->cloud_inner_radius / e->cloud_radius : 0.72f);
-            glUniform1f(s_sn_cloud_density, e->cloud_intensity);
-            glUniform1f(s_sn_cloud_hot, e->hot_shell_intensity);
+            glUniform1f(s_sn_cloud_density, cloud_density);
+            glUniform1f(s_sn_cloud_hot, e->hot_shell_intensity * dist_fade);
             glUniform1f(s_sn_cloud_time, e->time_days);
             glUniform1f(s_sn_cloud_seed, e->seed);
             glUniform1f(s_sn_cloud_bill, cloud_bill_scale);
@@ -1347,11 +1384,21 @@ void render_frame(const float view[16], const float proj[16],
         for (int i = 0; i < sn_count; i++) {
             const SupernovaRenderEvent *e = &sn_events[i];
             float dist = sqrtf(e->pos[0]*e->pos[0] + e->pos[1]*e->pos[1] + e->pos[2]*e->pos[2]);
+            float dist_fade;
             float core_bill_scale;
             int fullscreen_raster;
             float coverage_radius;
+            float flash_intensity;
+            float core_intensity;
 
             if (e->flash_intensity <= 0.00005f && e->core_intensity <= 0.00005f)
+                continue;
+
+            dist_fade = supernova_distance_fade_local(dist,
+                        e->cloud_radius > e->flash_radius ? e->cloud_radius : e->flash_radius);
+            flash_intensity = e->flash_intensity * dist_fade;
+            core_intensity = e->core_intensity * dist_fade;
+            if (flash_intensity <= 0.00005f && core_intensity <= 0.00005f)
                 continue;
 
             if (dist > e->flash_radius * 1.01f) {
@@ -1364,14 +1411,17 @@ void render_frame(const float view[16], const float proj[16],
             coverage_radius = e->cloud_radius > e->flash_radius ? e->cloud_radius : e->flash_radius;
             fullscreen_raster = supernova_fullscreen_raster_local(e->pos, cam_fwd,
                                                                   coverage_radius,
-                                                                  core_bill_scale);
+                                                                  core_bill_scale)
+                             || supernova_far_raster_local(e->pos, cam_fwd,
+                                                           coverage_radius,
+                                                           core_bill_scale);
             glUniform1f(s_sn_core_fullscreen, fullscreen_raster ? 1.0f : 0.0f);
             glUniform3f(s_sn_core_center, e->pos[0], e->pos[1], e->pos[2]);
             glUniform1f(s_sn_core_radius, e->flash_radius);
             glUniform3f(s_sn_core_oc, -e->pos[0], -e->pos[1], -e->pos[2]);
             glUniform3f(s_sn_core_color, e->color[0], e->color[1], e->color[2]);
-            glUniform1f(s_sn_core_flash, e->flash_intensity);
-            glUniform1f(s_sn_core_core, e->core_intensity);
+            glUniform1f(s_sn_core_flash, flash_intensity);
+            glUniform1f(s_sn_core_core, core_intensity);
             glUniform1f(s_sn_core_ratio,
                         e->flash_radius > 1e-6f ? e->core_radius / e->flash_radius : 0.32f);
             glUniform1f(s_sn_core_time, e->time_days);

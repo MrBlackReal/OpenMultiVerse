@@ -139,10 +139,13 @@ void main() {
         accumAlpha += sampleAlpha * (1.0 - accumAlpha);
     }
 
+    eye_depth = (tExit * radius) * dot(ray_dir, u_cam_fwd);
+    eye_depth = max(eye_depth, 0.0);
     accumAlpha *= smoothstep(0.0, 0.018, accumAlpha);
+    accumAlpha *= 1.0 - smoothstep(FAR * 0.82, FAR * 4.60, eye_depth);
     if (accumAlpha < 0.0008) discard;
 
-    eye_depth = (tExit * radius) * dot(ray_dir, u_cam_fwd);
+    eye_depth = min(eye_depth, FAR * 0.9995);
     gl_FragDepth = log2(eye_depth + 1.0) / log2(FAR + 1.0);
     frag_color = vec4(accumColor, accumAlpha);
 }
