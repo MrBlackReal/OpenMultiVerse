@@ -36,7 +36,7 @@ float hash31(vec3 p) {
     return fract((p.x + p.y) * p.z);
 }
 
-float noise3(vec3 p) {
+float sn_value_noise(vec3 p) {
     vec3 i = floor(p);
     vec3 f = fract(p);
     f = f * f * (3.0 - 2.0 * f);
@@ -63,7 +63,7 @@ float fbm(vec3 p) {
     float v = 0.0;
     float a = 0.55;
     for (int i = 0; i < 4; i++) {
-        v += noise3(p) * a;
+        v += sn_value_noise(p) * a;
         p = p * 2.02 + vec3(3.1, 2.7, 1.9);
         a *= 0.5;
     }
