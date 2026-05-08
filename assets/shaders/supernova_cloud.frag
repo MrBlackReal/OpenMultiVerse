@@ -37,7 +37,7 @@ float hash31(vec3 p) {
     return fract((p.x + p.y) * p.z);
 }
 
-float noise3(vec3 p) {
+float sn_value_noise(vec3 p) {
     vec3 i = floor(p);
     vec3 f = fract(p);
     f = f * f * (3.0 - 2.0 * f);
@@ -64,7 +64,7 @@ float fbm(vec3 p) {
     float v = 0.0;
     float a = 0.55;
     for (int i = 0; i < 4; i++) {
-        v += noise3(p) * a;
+        v += sn_value_noise(p) * a;
         p = p * 2.03 + vec3(3.7, 1.9, 2.6);
         a *= 0.5;
     }
@@ -75,7 +75,7 @@ float ridged_fbm(vec3 p) {
     float v = 0.0;
     float a = 0.60;
     for (int i = 0; i < 3; i++) {
-        float n = noise3(p);
+        float n = sn_value_noise(p);
         n = 1.0 - abs(n * 2.0 - 1.0);
         v += n * a;
         p = p * 2.18 + vec3(4.1, 2.3, 3.4);

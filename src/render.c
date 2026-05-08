@@ -178,7 +178,7 @@ static GLint  s_gl_right     = -1;
 static GLint  s_gl_up        = -1;
 static GLint  s_gl_color     = -1;
 
-/* Supernova passes: volumetric cloud and flash/core. */
+/* Supernova passes: volumetric cloud and core. */
 static GLuint s_supernova_core_shader = 0;
 static GLuint s_supernova_cloud_shader = 0;
 static GLint  s_sn_core_vp = -1;
