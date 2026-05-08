@@ -178,10 +178,9 @@ static GLint  s_gl_right     = -1;
 static GLint  s_gl_up        = -1;
 static GLint  s_gl_color     = -1;
 
-/* Supernova passes: volumetric cloud/core plus a lightweight visibility glow. */
+/* Supernova passes: volumetric cloud and core. */
 static GLuint s_supernova_core_shader = 0;
 static GLuint s_supernova_cloud_shader = 0;
-static GLuint s_supernova_fallback_shader = 0;
 static GLint  s_sn_core_vp = -1;
 static GLint  s_sn_core_center = -1;
 static GLint  s_sn_core_radius = -1;
@@ -218,17 +217,6 @@ static GLint  s_sn_cloud_fullscreen = -1;
 static GLint  s_sn_cloud_fov_tan = -1;
 static GLint  s_sn_cloud_aspect = -1;
 static GLint  s_sn_cloud_screen = -1;
-static GLint  s_sn_fallback_vp = -1;
-static GLint  s_sn_fallback_center = -1;
-static GLint  s_sn_fallback_radius = -1;
-static GLint  s_sn_fallback_right = -1;
-static GLint  s_sn_fallback_up = -1;
-static GLint  s_sn_fallback_color = -1;
-static GLint  s_sn_fallback_flash = -1;
-static GLint  s_sn_fallback_core = -1;
-static GLint  s_sn_fallback_cloud = -1;
-static GLint  s_sn_fallback_bill = -1;
-static GLint  s_sn_fallback_fullscreen = -1;
 
 /* Glare billboard is STAR_GLARE_BILL_SCALE × the star's visual radius.
  * This constant is also used to compute when the dot fades as the glare grows. */
@@ -711,24 +699,6 @@ void render_init(void) {
         s_sn_cloud_fov_tan = glGetUniformLocation(s_supernova_cloud_shader, "u_fov_tan");
         s_sn_cloud_aspect = glGetUniformLocation(s_supernova_cloud_shader, "u_aspect");
         s_sn_cloud_screen = glGetUniformLocation(s_supernova_cloud_shader, "u_screen");
-    }
-
-    s_supernova_fallback_shader = gl_shader_load("assets/shaders/supernova_billboard.vert",
-                                                 "assets/shaders/supernova_fallback.frag");
-    if (!s_supernova_fallback_shader)
-        fprintf(stderr, "[Render] supernova fallback shader failed\n");
-    else {
-        s_sn_fallback_vp = glGetUniformLocation(s_supernova_fallback_shader, "u_vp");
-        s_sn_fallback_center = glGetUniformLocation(s_supernova_fallback_shader, "u_center");
-        s_sn_fallback_radius = glGetUniformLocation(s_supernova_fallback_shader, "u_radius");
-        s_sn_fallback_right = glGetUniformLocation(s_supernova_fallback_shader, "u_cam_right");
-        s_sn_fallback_up = glGetUniformLocation(s_supernova_fallback_shader, "u_cam_up");
-        s_sn_fallback_color = glGetUniformLocation(s_supernova_fallback_shader, "u_color");
-        s_sn_fallback_flash = glGetUniformLocation(s_supernova_fallback_shader, "u_flash_intensity");
-        s_sn_fallback_core = glGetUniformLocation(s_supernova_fallback_shader, "u_core_intensity");
-        s_sn_fallback_cloud = glGetUniformLocation(s_supernova_fallback_shader, "u_cloud_intensity");
-        s_sn_fallback_bill = glGetUniformLocation(s_supernova_fallback_shader, "u_bill_scale");
-        s_sn_fallback_fullscreen = glGetUniformLocation(s_supernova_fallback_shader, "u_fullscreen");
     }
 
     /* --- Atmosphere glow shader --- */
@@ -1465,49 +1435,6 @@ void render_frame(const float view[16], const float proj[16],
         glDisable(GL_BLEND);
     }
 
-    if (sn_count > 0 && s_supernova_fallback_shader) {
-        glUseProgram(s_supernova_fallback_shader);
-        glUniformMatrix4fv(s_sn_fallback_vp, 1, GL_FALSE, vp_camrel);
-        glUniform3f(s_sn_fallback_right, cam_right[0], cam_right[1], cam_right[2]);
-        glUniform3f(s_sn_fallback_up, cam_up[0], cam_up[1], cam_up[2]);
-
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-        glDepthMask(GL_FALSE);
-        glDisable(GL_DEPTH_TEST);
-        glBindVertexArray(s_sphere_vao);
-
-        for (int i = 0; i < sn_count; i++) {
-            const SupernovaRenderEvent *e = &sn_events[i];
-            float dist = sqrtf(e->pos[0]*e->pos[0] + e->pos[1]*e->pos[1] + e->pos[2]*e->pos[2]);
-            float coverage_radius = e->cloud_radius > e->flash_radius ? e->cloud_radius : e->flash_radius;
-            float dist_fade = supernova_distance_fade_local(dist, coverage_radius);
-            float flash_intensity = e->flash_intensity * dist_fade;
-            float core_intensity = e->core_intensity * dist_fade;
-            float cloud_intensity = e->cloud_intensity * dist_fade;
-            float fallback_bill_scale = 1.65f;
-            if (coverage_radius <= 0.0f) continue;
-            if (flash_intensity <= 0.00005f &&
-                core_intensity <= 0.00005f &&
-                cloud_intensity <= 0.00005f) continue;
-
-            glUniform1f(s_sn_fallback_fullscreen, 0.0f);
-            glUniform3f(s_sn_fallback_center, e->pos[0], e->pos[1], e->pos[2]);
-            glUniform1f(s_sn_fallback_radius, coverage_radius);
-            glUniform3f(s_sn_fallback_color, e->color[0], e->color[1], e->color[2]);
-            glUniform1f(s_sn_fallback_flash, flash_intensity);
-            glUniform1f(s_sn_fallback_core, core_intensity);
-            glUniform1f(s_sn_fallback_cloud, cloud_intensity);
-            glUniform1f(s_sn_fallback_bill, fallback_bill_scale);
-            glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
-        }
-
-        glBindVertexArray(0);
-        glEnable(GL_DEPTH_TEST);
-        glDepthMask(GL_TRUE);
-        glDisable(GL_BLEND);
-    }
-
     /* ------------------------------------------------------------------ 3. Collision particles */
     {
         CollisionParticle particles[RENDER_MAX_COLLISION_PARTICLES];
@@ -1843,7 +1770,6 @@ void render_shutdown(void) {
     glDeleteProgram(s_glare_shader);
     glDeleteProgram(s_supernova_core_shader);
     glDeleteProgram(s_supernova_cloud_shader);
-    glDeleteProgram(s_supernova_fallback_shader);
     glDeleteProgram(s_build_line_shader);
     glDeleteProgram(s_build_ui_shader);
     glDeleteBuffers(1, &s_sphere_vbo);
@@ -1860,7 +1786,6 @@ void render_shutdown(void) {
     s_sphere_shader = s_dot_shader = 0;
     s_impact_particle_shader = 0;
     s_supernova_core_shader = s_supernova_cloud_shader = 0;
-    s_supernova_fallback_shader = 0;
     s_build_line_shader = s_build_ui_shader = 0;
     s_build_font = NULL;
 }
