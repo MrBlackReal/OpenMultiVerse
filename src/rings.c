@@ -53,6 +53,7 @@
  */
 #include "rings.h"
 #include "body.h"
+#include "collision.h"
 #include "physics.h"
 #include "gl_utils.h"
 #include "json.h"
@@ -65,6 +66,26 @@
 #define SPRITE_DIST   0.2f    /* AU: farther than this → flat sprite */
 #define LOD_DIST      0.05f   /* AU: farther than this → reduced count */
 #define MAX_ZONES     16      /* maximum annulus zones per ring descriptor */
+#define DAMAGE_MIN_WIDTH     0.18f
+#define DAMAGE_MAX_WIDTH     1.00f
+#define DAMAGE_MAX_ECC       0.080f
+#define DAMAGE_MIN_A_SCALE   0.88f
+#define DAMAGE_MAX_A_SCALE   1.18f
+#define HIT_SEGMENT_COOLDOWN_SECONDS (DAY * 0.18)
+#define RING_SWEEP_MAX_SAMPLES 5
+#define MORPH_SCALE_RELAX_MIN (60.0f * 8.0f)
+#define MORPH_SCALE_RELAX_MAX ((float)DAY * 0.20f)
+#define MORPH_PUFF_RELAX_MIN  (60.0f * 4.0f)
+#define MORPH_PUFF_RELAX_MAX  ((float)DAY * 0.10f)
+#define MORPH_DECAY_MIN       (60.0f * 30.0f)
+#define MORPH_DECAY_MAX       ((float)DAY * 1.50f)
+#define PARENT_TRACK_MIN      (60.0f * 20.0f)
+#define PARENT_TRACK_MAX      ((float)DAY * 0.35f)
+#define RESPONSE_VISUAL_DT_MAX (60.0f * 12.0f)
+#define TIDAL_MAX_DT          ((double)DAY * 0.015)
+#define TIDAL_VISUAL_GAIN     5.5
+#define TIDAL_MAX_DA_FRAC     0.0015f
+#define TIDAL_MAX_DE          0.0012f
 
 /* ── Zone ── one concentric annulus band of a ring disc ────────────────── */
 typedef struct {
@@ -90,7 +111,233 @@ static float s_randf(void) {
     return (float)(s_rng >> 8) * (1.0f / (float)(1 << 24));
 }
 
-/* ── build_basis — ring-plane orthonormal frame from planet obliquity ───── */
+/* ── Ring collision helpers and smooth response state ───────────────────── */
+static float clampf(float x, float lo, float hi)
+{
+    return x < lo ? lo : (x > hi ? hi : x);
+}
+
+static float wrap_angle_pi(float a)
+{
+    const float TWO_PI = 6.28318530718f;
+    while (a >  (float)PI) a -= TWO_PI;
+    while (a < -(float)PI) a += TWO_PI;
+    return a;
+}
+
+static float angular_falloff(float dphi, float half_width)
+{
+    float t;
+    dphi = fabsf(dphi);
+    if (half_width <= 1e-5f || dphi >= half_width) return 0.0f;
+    t = 1.0f - dphi / half_width;
+    return t * t * (3.0f - 2.0f * t);
+}
+
+static float dot3f_local(const float a[3], const float b[3])
+{
+    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+}
+
+static void normalize3f_local(float v[3])
+{
+    float len = sqrtf(dot3f_local(v, v));
+    if (len <= 1e-8f) {
+        v[0] = 1.0f;
+        v[1] = 0.0f;
+        v[2] = 0.0f;
+        return;
+    }
+    v[0] /= len;
+    v[1] /= len;
+    v[2] /= len;
+}
+
+static int body_is_ring_perturber_planet(int idx)
+{
+    if (idx < 0 || idx >= g_nbodies) return 0;
+    if (!g_bodies[idx].alive || g_bodies[idx].is_star) return 0;
+    if (g_bodies[idx].parent < 0 || !g_bodies[g_bodies[idx].parent].is_star) return 0;
+
+    /*
+     * Body.type is not kept after JSON loading.  This threshold keeps real and
+     * build-created planets, while excluding moons and dwarf/asteroid-sized
+     * bodies such as Ceres/Pluto-style objects.
+     */
+    return g_bodies[idx].radius >= 2000.0e3 || g_bodies[idx].mass >= 1.0e23;
+}
+
+static void disc_update_mid_motion(ParticleDisc *d)
+{
+    double gm;
+    double a_mid_m;
+
+    if (!d || d->parent_idx < 0 || d->parent_idx >= g_nbodies) return;
+    gm = G_CONST * g_bodies[d->parent_idx].mass;
+    a_mid_m = ((double)d->ring_r_inner_km + (double)d->ring_r_outer_km) * 500.0;
+    d->mean_motion_mid = (gm > 0.0 && a_mid_m > 0.0)
+        ? (float)sqrt(gm / (a_mid_m * a_mid_m * a_mid_m))
+        : 0.0f;
+}
+
+static float disc_mid_period_seconds(const ParticleDisc *d)
+{
+    if (!d || d->mean_motion_mid <= 1e-8f) return (float)DAY * 0.5f;
+    return (2.0f * (float)PI) / d->mean_motion_mid;
+}
+
+static void disc_clear_hit_cooldown(ParticleDisc *d)
+{
+    if (!d) return;
+    for (int i = 0; i < RING_COLLISION_SEGMENTS * RING_COLLISION_RADIAL_BINS; i++)
+        d->hit_cooldown[i] = 0.0f;
+}
+
+static void disc_reset_response(ParticleDisc *d)
+{
+    if (!d) return;
+    disc_clear_hit_cooldown(d);
+    d->scale_cur = 1.0f;
+    d->scale_target = 1.0f;
+    d->puff_cur = 0.0f;
+    d->puff_target = 0.0f;
+    d->shock_phase = 0.0f;
+    d->shock_width = 0.35f;
+    d->shock_amp = 0.0f;
+    d->shock_spin = 0.0f;
+    d->contact_norm = 0.5f;
+    d->contact_width = 0.25f;
+    d->contact_strength = 0.0f;
+}
+
+static void disc_queue_scale_target(ParticleDisc *d, float target)
+{
+    if (!d) return;
+    target = clampf(target, 0.85f, 4.0f);
+    if (target > d->scale_target) d->scale_target = target;
+}
+
+static float smooth_raise(float cur, float target, float rate)
+{
+    if (target <= cur) return cur;
+    return cur + (target - cur) * clampf(rate, 0.0f, 1.0f);
+}
+
+static void disc_drive_response(ParticleDisc *d, float phase, float half_width,
+                                float severity, float overlap,
+                                float radial_center, float radial_width)
+{
+    float shock_target;
+    float contact_target;
+
+    if (!d) return;
+    severity = clampf(severity, 0.0f, 1.0f);
+    overlap = clampf(overlap, 0.0f, 1.0f);
+
+    if (d->shock_amp <= 0.001f) {
+        d->shock_phase = phase;
+    } else {
+        float phase_blend = 0.035f + 0.080f * overlap;
+        d->shock_phase = wrap_angle_pi(d->shock_phase +
+                         wrap_angle_pi(phase - d->shock_phase) * phase_blend);
+    }
+    d->shock_width = fmaxf(d->shock_width, half_width);
+    shock_target = (0.060f + 0.170f * severity) * (0.35f + 0.65f * overlap);
+    d->shock_amp = smooth_raise(d->shock_amp, shock_target, 0.12f + 0.12f * overlap);
+    d->shock_spin = d->mean_motion_mid * (0.22f + 0.60f * severity);
+    d->puff_target = fmaxf(d->puff_target, 0.16f + 0.62f * severity * overlap);
+
+    radial_center = clampf(radial_center, 0.0f, 1.0f);
+    radial_width = clampf(radial_width, 0.06f, 0.80f);
+    if (d->contact_strength <= 0.001f) {
+        d->contact_norm = radial_center;
+        d->contact_width = radial_width;
+    } else {
+        float blend = 0.08f + 0.16f * overlap;
+        d->contact_norm += (radial_center - d->contact_norm) * blend;
+        d->contact_width += (radial_width - d->contact_width) * blend;
+    }
+    contact_target = (0.22f + 0.78f * severity) * overlap;
+    d->contact_strength = smooth_raise(d->contact_strength,
+                                       contact_target,
+                                       0.10f + 0.18f * overlap);
+}
+
+static void disc_drive_transfer_response(ParticleDisc *d,
+                                         float old_parent_radius_km,
+                                         float new_parent_radius_km,
+                                         float severity_bias)
+{
+    float ratio;
+    float severity;
+    float min_scale;
+
+    if (!d || new_parent_radius_km <= 0.0f) return;
+    if (old_parent_radius_km <= 0.0f) old_parent_radius_km = new_parent_radius_km;
+
+    ratio = new_parent_radius_km / fmaxf(old_parent_radius_km, 1.0f);
+    severity = clampf(fabsf(ratio - 1.0f) * 0.85f + severity_bias, 0.0f, 1.0f);
+    min_scale = (new_parent_radius_km * (1.10f + 0.08f * severity))
+              / fmaxf(d->ring_r_inner_km, 1.0f);
+    if (ratio > 1.0f)
+        min_scale = fmaxf(min_scale, 1.0f + (ratio - 1.0f) * (0.30f + 0.32f * severity));
+
+    disc_queue_scale_target(d, min_scale);
+    d->puff_target = fmaxf(d->puff_target, 0.12f + 0.30f * severity);
+    d->shock_amp = fmaxf(d->shock_amp, 0.035f + 0.070f * severity);
+    d->shock_width = fmaxf(d->shock_width, 0.65f + 0.35f * severity);
+    if (d->mean_motion_mid > 1e-8f)
+        d->shock_spin = d->mean_motion_mid * (0.14f + 0.34f * severity);
+    d->parent_radius_ref_km = old_parent_radius_km;
+}
+
+static void disc_update_response(ParticleDisc *d, float dt)
+{
+    float period, scale_tau, puff_tau, decay_tau, relax, parent_radius_km;
+    if (!d || dt <= 0.0f) return;
+    if (dt > RESPONSE_VISUAL_DT_MAX) dt = RESPONSE_VISUAL_DT_MAX;
+
+    period = disc_mid_period_seconds(d);
+    scale_tau = clampf(period * 0.10f, MORPH_SCALE_RELAX_MIN, MORPH_SCALE_RELAX_MAX);
+    puff_tau  = clampf(period * 0.06f, MORPH_PUFF_RELAX_MIN,  MORPH_PUFF_RELAX_MAX);
+    decay_tau = clampf(period * 0.65f, MORPH_DECAY_MIN,       MORPH_DECAY_MAX);
+
+    parent_radius_km = (float)(collision_visual_radius(d->parent_idx,
+                                                       g_bodies[d->parent_idx].radius) * 0.001);
+    if (parent_radius_km > 0.0f) {
+        if (d->parent_radius_ref_km <= 0.0f) d->parent_radius_ref_km = parent_radius_km;
+        if (parent_radius_km > d->parent_radius_ref_km * 1.002f)
+            disc_drive_transfer_response(d, d->parent_radius_ref_km, parent_radius_km, 0.12f);
+        else {
+            float min_scale = (parent_radius_km * 1.08f) / fmaxf(d->ring_r_inner_km, 1.0f);
+            if (min_scale > 1.0f) disc_queue_scale_target(d, min_scale);
+        }
+        {
+            float parent_tau = clampf(period * 0.18f, PARENT_TRACK_MIN, PARENT_TRACK_MAX);
+            d->parent_radius_ref_km += (parent_radius_km - d->parent_radius_ref_km)
+                                     * (1.0f - expf(-dt / parent_tau));
+        }
+    }
+
+    relax = 1.0f - expf(-dt / scale_tau);
+    d->scale_cur += (d->scale_target - d->scale_cur) * relax;
+    d->scale_target = 1.0f + (d->scale_target - 1.0f) * expf(-dt / decay_tau);
+
+    relax = 1.0f - expf(-dt / puff_tau);
+    d->puff_cur += (d->puff_target - d->puff_cur) * relax;
+    d->puff_target *= expf(-dt / decay_tau);
+
+    d->shock_phase = wrap_angle_pi(d->shock_phase + d->shock_spin * dt);
+    d->shock_width += dt * d->mean_motion_mid * 0.07f;
+    if (d->shock_width > (float)PI * 0.95f) d->shock_width = (float)PI * 0.95f;
+    d->shock_amp *= expf(-dt / decay_tau);
+    d->shock_spin *= expf(-dt / decay_tau);
+    d->contact_strength *= expf(-dt / decay_tau);
+    if (d->shock_amp < 0.001f) d->shock_amp = 0.0f;
+    if (d->contact_strength < 0.001f) d->contact_strength = 0.0f;
+}
+
+/* build_basis — ring-plane orthonormal frame from planet obliquity. */
 static void build_basis(ParticleDisc *d, float obl_deg)
 {
     float obl = obl_deg * (float)(PI / 180.0);
@@ -114,6 +361,7 @@ static void retune_disc_parent(ParticleDisc *d, int parent_idx)
     if (!d || parent_idx < 0 || parent_idx >= g_nbodies) return;
     d->parent_idx = parent_idx;
     build_basis(d, (float)g_bodies[parent_idx].obliquity);
+    disc_update_mid_motion(d);
 
     double gm = G_CONST * g_bodies[parent_idx].mass;
     if (gm <= 0.0) {
@@ -185,6 +433,554 @@ static void bake_particles(float *data, float *n_arr, int n,
     }
 }
 
+static float damage_phase_from_world_dir(const ParticleDisc *d,
+                                         const double dir[3],
+                                         const double rel_vel[3])
+{
+    float proj[3];
+    float pole_dot;
+
+    if (!d || !dir) return 0.0f;
+    proj[0] = (float)dir[0];
+    proj[1] = (float)dir[1];
+    proj[2] = (float)dir[2];
+    pole_dot = dot3f_local(proj, d->pole);
+    proj[0] -= pole_dot * d->pole[0];
+    proj[1] -= pole_dot * d->pole[1];
+    proj[2] -= pole_dot * d->pole[2];
+
+    if (dot3f_local(proj, proj) <= 1e-8f && rel_vel) {
+        proj[0] = (float)rel_vel[0];
+        proj[1] = (float)rel_vel[1];
+        proj[2] = (float)rel_vel[2];
+        pole_dot = dot3f_local(proj, d->pole);
+        proj[0] -= pole_dot * d->pole[0];
+        proj[1] -= pole_dot * d->pole[1];
+        proj[2] -= pole_dot * d->pole[2];
+    }
+
+    normalize3f_local(proj);
+    return atan2f(dot3f_local(proj, d->b2), dot3f_local(proj, d->b1));
+}
+
+static uint32_t damage_seed_for_disc(const ParticleDisc *d,
+                                     int body_idx,
+                                     double rel_speed,
+                                     float phase)
+{
+    uint32_t seed = 0x9e3779b9u;
+    uint32_t speed_bits = (uint32_t)(rel_speed * 0.25 + 0.5);
+    uint32_t phase_bits = (uint32_t)((phase + (float)PI) * 1000.0f);
+
+    seed ^= (uint32_t)(body_idx + 1) * 0x85ebca6bu;
+    seed ^= speed_bits * 0xc2b2ae35u;
+    seed ^= phase_bits * 0x27d4eb2du;
+    if (d) {
+        seed ^= (uint32_t)(d->ring_r_inner_km * 7.0f + d->ring_r_outer_km * 3.0f);
+        seed ^= (uint32_t)(d->parent_idx + 17) * 0x165667b1u;
+    }
+    return seed ? seed : 1u;
+}
+
+/*
+ * apply_damage_to_array — local one-shot orbit shear for a struck ring band.
+ *
+ * The contact grid decides when to call this.  We then perturb only the
+ * particles near that azimuth and let Keplerian drift stretch the scar into
+ * arcs, which keeps runtime cost low and avoids per-frame particle collisions.
+ */
+static void apply_damage_to_array(const ParticleDisc *d,
+                                  float *data, float *n_arr, int n,
+                                  double gm, float phase, float half_width,
+                                  float severity, float tangential_sign,
+                                  float vertical_sign, uint32_t seed)
+{
+    float ring_width_km;
+    float width_au;
+    float puff_scale;
+
+    if (!d || !data || !n_arr || n <= 0 || gm <= 0.0) return;
+
+    ring_width_km = fmaxf(d->ring_r_outer_km - d->ring_r_inner_km, 1.0f);
+    width_au = ring_width_km / 1.496e8f;
+    puff_scale = fmaxf(d->base_h_scale * (12.0f + 28.0f * severity),
+                       width_au * (0.0012f + 0.0025f * severity));
+    s_seed(seed);
+
+    for (int i = 0; i < n; i++) {
+        float *p = data + i * 8;
+        float a0 = p[1];
+        float theta = p[0] + p[3];
+        float dphi = wrap_angle_pi(theta - phase);
+        float ang_w = angular_falloff(dphi, half_width);
+        float r_km, r_norm, radial_w, w, jitter, a_scale;
+
+        if (ang_w <= 0.0f) continue;
+
+        r_km = p[1] * 1.496e8f;
+        r_norm = clampf((r_km - d->ring_r_inner_km) / ring_width_km, 0.0f, 1.0f);
+        radial_w = 0.55f + 0.45f * (1.0f - fabsf(r_norm - 0.56f) * 1.55f);
+        radial_w = clampf(radial_w, 0.22f, 1.0f);
+        w = severity * ang_w * radial_w;
+        if (w <= 0.0f) continue;
+
+        jitter = s_randf() - 0.5f;
+        a_scale = 1.0f + tangential_sign * (0.030f + 0.028f * r_norm) * w
+                        + 0.012f * jitter * w;
+        a_scale = clampf(a_scale, DAMAGE_MIN_A_SCALE, DAMAGE_MAX_A_SCALE);
+        p[1] = clampf(p[1] * a_scale, a0 * DAMAGE_MIN_A_SCALE, a0 * DAMAGE_MAX_A_SCALE);
+
+        p[2] = fminf(DAMAGE_MAX_ECC,
+                     p[2] + (0.010f + 0.040f * severity) * w
+                          + fabsf(jitter) * 0.008f * w);
+        p[3] += tangential_sign * (0.050f + 0.115f * severity) * w
+              + jitter * 0.055f * w;
+        p[4] += (vertical_sign * 0.22f + jitter * 0.28f) * puff_scale * w;
+
+        {
+            double a_m = (double)p[1] * AU;
+            n_arr[i] = (float)sqrt(gm / (a_m * a_m * a_m));
+        }
+    }
+}
+
+static void apply_disc_damage(ParticleDisc *d, int body_idx, double rel_speed,
+                              float phase, float half_width,
+                              float severity, const double rel_vel[3])
+{
+    float tangent_dir[3];
+    float tangential = 0.0f;
+    float vertical = 0.0f;
+    float tangential_sign;
+    float vertical_sign;
+    double gm;
+    uint32_t seed;
+
+    if (!d || !d->initialized || d->parent_idx != body_idx) return;
+    if (body_idx < 0 || body_idx >= g_nbodies || !g_bodies[body_idx].alive) return;
+
+    gm = G_CONST * g_bodies[body_idx].mass;
+    if (gm <= 0.0) return;
+
+    tangent_dir[0] = -sinf(phase) * d->b1[0] + cosf(phase) * d->b2[0];
+    tangent_dir[1] = -sinf(phase) * d->b1[1] + cosf(phase) * d->b2[1];
+    tangent_dir[2] = -sinf(phase) * d->b1[2] + cosf(phase) * d->b2[2];
+    if (rel_vel) {
+        tangential = (float)(rel_vel[0] * tangent_dir[0] +
+                             rel_vel[1] * tangent_dir[1] +
+                             rel_vel[2] * tangent_dir[2]);
+        vertical = (float)(rel_vel[0] * d->pole[0] +
+                           rel_vel[1] * d->pole[1] +
+                           rel_vel[2] * d->pole[2]);
+    }
+    tangential_sign = tangential >= 0.0f ? 1.0f : -1.0f;
+    vertical_sign = vertical >= 0.0f ? 1.0f : -1.0f;
+    seed = damage_seed_for_disc(d, body_idx, rel_speed, phase);
+
+    apply_damage_to_array(d, d->data_full, d->n_arr_full, d->n_full, gm,
+                          phase, half_width, severity, tangential_sign,
+                          vertical_sign, seed);
+    apply_damage_to_array(d, d->data_lod, d->n_arr_lod, d->n_lod, gm,
+                          phase, half_width, severity, tangential_sign,
+                          vertical_sign, seed ^ 0x7f4a7c15u);
+}
+
+/*
+ * apply_tidal_gravity_to_array — cheap 3D perturbation from a nearby body.
+ *
+ * This applies differential acceleration: the pull on each ring particle minus
+ * the pull on the parent planet.  The result is projected into radial,
+ * tangential, and normal components and folded back into the compact Keplerian
+ * particle state.  It is only called for nearby bodies, so the O(N) pass stays
+ * out of the normal frame path.
+ */
+static void apply_tidal_gravity_to_array(ParticleDisc *d,
+                                         float *data, float *n_arr, int n,
+                                         int other_idx, double dt,
+                                         const double rel[3],
+                                         double influence_m)
+{
+    const Body *other;
+    double gm_parent;
+    double gm_other;
+    double rel_len2;
+    double rel_inv3;
+    double parent_acc[3];
+    double dt_eff;
+    double ring_width_au;
+
+    if (!d || !data || !n_arr || n <= 0 || other_idx < 0 || other_idx >= g_nbodies) return;
+    if (d->parent_idx < 0 || d->parent_idx >= g_nbodies) return;
+    other = &g_bodies[other_idx];
+    if (!other->alive || other->mass <= 0.0) return;
+
+    gm_parent = G_CONST * g_bodies[d->parent_idx].mass;
+    gm_other = G_CONST * other->mass;
+    if (gm_parent <= 0.0 || gm_other <= 0.0 || influence_m <= 1.0) return;
+
+    rel_len2 = rel[0]*rel[0] + rel[1]*rel[1] + rel[2]*rel[2]
+             + fmax(other->radius * other->radius * 0.04, SOFTENING * SOFTENING);
+    rel_inv3 = 1.0 / (sqrt(rel_len2) * rel_len2);
+    parent_acc[0] = gm_other * rel[0] * rel_inv3;
+    parent_acc[1] = gm_other * rel[1] * rel_inv3;
+    parent_acc[2] = gm_other * rel[2] * rel_inv3;
+
+    dt_eff = dt > TIDAL_MAX_DT ? TIDAL_MAX_DT : dt;
+    if (dt_eff <= 0.0) return;
+    ring_width_au = fmax((double)(d->ring_r_outer_km - d->ring_r_inner_km) / 1.496e8, 1e-9);
+
+    for (int i = 0; i < n; i++) {
+        float *p = data + i * 8;
+        double theta = (double)p[0] + (double)p[3];
+        double c = cos(theta);
+        double s = sin(theta);
+        double a_m = (double)p[1] * AU;
+        double h_m = (double)p[4] * AU;
+        double radial[3] = {
+            c * d->b1[0] + s * d->b2[0],
+            c * d->b1[1] + s * d->b2[1],
+            c * d->b1[2] + s * d->b2[2]
+        };
+        double tangential[3] = {
+            -s * d->b1[0] + c * d->b2[0],
+            -s * d->b1[1] + c * d->b2[1],
+            -s * d->b1[2] + c * d->b2[2]
+        };
+        double particle_pos[3] = {
+            a_m * radial[0] + h_m * d->pole[0],
+            a_m * radial[1] + h_m * d->pole[1],
+            a_m * radial[2] + h_m * d->pole[2]
+        };
+        double q[3] = {
+            rel[0] - particle_pos[0],
+            rel[1] - particle_pos[1],
+            rel[2] - particle_pos[2]
+        };
+        double q_len2 = q[0]*q[0] + q[1]*q[1] + q[2]*q[2]
+                      + fmax(other->radius * other->radius * 0.04, SOFTENING * SOFTENING);
+        double q_len = sqrt(q_len2);
+        double weight = clampf((float)((influence_m - q_len) / fmax(influence_m, 1.0)), 0.0f, 1.0f);
+        double q_inv3;
+        double tidal[3];
+        double ar, at, an;
+        double v_orb;
+        double parent_grav;
+        double accel_cap;
+        float da_frac;
+        float de;
+        float dh_au;
+
+        if (weight <= 0.0) continue;
+        weight = weight * weight * (3.0 - 2.0 * weight);
+        q_inv3 = 1.0 / (q_len * q_len2);
+        tidal[0] = (gm_other * q[0] * q_inv3 - parent_acc[0]) * weight * TIDAL_VISUAL_GAIN;
+        tidal[1] = (gm_other * q[1] * q_inv3 - parent_acc[1]) * weight * TIDAL_VISUAL_GAIN;
+        tidal[2] = (gm_other * q[2] * q_inv3 - parent_acc[2]) * weight * TIDAL_VISUAL_GAIN;
+
+        parent_grav = gm_parent / fmax(a_m * a_m, 1.0);
+        accel_cap = parent_grav * 0.060;
+        for (int k = 0; k < 3; k++) {
+            if (tidal[k] >  accel_cap) tidal[k] =  accel_cap;
+            if (tidal[k] < -accel_cap) tidal[k] = -accel_cap;
+        }
+
+        ar = tidal[0]*radial[0] + tidal[1]*radial[1] + tidal[2]*radial[2];
+        at = tidal[0]*tangential[0] + tidal[1]*tangential[1] + tidal[2]*tangential[2];
+        an = tidal[0]*d->pole[0] + tidal[1]*d->pole[1] + tidal[2]*d->pole[2];
+        v_orb = sqrt(gm_parent / fmax(a_m, 1.0));
+        if (v_orb <= 1e-6) continue;
+
+        da_frac = clampf((float)(2.0 * at * dt_eff / v_orb), -TIDAL_MAX_DA_FRAC, TIDAL_MAX_DA_FRAC);
+        de = clampf((float)(fabs(ar) * dt_eff / v_orb * 0.055), 0.0f, TIDAL_MAX_DE);
+        dh_au = clampf((float)(an * dt_eff / v_orb * p[1] * 0.070),
+                       (float)(-ring_width_au * 0.004),
+                       (float)( ring_width_au * 0.004));
+
+        {
+            float old_a = p[1];
+            p[1] = clampf(old_a * (1.0f + da_frac),
+                          old_a * 0.9985f,
+                          old_a * 1.0015f);
+        }
+        p[2] = fminf(DAMAGE_MAX_ECC, p[2] + de);
+        p[3] += clampf((float)(ar * dt_eff / v_orb * 0.010), -0.0025f, 0.0025f);
+        p[4] += dh_au;
+
+        {
+            double new_a_m = (double)p[1] * AU;
+            n_arr[i] = (float)sqrt(gm_parent / (new_a_m * new_a_m * new_a_m));
+        }
+    }
+}
+
+static void apply_disc_tidal_gravity(ParticleDisc *d, int other_idx, double dt,
+                                     const double rel[3], double influence_m)
+{
+    if (!d || !d->initialized) return;
+    apply_tidal_gravity_to_array(d, d->data_full, d->n_arr_full, d->n_full,
+                                 other_idx, dt, rel, influence_m);
+    apply_tidal_gravity_to_array(d, d->data_lod, d->n_arr_lod, d->n_lod,
+                                 other_idx, dt, rel, influence_m);
+}
+
+static void damage_disc(ParticleDisc *d, int body_idx, double rel_speed,
+                        const double dir[3], const double rel_vel[3])
+{
+    float phase;
+    float severity;
+    float half_width;
+    float overlap;
+
+    if (!d || !d->initialized || d->parent_idx != body_idx) return;
+    if (body_idx < 0 || body_idx >= g_nbodies || !g_bodies[body_idx].alive) return;
+
+    phase = damage_phase_from_world_dir(d, dir, rel_vel);
+    severity = clampf((float)(rel_speed / 15000.0), 0.18f, 1.0f);
+    half_width = clampf(0.34f + 0.42f * severity, DAMAGE_MIN_WIDTH, DAMAGE_MAX_WIDTH);
+    overlap = 0.85f;
+
+    disc_drive_response(d, phase, half_width, severity, overlap, 0.5f, 0.65f);
+    apply_disc_damage(d, body_idx, rel_speed, phase, half_width,
+                      0.50f + 0.45f * severity, rel_vel);
+}
+
+static int disc_probe_contact_sample(ParticleDisc *d, int other_idx,
+                                     double rel_speed, double sample_t)
+{
+    Body *parent;
+    Body *other;
+    double rel[3], rel_vel[3];
+    double ru, rv, rh;
+    double proj_r_km, plane_h_km, other_r_km, cross_r_km;
+    double ring_width_km;
+    float phase, half_width, inner_norm, outer_norm;
+    float radial_overlap, plane_overlap, overlap, severity;
+    float sector_cooldown;
+
+    if (!d || !d->initialized || other_idx < 0 || other_idx >= g_nbodies) return 0;
+    if (d->parent_idx < 0 || d->parent_idx >= g_nbodies) return 0;
+    if (!body_is_ring_perturber_planet(other_idx)) return 0;
+
+    parent = &g_bodies[d->parent_idx];
+    other = &g_bodies[other_idx];
+    if (!parent->alive || !other->alive || other->is_star) return 0;
+
+    rel_vel[0] = other->vel[0] - parent->vel[0];
+    rel_vel[1] = other->vel[1] - parent->vel[1];
+    rel_vel[2] = other->vel[2] - parent->vel[2];
+    rel[0] = (other->pos[0] - parent->pos[0]) + rel_vel[0] * sample_t;
+    rel[1] = (other->pos[1] - parent->pos[1]) + rel_vel[1] * sample_t;
+    rel[2] = (other->pos[2] - parent->pos[2]) + rel_vel[2] * sample_t;
+
+    ru = rel[0] * d->b1[0] + rel[1] * d->b1[1] + rel[2] * d->b1[2];
+    rv = rel[0] * d->b2[0] + rel[1] * d->b2[1] + rel[2] * d->b2[2];
+    rh = rel[0] * d->pole[0] + rel[1] * d->pole[1] + rel[2] * d->pole[2];
+
+    proj_r_km = sqrt(ru*ru + rv*rv) * 0.001;
+    plane_h_km = fabs(rh) * 0.001;
+    other_r_km = collision_visual_radius(other_idx, other->radius) * 0.001;
+    if (other_r_km <= 1e-6) return 0;
+    if (plane_h_km >= other_r_km) return 0;
+
+    cross_r_km = sqrt(other_r_km*other_r_km - plane_h_km*plane_h_km);
+    if (proj_r_km + cross_r_km < d->ring_r_inner_km) return 0;
+    if (proj_r_km - cross_r_km > d->ring_r_outer_km * fmaxf(d->scale_cur, 1.0f)) return 0;
+
+    ring_width_km = fmax(d->ring_r_outer_km - d->ring_r_inner_km, 1.0);
+    phase = atan2f((float)rv, (float)ru);
+    if (proj_r_km <= cross_r_km + 1.0)
+        half_width = (float)PI;
+    else
+        half_width = asinf(clampf((float)(cross_r_km / proj_r_km), 0.0f, 1.0f));
+
+    inner_norm = clampf((float)((proj_r_km - cross_r_km - d->ring_r_inner_km) / ring_width_km),
+                        0.0f, 1.0f);
+    outer_norm = clampf((float)((proj_r_km + cross_r_km - d->ring_r_inner_km) / ring_width_km),
+                        0.0f, 1.0f);
+
+    sector_cooldown = HIT_SEGMENT_COOLDOWN_SECONDS;
+    if (d->mean_motion_mid > 1e-8f) {
+        float sector_time = ((2.0f * (float)PI) / (float)RING_COLLISION_SEGMENTS) / d->mean_motion_mid;
+        sector_cooldown = clampf(sector_time * 0.28f, 60.0f * 8.0f, (float)(DAY * 0.20));
+    }
+
+    {
+        const float TWO_PI = 6.28318530718f;
+        const float SEG_W = TWO_PI / (float)RING_COLLISION_SEGMENTS;
+        const float RADIAL_BIN_W = 1.0f / (float)RING_COLLISION_RADIAL_BINS;
+        int radial_first = (int)floorf(inner_norm / RADIAL_BIN_W);
+        int radial_last  = (int)floorf((outer_norm - 1e-4f) / RADIAL_BIN_W);
+        if (radial_first < 0) radial_first = 0;
+        if (radial_last >= RING_COLLISION_RADIAL_BINS) radial_last = RING_COLLISION_RADIAL_BINS - 1;
+        if (radial_last < radial_first) radial_last = radial_first;
+
+        for (int i = 0; i < RING_COLLISION_SEGMENTS; i++) {
+            float seg_phase = -((float)PI) + ((float)i + 0.5f) * SEG_W;
+            float dphi = wrap_angle_pi(seg_phase - phase);
+            if (angular_falloff(dphi, half_width + SEG_W * 0.65f) <= 0.0f)
+                continue;
+
+            for (int rbin = radial_first; rbin <= radial_last; rbin++) {
+                int cell = i * RING_COLLISION_RADIAL_BINS + rbin;
+                d->hit_cooldown[cell] = sector_cooldown;
+            }
+        }
+    }
+
+    radial_overlap = clampf((float)((fmin(proj_r_km + cross_r_km, d->ring_r_outer_km) -
+                                     fmax(proj_r_km - cross_r_km, d->ring_r_inner_km))
+                                    / ring_width_km),
+                            0.0f, 1.0f);
+    plane_overlap = clampf(1.0f - (float)(plane_h_km / other_r_km), 0.0f, 1.0f);
+    overlap = clampf(0.25f + 0.75f * plane_overlap * (0.35f + 0.65f * radial_overlap),
+                     0.0f, 1.0f);
+    {
+        float speed_severity = clampf((float)(rel_speed / 18000.0), 0.08f, 0.85f);
+        float size_severity = clampf((float)(cross_r_km / fmax(ring_width_km * 0.20, 1.0)), 0.0f, 0.85f);
+        severity = clampf(speed_severity * 0.55f + size_severity * 0.65f, 0.10f, 0.95f);
+    }
+
+    {
+        float radial_center = clampf((float)((proj_r_km - d->ring_r_inner_km) / ring_width_km),
+                                     0.0f, 1.0f);
+        float radial_width = clampf((float)(cross_r_km / ring_width_km) * 1.35f,
+                                    0.08f, 0.85f);
+        disc_drive_response(d,
+                            phase,
+                            fminf(half_width + (2.0f * (float)PI / (float)RING_COLLISION_SEGMENTS) * 0.75f,
+                                  (float)PI * 0.92f),
+                            severity,
+                            overlap,
+                            radial_center,
+                            radial_width);
+    }
+    return 1;
+}
+
+static void add_contact_time(double *times, int *count, double t, double dt)
+{
+    if (!times || !count) return;
+    if (t < -dt) t = -dt;
+    if (t > 0.0) t = 0.0;
+    for (int i = 0; i < *count; i++) {
+        if (fabs(times[i] - t) < dt * 0.015 + 1e-6) return;
+    }
+    if (*count < 16) {
+        times[*count] = t;
+        (*count)++;
+    }
+}
+
+static void add_radial_crossing_times(double *times, int *count, double dt,
+                                      double ru, double rv,
+                                      double vu, double vv,
+                                      double radius_m)
+{
+    double a = vu*vu + vv*vv;
+    double b = 2.0 * (ru*vu + rv*vv);
+    double c = ru*ru + rv*rv - radius_m*radius_m;
+    double disc;
+
+    if (radius_m <= 0.0 || a <= 1e-12) return;
+    disc = b*b - 4.0*a*c;
+    if (disc < 0.0) return;
+    disc = sqrt(disc);
+    add_contact_time(times, count, (-b - disc) / (2.0*a), dt);
+    add_contact_time(times, count, (-b + disc) / (2.0*a), dt);
+}
+
+static void update_disc_swept_contact(ParticleDisc *d, int other_idx, double dt)
+{
+    Body *parent;
+    Body *other;
+    double rel[3], rel_vel[3];
+    double ru, rv, rh, vu, vv, vh;
+    double proj_r_km, h_km, other_r_km, v_mps, speed, reach_km;
+    double ring_width_km, tidal_reach_km, motion_km;
+    double times[16];
+    int time_count = 0;
+
+    if (!d || !d->initialized || dt <= 0.0) return;
+    if (d->parent_idx < 0 || d->parent_idx >= g_nbodies) return;
+    if (other_idx < 0 || other_idx >= g_nbodies || other_idx == d->parent_idx) return;
+    if (!body_is_ring_perturber_planet(other_idx)) return;
+
+    parent = &g_bodies[d->parent_idx];
+    other = &g_bodies[other_idx];
+    if (!parent->alive || !other->alive || other->is_star) return;
+
+    rel[0] = other->pos[0] - parent->pos[0];
+    rel[1] = other->pos[1] - parent->pos[1];
+    rel[2] = other->pos[2] - parent->pos[2];
+    rel_vel[0] = other->vel[0] - parent->vel[0];
+    rel_vel[1] = other->vel[1] - parent->vel[1];
+    rel_vel[2] = other->vel[2] - parent->vel[2];
+    speed = sqrt(rel_vel[0]*rel_vel[0] + rel_vel[1]*rel_vel[1] + rel_vel[2]*rel_vel[2]);
+
+    ru = rel[0] * d->b1[0] + rel[1] * d->b1[1] + rel[2] * d->b1[2];
+    rv = rel[0] * d->b2[0] + rel[1] * d->b2[1] + rel[2] * d->b2[2];
+    rh = rel[0] * d->pole[0] + rel[1] * d->pole[1] + rel[2] * d->pole[2];
+    vu = rel_vel[0] * d->b1[0] + rel_vel[1] * d->b1[1] + rel_vel[2] * d->b1[2];
+    vv = rel_vel[0] * d->b2[0] + rel_vel[1] * d->b2[1] + rel_vel[2] * d->b2[2];
+    vh = rel_vel[0] * d->pole[0] + rel_vel[1] * d->pole[1] + rel_vel[2] * d->pole[2];
+    proj_r_km = sqrt(ru*ru + rv*rv) * 0.001;
+    h_km = fabs(rh) * 0.001;
+    other_r_km = collision_visual_radius(other_idx, other->radius) * 0.001;
+    v_mps = speed;
+    motion_km = v_mps * dt * 0.001;
+    reach_km = other_r_km + motion_km;
+    ring_width_km = fmax(d->ring_r_outer_km - d->ring_r_inner_km, 1.0);
+    tidal_reach_km = fmax(other_r_km * 8.0, ring_width_km * 1.35) + motion_km;
+
+    if (h_km > tidal_reach_km) return;
+    if (proj_r_km + tidal_reach_km < d->ring_r_inner_km) return;
+    if (proj_r_km - tidal_reach_km > d->ring_r_outer_km * fmaxf(d->scale_cur, 1.0f)) return;
+
+    apply_disc_tidal_gravity(d, other_idx, dt, rel, tidal_reach_km * 1000.0);
+
+    if (h_km > reach_km) return;
+    if (proj_r_km + reach_km < d->ring_r_inner_km) return;
+    if (proj_r_km - reach_km > d->ring_r_outer_km * fmaxf(d->scale_cur, 1.0f)) return;
+
+    add_contact_time(times, &time_count, 0.0, dt);
+    add_contact_time(times, &time_count, -dt, dt);
+
+    if (fabs(vh) > 1e-9) {
+        double r_m = other_r_km * 1000.0;
+        add_contact_time(times, &time_count, -rh / vh, dt);
+        add_contact_time(times, &time_count, ( r_m - rh) / vh, dt);
+        add_contact_time(times, &time_count, (-r_m - rh) / vh, dt);
+    }
+
+    {
+        double radial_v2 = vu*vu + vv*vv;
+        if (radial_v2 > 1e-12)
+            add_contact_time(times, &time_count, -(ru*vu + rv*vv) / radial_v2, dt);
+    }
+
+    {
+        double inner_m = d->ring_r_inner_km * 1000.0;
+        double outer_m = d->ring_r_outer_km * fmaxf(d->scale_cur, 1.0f) * 1000.0;
+        double body_m = other_r_km * 1000.0;
+        add_radial_crossing_times(times, &time_count, dt, ru, rv, vu, vv, inner_m - body_m);
+        add_radial_crossing_times(times, &time_count, dt, ru, rv, vu, vv, inner_m + body_m);
+        add_radial_crossing_times(times, &time_count, dt, ru, rv, vu, vv, outer_m - body_m);
+        add_radial_crossing_times(times, &time_count, dt, ru, rv, vu, vv, outer_m + body_m);
+    }
+
+    if (time_count < RING_SWEEP_MAX_SAMPLES) {
+        int needed = RING_SWEEP_MAX_SAMPLES - time_count;
+        for (int s = 1; s <= needed; s++) {
+            double t = -dt + dt * ((double)s / (double)(needed + 1));
+            add_contact_time(times, &time_count, t, dt);
+        }
+    }
+
+    for (int s = 0; s < time_count; s++) {
+        disc_probe_contact_sample(d, other_idx, speed, times[s]);
+    }
+}
+
 /* Set up the 8-float-per-particle VAO attribute pointers (loc 0..5).
  * Locations 0..4 are individual floats; loc 5 is vec3 (rgb). */
 static void setup_particle_attribs(void) {
@@ -214,6 +1010,9 @@ static void init_disc_gl(ParticleDisc *d)
     d->loc_b1     = glGetUniformLocation(d->shader, "u_b1");
     d->loc_b2     = glGetUniformLocation(d->shader, "u_b2");
     d->loc_pole   = glGetUniformLocation(d->shader, "u_pole");
+    d->loc_morph0 = glGetUniformLocation(d->shader, "u_morph0");
+    d->loc_morph1 = glGetUniformLocation(d->shader, "u_morph1");
+    d->loc_morph2 = glGetUniformLocation(d->shader, "u_morph2");
 
     /* Full-count VAO/VBO */
     d->vao_full = gl_vao_create();
@@ -240,6 +1039,9 @@ static void init_disc_gl(ParticleDisc *d)
     d->sp_loc_center = glGetUniformLocation(d->sprite_shader, "u_center");
     d->sp_loc_b1     = glGetUniformLocation(d->sprite_shader, "u_b1");
     d->sp_loc_b2     = glGetUniformLocation(d->sprite_shader, "u_b2");
+    d->sp_loc_morph0 = glGetUniformLocation(d->sprite_shader, "u_morph0");
+    d->sp_loc_morph1 = glGetUniformLocation(d->sprite_shader, "u_morph1");
+    d->sp_loc_morph2 = glGetUniformLocation(d->sprite_shader, "u_morph2");
 
     if (d->use_generic_sprite) {
         d->sp_loc_r_inner    = glGetUniformLocation(d->sprite_shader, "u_r_inner_km");
@@ -315,13 +1117,28 @@ static void render_disc(const ParticleDisc *d, const float vp[16])
         if (!d->sprite_shader) return;
 
         float quad[18];
-        build_sprite_quad(quad, px, py, pz, d->sprite_r, d->b1, d->b2);
+        build_sprite_quad(quad, px, py, pz, d->sprite_r * fmaxf(d->scale_cur, 1.0f), d->b1, d->b2);
 
         glUseProgram(d->sprite_shader);
         glUniformMatrix4fv(d->sp_loc_vp,     1, GL_FALSE, vp);
         glUniform3f       (d->sp_loc_center,  px, py, pz);
         glUniform3fv      (d->sp_loc_b1,    1, d->b1);
         glUniform3fv      (d->sp_loc_b2,    1, d->b2);
+        glUniform4f       (d->sp_loc_morph0,
+                           d->scale_cur,
+                           d->puff_cur,
+                           d->shock_amp,
+                           d->shock_phase);
+        glUniform4f       (d->sp_loc_morph1,
+                           d->shock_width,
+                           d->shock_spin,
+                           d->ring_r_inner_km,
+                           d->ring_r_outer_km);
+        glUniform4f       (d->sp_loc_morph2,
+                           d->contact_norm,
+                           d->contact_width,
+                           d->contact_strength,
+                           0.0f);
 
         if (d->use_generic_sprite) {
             glUniform1f (d->sp_loc_r_inner,    d->sp_r_inner_km);
@@ -356,6 +1173,21 @@ static void render_disc(const ParticleDisc *d, const float vp[16])
         glUniform3fv      (d->loc_b1,    1, d->b1);
         glUniform3fv      (d->loc_b2,    1, d->b2);
         glUniform3fv      (d->loc_pole,  1, d->pole);
+        glUniform4f       (d->loc_morph0,
+                           d->scale_cur,
+                           d->puff_cur,
+                           d->shock_amp,
+                           d->shock_phase);
+        glUniform4f       (d->loc_morph1,
+                           d->shock_width,
+                           d->shock_spin,
+                           d->ring_r_inner_km / 1.496e8f,
+                           d->ring_r_outer_km / 1.496e8f);
+        glUniform4f       (d->loc_morph2,
+                           d->contact_norm,
+                           d->contact_width,
+                           d->contact_strength,
+                           0.0f);
 
         glBindVertexArray(vao);
         glBindBuffer(GL_ARRAY_BUFFER, vbo);
@@ -452,6 +1284,17 @@ void rings_init(const char *path)
         disc->n_lod              = n_lod;
         disc->sprite_r           = sprite_r;
         disc->use_generic_sprite = (strcmp(shader_type, "saturn") != 0);
+        disc->base_h_scale       = h_scale;
+        disc->ring_r_inner_km    = zones[0].r_min;
+        disc->ring_r_outer_km    = zones[0].r_max;
+        for (int zi = 1; zi < n_zones; zi++) {
+            if (zones[zi].r_min < disc->ring_r_inner_km)
+                disc->ring_r_inner_km = zones[zi].r_min;
+            if (zones[zi].r_max > disc->ring_r_outer_km)
+                disc->ring_r_outer_km = zones[zi].r_max;
+        }
+        disc->parent_radius_ref_km = (float)(g_bodies[par_idx].radius * 0.001);
+        disc_reset_response(disc);
 
         if (disc->use_generic_sprite) {
             disc->sp_r_inner_km = (float)json_num(json_get(rnode, "sprite_r_inner_km"), 0.0);
@@ -473,6 +1316,7 @@ void rings_init(const char *path)
         }
 
         build_basis(disc, (float)g_bodies[par_idx].obliquity);
+        disc_update_mid_motion(disc);
 
         double gm = G_CONST * g_bodies[par_idx].mass;
         s_seed(seed_full);
@@ -493,6 +1337,44 @@ void rings_init(const char *path)
 }
 
 /*
+ * rings_step_system — swept, low-frequency ring hitbox pass for one system.
+ *
+ * Called once per outer physics step.  The detector sweeps the impactor over
+ * the last dt instead of polling every inner RESPA tick, so ring contacts stay
+ * responsive without turning the hot integrator loop into a ring broadphase.
+ */
+void rings_step_system(int root, double dt)
+{
+    if (root < 0 || root >= g_nbodies || s_n_discs <= 0 || dt <= 0.0) return;
+    if (!g_bodies[root].alive) return;
+
+    for (int d = 0; d < s_n_discs; d++) {
+        ParticleDisc *disc = &s_discs[d];
+        int parent_idx;
+
+        if (!disc->initialized) continue;
+        parent_idx = disc->parent_idx;
+        if (parent_idx < 0 || parent_idx >= g_nbodies) continue;
+        if (!g_bodies[parent_idx].alive) continue;
+        if (body_root_star(parent_idx) != root) continue;
+
+        for (int c = 0; c < RING_COLLISION_SEGMENTS * RING_COLLISION_RADIAL_BINS; c++) {
+            if (disc->hit_cooldown[c] > 0.0f) {
+                disc->hit_cooldown[c] -= (float)dt;
+                if (disc->hit_cooldown[c] < 0.0f) disc->hit_cooldown[c] = 0.0f;
+            }
+        }
+
+        for (int i = 0; i < g_nbodies; i++) {
+            if (i == parent_idx) continue;
+            if (!body_is_ring_perturber_planet(i)) continue;
+            if (body_root_star(i) != root) continue;
+            update_disc_swept_contact(disc, i, dt);
+        }
+    }
+}
+
+/*
  * rings_tick — advance mean anomaly for all ring particles: M += n × dt.
  *
  * M is kept in [0, 2π) by subtracting 2π × floor(M / 2π) rather than using
@@ -508,6 +1390,7 @@ void rings_tick(double dt)
         if (!disc->initialized) continue;
         if (disc->parent_idx < 0 || disc->parent_idx >= g_nbodies) continue;
         if (!g_bodies[disc->parent_idx].alive) continue;
+        disc_update_response(disc, dt > 0.0 ? (float)dt : 0.0f);
 
         for (int i = 0; i < disc->n_full; i++) {
             float M = disc->data_full[i*8+0]
@@ -550,6 +1433,38 @@ void rings_render(const float vp[16])
  * Stars and already-ringed targets don't inherit a second ring because overlapping
  * disc geometry would not look correct.
  */
+/*
+ * rings_on_collision — strong one-shot ring response at body impact start.
+ */
+void rings_on_collision(int target_idx, int impactor_idx, double rel_speed,
+                        const double dir[3], const double rel_vel[3])
+{
+    double inv_dir[3];
+    double inv_vel[3];
+
+    if (!dir) return;
+    inv_dir[0] = -dir[0];
+    inv_dir[1] = -dir[1];
+    inv_dir[2] = -dir[2];
+    if (rel_vel) {
+        inv_vel[0] = -rel_vel[0];
+        inv_vel[1] = -rel_vel[1];
+        inv_vel[2] = -rel_vel[2];
+    } else {
+        inv_vel[0] = inv_vel[1] = inv_vel[2] = 0.0;
+    }
+
+    for (int d = 0; d < s_n_discs; d++) {
+        ParticleDisc *disc = &s_discs[d];
+        if (!disc->initialized) continue;
+        if (disc->parent_idx == target_idx && body_is_ring_perturber_planet(impactor_idx))
+            damage_disc(disc, target_idx, rel_speed, dir, rel_vel);
+        else if (disc->parent_idx == impactor_idx && body_is_ring_perturber_planet(target_idx))
+            damage_disc(disc, impactor_idx, rel_speed, inv_dir,
+                        rel_vel ? inv_vel : NULL);
+    }
+}
+
 void rings_on_body_absorbed(int target_idx, int impactor_idx)
 {
     for (int d = 0; d < s_n_discs; d++) {
@@ -558,6 +1473,7 @@ void rings_on_body_absorbed(int target_idx, int impactor_idx)
 
         if (disc->parent_idx == impactor_idx) {
             int target_has_ring = 0;
+            float old_parent_radius_km = disc->parent_radius_ref_km;
             for (int k = 0; k < s_n_discs; k++) {
                 if (k == d || !s_discs[k].initialized) continue;
                 if (s_discs[k].parent_idx == target_idx) {
@@ -570,10 +1486,21 @@ void rings_on_body_absorbed(int target_idx, int impactor_idx)
                 disc->initialized = 0;
             } else {
                 retune_disc_parent(disc, target_idx);
+                disc_clear_hit_cooldown(disc);
+                disc_drive_transfer_response(disc,
+                                             old_parent_radius_km,
+                                             (float)(g_bodies[target_idx].radius * 0.001),
+                                             0.30f);
             }
         } else if (disc->parent_idx == target_idx) {
+            float old_parent_radius_km = disc->parent_radius_ref_km;
             /* Target's own ring: retune for updated mass after absorption */
             retune_disc_parent(disc, target_idx);
+            disc_clear_hit_cooldown(disc);
+            disc_drive_transfer_response(disc,
+                                         old_parent_radius_km,
+                                         (float)(g_bodies[target_idx].radius * 0.001),
+                                         0.18f);
         }
     }
 }

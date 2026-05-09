@@ -22,6 +22,9 @@
 #include "common.h"
 #include "camera.h"
 
+#define RING_COLLISION_SEGMENTS 32
+#define RING_COLLISION_RADIAL_BINS 4
+
 typedef struct {
     int    parent_idx;    /* g_bodies index of central body               */
     int    n_full;        /* full LOD particle count                      */
@@ -30,6 +33,11 @@ typedef struct {
     float *data_lod;      /* 8 floats × n_lod                             */
     float *n_arr_full;    /* Keplerian mean motion (rad/s) — CPU only     */
     float *n_arr_lod;
+    float  ring_r_inner_km;
+    float  ring_r_outer_km;
+    float  parent_radius_ref_km;
+    float  base_h_scale;
+    float  mean_motion_mid;
 
     /* Ring-plane basis — computed from parent obliquity at init */
     float  b1[3], b2[3], pole[3];
@@ -38,6 +46,7 @@ typedef struct {
     /* Particle shader (ring.vert + color.frag) */
     GLuint shader;
     GLuint loc_vp, loc_center, loc_b1, loc_b2, loc_pole;
+    GLuint loc_morph0, loc_morph1, loc_morph2;
     GLuint vao_full, vbo_full;
     GLuint vao_lod,  vbo_lod;
 
@@ -45,6 +54,7 @@ typedef struct {
      * other planets use ring_sprite_generic.frag (uniform-driven).     */
     GLuint sprite_shader;
     GLuint sp_loc_vp, sp_loc_center, sp_loc_b1, sp_loc_b2;
+    GLuint sp_loc_morph0, sp_loc_morph1, sp_loc_morph2;
     int    use_generic_sprite;
     /* Generic sprite extra uniforms */
     GLuint sp_loc_r_inner, sp_loc_r_outer, sp_loc_ring_color, sp_loc_alpha_max;
@@ -52,13 +62,29 @@ typedef struct {
     float  sp_color[3];
     float  sp_alpha_max;
 
+    float  hit_cooldown[RING_COLLISION_SEGMENTS * RING_COLLISION_RADIAL_BINS];
+    float  scale_cur;
+    float  scale_target;
+    float  puff_cur;
+    float  puff_target;
+    float  shock_phase;
+    float  shock_width;
+    float  shock_amp;
+    float  shock_spin;
+    float  contact_norm;
+    float  contact_width;
+    float  contact_strength;
+
     GLuint sprite_vao, sprite_vbo;
     int    initialized;
 } ParticleDisc;
 
 /* rings_init — parse ring configs from the given universe.json path. */
 void rings_init(const char *path);
+void rings_step_system(int root, double dt);
 void rings_tick(double dt);         /* advance mean anomalies — call each physics sub-step */
 void rings_render(const float vp[16]);
+void rings_on_collision(int target_idx, int impactor_idx, double rel_speed,
+                        const double dir[3], const double rel_vel[3]);
 void rings_on_body_absorbed(int target_idx, int impactor_idx);
 void rings_shutdown(void);

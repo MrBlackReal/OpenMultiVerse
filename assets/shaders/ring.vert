@@ -25,8 +25,18 @@ uniform vec3 u_center;   /* Saturn world pos (AU) */
 uniform vec3 u_b1;       /* ring-plane basis 1 */
 uniform vec3 u_b2;       /* ring-plane basis 2 */
 uniform vec3 u_pole;     /* ring-plane normal (Saturn pole) */
+uniform vec4 u_morph0;   /* scale, puff, shock_amp, shock_phase */
+uniform vec4 u_morph1;   /* shock_width, shock_spin, inner_au, outer_au */
+uniform vec4 u_morph2;   /* contact_norm, contact_width, contact_strength, unused */
 
 out vec4 v_color;
+
+float wrap_pi(float a) {
+    const float TWO_PI = 6.28318530718;
+    if (a >  3.14159265359) a -= TWO_PI;
+    if (a < -3.14159265359) a += TWO_PI;
+    return a;
+}
 
 void main() {
     /* First-order Keplerian approximation — valid for e < 0.05 */
@@ -37,10 +47,21 @@ void main() {
 
     float c = cos(nu + a_omega);
     float s = sin(nu + a_omega);
+    float phi = nu + a_omega;
+    float r_norm = clamp((r - u_morph1.z) / max(u_morph1.w - u_morph1.z, 1e-8), 0.0, 1.0);
+    float dphi = abs(wrap_pi(phi - u_morph0.w));
+    float shock = 1.0 - smoothstep(u_morph1.x * 0.35, u_morph1.x, dphi);
+    float contact_dr = abs(r_norm - u_morph2.x);
+    float contact_radial = 1.0 - smoothstep(u_morph2.y * 0.35, u_morph2.y, contact_dr);
+    float contact = shock * contact_radial * u_morph2.z;
+    float split_dir = (r_norm >= u_morph2.x) ? 1.0 : -1.0;
+    float radial_wave = u_morph0.z * shock * (0.55 + 0.70 * r_norm);
+    float contact_push = contact * (0.10 + 0.18 * u_morph2.z);
+    float height_wave = u_morph0.y * (0.20 + 0.80 * shock) + contact * 1.10;
 
     vec3 pos = u_center
-             + r * (c * u_b1 + s * u_b2)
-             + a_height * u_pole;
+             + (r * u_morph0.x * (1.0 + radial_wave * (r_norm - 0.12) + contact_push * split_dir)) * (c * u_b1 + s * u_b2)
+             + (a_height * (1.0 + height_wave) + height_wave * 0.00002 * shock) * u_pole;
 
     v_color     = vec4(a_color, 1.0);
     gl_Position = u_vp * vec4(pos, 1.0);
