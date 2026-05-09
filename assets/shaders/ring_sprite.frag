@@ -15,6 +15,7 @@ uniform vec3 u_b2;
 uniform vec4 u_morph0;   /* scale, puff, shock_amp, shock_phase */
 uniform vec4 u_morph1;   /* shock_width, shock_spin, inner_km, outer_km */
 uniform vec4 u_morph2;   /* contact_norm, contact_width, contact_strength, unused */
+uniform vec4 u_tide0;    /* phase, radius_norm, width, strength */
 
 out vec4 frag_color;
 
@@ -38,9 +39,15 @@ void main() {
     float contact = shock
                   * (1.0 - smoothstep(u_morph2.y * 0.35, u_morph2.y, contact_dr))
                   * u_morph2.z;
+    float tide_dphi = abs(wrap_pi(phi - u_tide0.x));
+    float tide_ang_width = mix(0.34, 1.35, clamp(u_tide0.z, 0.0, 1.0));
+    float tide_ang = 1.0 - smoothstep(tide_ang_width * 0.40, tide_ang_width, tide_dphi);
+    float tide_radial = 1.0 - smoothstep(u_tide0.z * 0.38, u_tide0.z, abs(ring_norm - u_tide0.y));
+    float tide = tide_ang * tide_radial * u_tide0.w;
     float split_dir = (ring_norm >= u_morph2.x) ? 1.0 : -1.0;
     float r_eff_km = r_km / max(u_morph0.x * (1.0 + u_morph0.z * shock * 0.55
-                                      + contact * split_dir * 0.18), 1e-4);
+                                      + contact * split_dir * 0.18
+                                      + tide * 0.10), 1e-4);
 
     const float C_IN   =  74658.0;
     const float C_OUT  =  92000.0;

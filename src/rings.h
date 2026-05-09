@@ -47,6 +47,7 @@ typedef struct {
     GLuint shader;
     GLuint loc_vp, loc_center, loc_b1, loc_b2, loc_pole;
     GLuint loc_morph0, loc_morph1, loc_morph2;
+    GLuint loc_tide0, loc_tide1;
     GLuint vao_full, vbo_full;
     GLuint vao_lod,  vbo_lod;
 
@@ -55,6 +56,7 @@ typedef struct {
     GLuint sprite_shader;
     GLuint sp_loc_vp, sp_loc_center, sp_loc_b1, sp_loc_b2;
     GLuint sp_loc_morph0, sp_loc_morph1, sp_loc_morph2;
+    GLuint sp_loc_tide0, sp_loc_tide1;
     int    use_generic_sprite;
     /* Generic sprite extra uniforms */
     GLuint sp_loc_r_inner, sp_loc_r_outer, sp_loc_ring_color, sp_loc_alpha_max;
@@ -74,6 +76,13 @@ typedef struct {
     float  contact_norm;
     float  contact_width;
     float  contact_strength;
+    float  tide_phase;
+    float  tide_radius_norm;
+    float  tide_width;
+    float  tide_strength;
+    float  tide_dir_u;
+    float  tide_dir_v;
+    float  tide_dir_n;
 
     GLuint sprite_vao, sprite_vbo;
     int    initialized;

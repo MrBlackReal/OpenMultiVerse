@@ -86,6 +86,8 @@
 #define TIDAL_VISUAL_GAIN     5.5
 #define TIDAL_MAX_DA_FRAC     0.0015f
 #define TIDAL_MAX_DE          0.0012f
+#define TIDAL_WARP_MIN_WIDTH  0.14f
+#define TIDAL_WARP_MAX_WIDTH  0.95f
 
 /* ── Zone ── one concentric annulus band of a ring disc ────────────────── */
 typedef struct {
@@ -208,6 +210,13 @@ static void disc_reset_response(ParticleDisc *d)
     d->contact_norm = 0.5f;
     d->contact_width = 0.25f;
     d->contact_strength = 0.0f;
+    d->tide_phase = 0.0f;
+    d->tide_radius_norm = 0.5f;
+    d->tide_width = 0.35f;
+    d->tide_strength = 0.0f;
+    d->tide_dir_u = 1.0f;
+    d->tide_dir_v = 0.0f;
+    d->tide_dir_n = 0.0f;
 }
 
 static void disc_queue_scale_target(ParticleDisc *d, float target)
@@ -261,6 +270,90 @@ static void disc_drive_response(ParticleDisc *d, float phase, float half_width,
     d->contact_strength = smooth_raise(d->contact_strength,
                                        contact_target,
                                        0.10f + 0.18f * overlap);
+}
+
+/*
+ * disc_drive_tide_response - smooth 3D visual pull from a nearby planet.
+ *
+ * The swept hitbox pass already knows the perturber position in the ring's
+ * local frame.  Instead of spawning real ring segments, keep one dominant,
+ * damped response vector and let the vertex shader bend only the particles
+ * under that local influence.  This preserves the original ring rendering
+ * path while making close planet encounters read as volumetric, not 2D.
+ */
+static void disc_drive_tide_response(ParticleDisc *d,
+                                     double ru, double rv, double rh,
+                                     double proj_r_km, double h_km,
+                                     double other_r_km, double reach_km)
+{
+    double ring_inner_km, ring_outer_km, ring_width_km;
+    double radial_gap_km, proximity_km, local_len;
+    float phase, radial_norm, width, strength, blend;
+    float dir_u, dir_v, dir_n;
+
+    if (!d || reach_km <= 1.0 || other_r_km <= 1.0) return;
+
+    ring_inner_km = (double)d->ring_r_inner_km;
+    ring_outer_km = (double)d->ring_r_outer_km * (double)fmaxf(d->scale_cur, 1.0f);
+    ring_width_km = fmax(ring_outer_km - ring_inner_km, 1.0);
+
+    if (proj_r_km < ring_inner_km)
+        radial_gap_km = ring_inner_km - proj_r_km;
+    else if (proj_r_km > ring_outer_km)
+        radial_gap_km = proj_r_km - ring_outer_km;
+    else
+        radial_gap_km = 0.0;
+
+    proximity_km = sqrt(radial_gap_km * radial_gap_km + h_km * h_km);
+    strength = clampf((float)(1.0 - proximity_km / fmax(reach_km, 1.0)), 0.0f, 1.0f);
+    if (strength <= 0.0f) return;
+
+    local_len = sqrt(ru*ru + rv*rv + rh*rh);
+    if (local_len <= 1.0) return;
+
+    phase = atan2f((float)rv, (float)ru);
+    radial_norm = clampf((float)((proj_r_km - ring_inner_km) / ring_width_km), 0.0f, 1.0f);
+    width = clampf((float)(other_r_km / ring_width_km) * 1.65f + strength * 0.20f,
+                   TIDAL_WARP_MIN_WIDTH, TIDAL_WARP_MAX_WIDTH);
+
+    dir_u = (float)(ru / local_len);
+    dir_v = (float)(rv / local_len);
+    dir_n = (float)(rh / local_len);
+
+    strength *= clampf((float)(other_r_km / fmax(ring_width_km * 0.18, 1.0)),
+                       0.35f, 1.30f);
+    strength = clampf(strength * 0.80f, 0.0f, 1.0f);
+
+    if (d->tide_strength <= 0.001f) {
+        d->tide_phase = phase;
+        d->tide_radius_norm = radial_norm;
+        d->tide_width = width;
+        d->tide_dir_u = dir_u;
+        d->tide_dir_v = dir_v;
+        d->tide_dir_n = dir_n;
+    } else {
+        blend = 0.045f + 0.155f * strength;
+        d->tide_phase = wrap_angle_pi(d->tide_phase +
+                         wrap_angle_pi(phase - d->tide_phase) * blend);
+        d->tide_radius_norm += (radial_norm - d->tide_radius_norm) * blend;
+        d->tide_width += (width - d->tide_width) * blend;
+        d->tide_dir_u += (dir_u - d->tide_dir_u) * blend;
+        d->tide_dir_v += (dir_v - d->tide_dir_v) * blend;
+        d->tide_dir_n += (dir_n - d->tide_dir_n) * blend;
+
+        local_len = sqrt((double)d->tide_dir_u * d->tide_dir_u +
+                         (double)d->tide_dir_v * d->tide_dir_v +
+                         (double)d->tide_dir_n * d->tide_dir_n);
+        if (local_len > 1e-6) {
+            d->tide_dir_u = (float)(d->tide_dir_u / local_len);
+            d->tide_dir_v = (float)(d->tide_dir_v / local_len);
+            d->tide_dir_n = (float)(d->tide_dir_n / local_len);
+        }
+    }
+
+    d->tide_strength = smooth_raise(d->tide_strength,
+                                    strength,
+                                    0.08f + 0.20f * strength);
 }
 
 static void disc_drive_transfer_response(ParticleDisc *d,
@@ -333,8 +426,10 @@ static void disc_update_response(ParticleDisc *d, float dt)
     d->shock_amp *= expf(-dt / decay_tau);
     d->shock_spin *= expf(-dt / decay_tau);
     d->contact_strength *= expf(-dt / decay_tau);
+    d->tide_strength *= expf(-dt / clampf(period * 0.38f, MORPH_DECAY_MIN, MORPH_DECAY_MAX));
     if (d->shock_amp < 0.001f) d->shock_amp = 0.0f;
     if (d->contact_strength < 0.001f) d->contact_strength = 0.0f;
+    if (d->tide_strength < 0.001f) d->tide_strength = 0.0f;
 }
 
 /* build_basis — ring-plane orthonormal frame from planet obliquity. */
@@ -936,6 +1031,8 @@ static void update_disc_swept_contact(ParticleDisc *d, int other_idx, double dt)
     if (proj_r_km + tidal_reach_km < d->ring_r_inner_km) return;
     if (proj_r_km - tidal_reach_km > d->ring_r_outer_km * fmaxf(d->scale_cur, 1.0f)) return;
 
+    disc_drive_tide_response(d, ru, rv, rh, proj_r_km, h_km,
+                             other_r_km, tidal_reach_km);
     apply_disc_tidal_gravity(d, other_idx, dt, rel, tidal_reach_km * 1000.0);
 
     if (h_km > reach_km) return;
@@ -1013,6 +1110,8 @@ static void init_disc_gl(ParticleDisc *d)
     d->loc_morph0 = glGetUniformLocation(d->shader, "u_morph0");
     d->loc_morph1 = glGetUniformLocation(d->shader, "u_morph1");
     d->loc_morph2 = glGetUniformLocation(d->shader, "u_morph2");
+    d->loc_tide0  = glGetUniformLocation(d->shader, "u_tide0");
+    d->loc_tide1  = glGetUniformLocation(d->shader, "u_tide1");
 
     /* Full-count VAO/VBO */
     d->vao_full = gl_vao_create();
@@ -1042,6 +1141,8 @@ static void init_disc_gl(ParticleDisc *d)
     d->sp_loc_morph0 = glGetUniformLocation(d->sprite_shader, "u_morph0");
     d->sp_loc_morph1 = glGetUniformLocation(d->sprite_shader, "u_morph1");
     d->sp_loc_morph2 = glGetUniformLocation(d->sprite_shader, "u_morph2");
+    d->sp_loc_tide0  = glGetUniformLocation(d->sprite_shader, "u_tide0");
+    d->sp_loc_tide1  = glGetUniformLocation(d->sprite_shader, "u_tide1");
 
     if (d->use_generic_sprite) {
         d->sp_loc_r_inner    = glGetUniformLocation(d->sprite_shader, "u_r_inner_km");
@@ -1139,6 +1240,16 @@ static void render_disc(const ParticleDisc *d, const float vp[16])
                            d->contact_width,
                            d->contact_strength,
                            0.0f);
+        glUniform4f       (d->sp_loc_tide0,
+                           d->tide_phase,
+                           d->tide_radius_norm,
+                           d->tide_width,
+                           d->tide_strength);
+        glUniform4f       (d->sp_loc_tide1,
+                           d->tide_dir_u,
+                           d->tide_dir_v,
+                           d->tide_dir_n,
+                           0.0f);
 
         if (d->use_generic_sprite) {
             glUniform1f (d->sp_loc_r_inner,    d->sp_r_inner_km);
@@ -1187,6 +1298,16 @@ static void render_disc(const ParticleDisc *d, const float vp[16])
                            d->contact_norm,
                            d->contact_width,
                            d->contact_strength,
+                           0.0f);
+        glUniform4f       (d->loc_tide0,
+                           d->tide_phase,
+                           d->tide_radius_norm,
+                           d->tide_width,
+                           d->tide_strength);
+        glUniform4f       (d->loc_tide1,
+                           d->tide_dir_u,
+                           d->tide_dir_v,
+                           d->tide_dir_n,
                            0.0f);
 
         glBindVertexArray(vao);
