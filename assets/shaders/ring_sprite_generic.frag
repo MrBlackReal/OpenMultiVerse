@@ -48,9 +48,12 @@ void main() {
     float tide_ang = 1.0 - smoothstep(tide_ang_width * 0.40, tide_ang_width, tide_dphi);
     float tide_radial = 1.0 - smoothstep(u_tide0.z * 0.38, u_tide0.z, abs(ring_norm - u_tide0.y));
     float tide = tide_ang * tide_radial * u_tide0.w;
-    float split_dir = (ring_norm >= u_morph2.x) ? 1.0 : -1.0;
+    float split_band = max(u_morph2.y * 0.70, 0.12);
+    float split_t = smoothstep(-split_band, split_band, ring_norm - u_morph2.x);
+    float split_dir = split_t * 2.0 - 1.0;
+    float split_fade = 1.0 - smoothstep(0.42, 0.78, u_morph2.y);
     float r_eff_km = r_km / max(u_morph0.x * (1.0 + u_morph0.z * shock * 0.50
-                                      + contact * split_dir * 0.16
+                                      + contact * split_dir * split_fade * 0.07
                                       + tide * 0.10), 1e-4);
 
     if (r_eff_km < u_r_inner_km || r_eff_km > u_r_outer_km) discard;

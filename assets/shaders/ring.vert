@@ -64,9 +64,12 @@ void main() {
     float contact_dr = abs(r_norm - u_morph2.x);
     float contact_radial = 1.0 - smoothstep(u_morph2.y * 0.35, u_morph2.y, contact_dr);
     float contact = shock * contact_radial * u_morph2.z;
-    float split_dir = (r_norm >= u_morph2.x) ? 1.0 : -1.0;
+    float split_band = max(u_morph2.y * 0.70, 0.12);
+    float split_t = smoothstep(-split_band, split_band, r_norm - u_morph2.x);
+    float split_dir = split_t * 2.0 - 1.0;
+    float split_fade = 1.0 - smoothstep(0.42, 0.78, u_morph2.y);
     float radial_wave = u_morph0.z * shock * (0.55 + 0.70 * r_norm);
-    float contact_push = contact * (0.10 + 0.18 * u_morph2.z);
+    float contact_push = contact * split_fade * (0.040 + 0.090 * u_morph2.z);
     float height_wave = u_morph0.y * (0.20 + 0.80 * shock) + contact * 1.10;
     float tide_dphi = abs(wrap_pi(phi - u_tide0.x));
     float tide_ang_width = mix(0.34, 1.35, clamp(u_tide0.z, 0.0, 1.0));
@@ -95,7 +98,7 @@ void main() {
     vec3 tidal_field = (particle_pull - parent_pull) * u_body0.w * u_body0.w;
     float field_len = length(tidal_field);
     vec3 field_dir = field_len > 1e-8 ? tidal_field / field_len : tide_dir;
-    float field_mag = min(field_len, 1.0);
+    float field_mag = field_len / (1.0 + field_len);
     float grav_pull = ring_width * field_mag * clamp(u_body1.x, 0.0, 1.0)
                     * (0.040 + 0.135 * clamp(u_body1.x, 0.0, 1.0));
 
