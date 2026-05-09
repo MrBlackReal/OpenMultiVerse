@@ -333,7 +333,7 @@ static void disc_drive_tide_response(ParticleDisc *d,
     body_u_au = (float)(ru * RS);
     body_v_au = (float)(rv * RS);
     body_n_au = (float)(rh * RS);
-    body_radius_au = (float)(other_r_km / 1.496e8) * 1.08f;
+    body_radius_au = (float)(other_r_km / 1.496e8);
 
     if (d->tide_strength <= 0.001f) {
         d->tide_phase = phase;
@@ -722,33 +722,27 @@ static void apply_disc_damage(ParticleDisc *d, int body_idx, double rel_speed,
 /*
  * despawn_contact_particles_array - remove particles swallowed by a planet.
  *
- * A negative semi-major axis is used as an immutable tombstone.  That keeps
- * the VBO shape and draw count stable while allowing the shader to skip the
- * particle entirely.  This pass is only run for confirmed sphere/ring contact
- * samples, not every frame.
+ * A negative semi-major axis is used as an immutable tombstone.  The test is
+ * intentionally conservative: only particles inside the current visual sphere
+ * are removed, so swept look-ahead samples cannot erase rings before impact.
  */
 static int despawn_contact_particles_array(const ParticleDisc *d,
                                            float *data, float *n_arr, int n,
                                            double ru, double rv, double rh,
                                            double other_r_km,
-                                           float severity, uint32_t seed)
+                                           float severity)
 {
     double cu = ru * RS;
     double cv = rv * RS;
     double cn = rh * RS;
     double radius_au = other_r_km / 1.496e8;
-    double ring_width_au;
-    double core_r, soft_r;
+    double core_r;
     int killed = 0;
 
     if (!d || !data || !n_arr || n <= 0 || radius_au <= 0.0) return 0;
 
-    ring_width_au = fmax((double)(d->ring_r_outer_km - d->ring_r_inner_km) / 1.496e8, 1e-9);
-    core_r = radius_au * (0.96 + 0.04 * clampf(severity, 0.0f, 1.0f));
-    soft_r = radius_au * 1.08 + ring_width_au * 0.012;
-    if (soft_r < core_r) soft_r = core_r;
+    core_r = radius_au * (0.985 + 0.010 * clampf(severity, 0.0f, 1.0f));
 
-    s_seed(seed);
     for (int i = 0; i < n; i++) {
         float *p = data + i * 8;
         float a = p[1];
@@ -769,14 +763,7 @@ static int despawn_contact_particles_array(const ParticleDisc *d,
         dn = (double)p[4] - cn;
         dist = sqrt(du*du + dv*dv + dn*dn);
 
-        if (dist <= core_r) {
-            remove_particle = 1;
-        } else if (dist < soft_r) {
-            double t = (dist - core_r) / fmax(soft_r - core_r, 1e-12);
-            double chance = (1.0 - t * t * (3.0 - 2.0 * t))
-                          * (0.45 + 0.40 * clampf(severity, 0.0f, 1.0f));
-            remove_particle = s_randf() < (float)chance;
-        }
+        if (dist <= core_r) remove_particle = 1;
 
         if (!remove_particle) continue;
 
@@ -797,19 +784,16 @@ static int despawn_disc_contact_particles(ParticleDisc *d,
                                           double ru, double rv, double rh,
                                           double other_r_km, float severity)
 {
-    float phase;
-    uint32_t seed;
     int killed = 0;
 
     if (!d || !d->initialized || other_idx < 0 || other_idx >= g_nbodies) return 0;
-    phase = atan2f((float)rv, (float)ru);
-    seed = damage_seed_for_disc(d, other_idx, rel_speed, phase);
+    (void)other_idx;
+    (void)rel_speed;
 
     killed += despawn_contact_particles_array(d, d->data_full, d->n_arr_full, d->n_full,
-                                              ru, rv, rh, other_r_km, severity, seed);
+                                              ru, rv, rh, other_r_km, severity);
     killed += despawn_contact_particles_array(d, d->data_lod, d->n_arr_lod, d->n_lod,
-                                              ru, rv, rh, other_r_km, severity,
-                                              seed ^ 0x4d9f3b21u);
+                                              ru, rv, rh, other_r_km, severity);
     return killed;
 }
 
@@ -1075,7 +1059,9 @@ static int disc_probe_contact_sample(ParticleDisc *d, int other_idx,
                                      0.0f, 1.0f);
         float radial_width = clampf((float)(cross_r_km / ring_width_km) * 1.35f,
                                     0.08f, 0.85f);
-        int killed = despawn_disc_contact_particles(d, other_idx, rel_speed,
+        int killed = 0;
+        if (sample_t >= -1e-6)
+            killed = despawn_disc_contact_particles(d, other_idx, rel_speed,
                                                     ru, rv, rh, other_r_km,
                                                     severity);
         if (killed > 0) {
@@ -1167,7 +1153,7 @@ static void update_disc_swept_contact(ParticleDisc *d, int other_idx, double dt)
     motion_km = v_mps * dt * 0.001;
     reach_km = other_r_km + motion_km;
     ring_width_km = fmax(d->ring_r_outer_km - d->ring_r_inner_km, 1.0);
-    tidal_reach_km = fmax(other_r_km * 8.0, ring_width_km * 1.35) + motion_km;
+    tidal_reach_km = fmax(other_r_km * 12.0, ring_width_km * 2.40) + motion_km;
 
     if (h_km > tidal_reach_km) return;
     if (proj_r_km + tidal_reach_km < d->ring_r_inner_km) return;

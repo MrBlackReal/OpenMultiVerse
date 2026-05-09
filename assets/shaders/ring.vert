@@ -31,7 +31,7 @@ uniform vec4 u_morph2;   /* contact_norm, contact_width, contact_strength, unuse
 uniform vec4 u_tide0;    /* phase, radius_norm, width, strength */
 uniform vec4 u_tide1;    /* local direction to perturber: b1,b2,pole */
 uniform vec4 u_body0;    /* perturber local center xyz (AU), visual radius (AU) */
-uniform vec4 u_body1;    /* perturber avoid strength, parent visual radius (AU), unused */
+uniform vec4 u_body1;    /* perturber visibility strength, parent visual radius (AU), unused */
 
 out vec4 v_color;
 
@@ -78,14 +78,31 @@ void main() {
     float tide_dir_len = max(length(tide_dir_local), 1e-5);
     vec3 tide_dir = (tide_dir_local.x * u_b1 + tide_dir_local.y * u_b2 + tide_dir_local.z * u_pole) / tide_dir_len;
     float ring_width = max(u_morph1.w - u_morph1.z, 1e-8);
-    float tide_pull = ring_width * tide * (0.055 + 0.115 * u_tide0.w);
+    float tide_pull = ring_width * tide * (0.028 + 0.060 * u_tide0.w);
     float ring_radius = r * u_morph0.x * (1.0 + radial_wave * (r_norm - 0.12) + contact_push * split_dir);
     vec3 ring_dir = c * u_b1 + s * u_b2;
+    vec3 height_offset = (a_height * (1.0 + height_wave) + height_wave * 0.00002 * shock) * u_pole;
+    vec3 local_orbit = ring_radius * ring_dir + height_offset;
+    vec3 body_center = u_body0.x * u_b1 + u_body0.y * u_b2 + u_body0.z * u_pole;
+
+    /* Differential visual gravity: pull at particle minus pull at parent. */
+    vec3 to_body = body_center - local_orbit;
+    float soft = max(u_body0.w * 0.70, ring_width * 0.055);
+    float inv_particle = inversesqrt(dot(to_body, to_body) + soft * soft);
+    float inv_parent = inversesqrt(dot(body_center, body_center) + soft * soft);
+    vec3 particle_pull = to_body * inv_particle * inv_particle * inv_particle;
+    vec3 parent_pull = body_center * inv_parent * inv_parent * inv_parent;
+    vec3 tidal_field = (particle_pull - parent_pull) * u_body0.w * u_body0.w;
+    float field_len = length(tidal_field);
+    vec3 field_dir = field_len > 1e-8 ? tidal_field / field_len : tide_dir;
+    float field_mag = min(field_len, 1.0);
+    float grav_pull = ring_width * field_mag * clamp(u_body1.x, 0.0, 1.0)
+                    * (0.040 + 0.135 * clamp(u_body1.x, 0.0, 1.0));
 
     vec3 pos = u_center
-             + ring_radius * ring_dir
-             + (a_height * (1.0 + height_wave) + height_wave * 0.00002 * shock) * u_pole
-             + tide_pull * tide_dir;
+             + local_orbit
+             + tide_pull * tide_dir
+             + grav_pull * field_dir;
 
     vec3 local_pos = pos - u_center;
     vec3 parent_delta = local_pos;
@@ -97,14 +114,13 @@ void main() {
         local_pos = pos - u_center;
     }
 
-    vec3 body_center = u_body0.x * u_b1 + u_body0.y * u_b2 + u_body0.z * u_pole;
     vec3 body_delta = local_pos - body_center;
     float body_dist = length(body_delta);
-    float body_safe = u_body0.w * 1.04 + ring_width * 0.035;
-    if (u_body1.x > 0.001 && body_safe > 0.0 && body_dist < body_safe) {
-        vec3 body_away = body_dist > 1e-8 ? body_delta / body_dist : -tide_dir;
-        float push = (body_safe - body_dist) * clamp(u_body1.x, 0.0, 1.0);
-        pos += body_away * push;
+    float body_hide = u_body0.w * 0.995;
+    if (u_body1.x > 0.001 && body_hide > 0.0 && body_dist < body_hide) {
+        v_color = vec4(0.0);
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        return;
     }
 
     v_color     = vec4(a_color, 1.0);
