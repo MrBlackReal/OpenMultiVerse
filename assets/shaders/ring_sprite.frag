@@ -12,7 +12,7 @@ in vec3 v_pos;
 uniform vec3 u_center;   /* Saturn world pos (AU) */
 uniform vec3 u_b1;
 uniform vec3 u_b2;
-uniform vec4 u_morph0;   /* scale, puff, shock_amp, shock_phase */
+uniform vec4 u_morph0;   /* unused, puff, shock_amp, shock_phase */
 uniform vec4 u_morph1;   /* shock_width, shock_spin, inner_km, outer_km */
 uniform vec4 u_morph2;   /* contact_norm, contact_width, contact_strength, unused */
 uniform vec4 u_tide0;    /* phase, radius_norm, width, strength */
@@ -48,9 +48,9 @@ void main() {
     float split_t = smoothstep(-split_band, split_band, ring_norm - u_morph2.x);
     float split_dir = split_t * 2.0 - 1.0;
     float split_fade = 1.0 - smoothstep(0.42, 0.78, u_morph2.y);
-    float r_eff_km = r_km / max(u_morph0.x * (1.0 + u_morph0.z * shock * 0.55
+    float r_eff_km = r_km / max(1.0 + u_morph0.z * shock * 0.55
                                       + contact * split_dir * split_fade * 0.08
-                                      + tide * 0.10), 1e-4);
+                                      + tide * 0.10, 1e-4);
 
     const float C_IN   =  74658.0;
     const float C_OUT  =  92000.0;

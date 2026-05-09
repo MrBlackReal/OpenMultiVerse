@@ -25,7 +25,7 @@ uniform vec3 u_center;   /* Saturn world pos (AU) */
 uniform vec3 u_b1;       /* ring-plane basis 1 */
 uniform vec3 u_b2;       /* ring-plane basis 2 */
 uniform vec3 u_pole;     /* ring-plane normal (Saturn pole) */
-uniform vec4 u_morph0;   /* scale, puff, shock_amp, shock_phase */
+uniform vec4 u_morph0;   /* unused, puff, shock_amp, shock_phase */
 uniform vec4 u_morph1;   /* shock_width, shock_spin, inner_au, outer_au */
 uniform vec4 u_morph2;   /* contact_norm, contact_width, contact_strength, unused */
 uniform vec4 u_tide0;    /* phase, radius_norm, width, strength */
@@ -82,7 +82,7 @@ void main() {
     vec3 tide_dir = (tide_dir_local.x * u_b1 + tide_dir_local.y * u_b2 + tide_dir_local.z * u_pole) / tide_dir_len;
     float ring_width = max(u_morph1.w - u_morph1.z, 1e-8);
     float tide_pull = ring_width * tide * (0.028 + 0.060 * u_tide0.w);
-    float ring_radius = r * u_morph0.x * (1.0 + radial_wave * (r_norm - 0.12) + contact_push * split_dir);
+    float ring_radius = r * (1.0 + radial_wave * (r_norm - 0.12) + contact_push * split_dir);
     vec3 ring_dir = c * u_b1 + s * u_b2;
     vec3 height_offset = (a_height * (1.0 + height_wave) + height_wave * 0.00002 * shock) * u_pole;
     vec3 local_orbit = ring_radius * ring_dir + height_offset;

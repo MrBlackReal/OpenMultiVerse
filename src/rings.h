@@ -68,8 +68,6 @@ typedef struct {
     float  sp_alpha_max;
 
     float  hit_cooldown[RING_COLLISION_SEGMENTS * RING_COLLISION_RADIAL_BINS];
-    float  scale_cur;
-    float  scale_target;
     float  puff_cur;
     float  puff_target;
     float  shock_phase;
