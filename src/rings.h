@@ -18,6 +18,8 @@
  *   [4] height — vertical offset (AU), static
  *   [5..7] cr,cg,cb — zone colour, static
  */
+/* Negative particle semi-major axes are tombstones for collision despawn.
+ * Arrays stay fixed-size so despawning does not disturb render buffers. */
 #pragma once
 #include "common.h"
 #include "camera.h"
@@ -48,6 +50,7 @@ typedef struct {
     GLuint loc_vp, loc_center, loc_b1, loc_b2, loc_pole;
     GLuint loc_morph0, loc_morph1, loc_morph2;
     GLuint loc_tide0, loc_tide1;
+    GLuint loc_body0, loc_body1;
     GLuint vao_full, vbo_full;
     GLuint vao_lod,  vbo_lod;
 
@@ -83,6 +86,11 @@ typedef struct {
     float  tide_dir_u;
     float  tide_dir_v;
     float  tide_dir_n;
+    float  body_u_au;
+    float  body_v_au;
+    float  body_n_au;
+    float  body_radius_au;
+    float  body_strength;
 
     GLuint sprite_vao, sprite_vbo;
     int    initialized;

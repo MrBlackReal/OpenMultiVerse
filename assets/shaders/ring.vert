@@ -30,6 +30,8 @@ uniform vec4 u_morph1;   /* shock_width, shock_spin, inner_au, outer_au */
 uniform vec4 u_morph2;   /* contact_norm, contact_width, contact_strength, unused */
 uniform vec4 u_tide0;    /* phase, radius_norm, width, strength */
 uniform vec4 u_tide1;    /* local direction to perturber: b1,b2,pole */
+uniform vec4 u_body0;    /* perturber local center xyz (AU), visual radius (AU) */
+uniform vec4 u_body1;    /* perturber avoid strength, parent visual radius (AU), unused */
 
 out vec4 v_color;
 
@@ -41,6 +43,12 @@ float wrap_pi(float a) {
 }
 
 void main() {
+    if (a_a <= 0.0) {
+        v_color = vec4(0.0);
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        return;
+    }
+
     /* First-order Keplerian approximation — valid for e < 0.05 */
     float sinM = sin(a_M);
     float cosM = cos(a_M);
@@ -66,14 +74,38 @@ void main() {
     float tide_dr = abs(r_norm - u_tide0.y);
     float tide_radial = 1.0 - smoothstep(u_tide0.z * 0.38, u_tide0.z, tide_dr);
     float tide = tide_ang * tide_radial * u_tide0.w;
-    vec3 tide_dir = normalize(u_tide1.x * u_b1 + u_tide1.y * u_b2 + u_tide1.z * u_pole);
+    vec3 tide_dir_local = vec3(u_tide1.x, u_tide1.y, u_tide1.z);
+    float tide_dir_len = max(length(tide_dir_local), 1e-5);
+    vec3 tide_dir = (tide_dir_local.x * u_b1 + tide_dir_local.y * u_b2 + tide_dir_local.z * u_pole) / tide_dir_len;
     float ring_width = max(u_morph1.w - u_morph1.z, 1e-8);
     float tide_pull = ring_width * tide * (0.055 + 0.115 * u_tide0.w);
+    float ring_radius = r * u_morph0.x * (1.0 + radial_wave * (r_norm - 0.12) + contact_push * split_dir);
+    vec3 ring_dir = c * u_b1 + s * u_b2;
 
     vec3 pos = u_center
-             + (r * u_morph0.x * (1.0 + radial_wave * (r_norm - 0.12) + contact_push * split_dir)) * (c * u_b1 + s * u_b2)
+             + ring_radius * ring_dir
              + (a_height * (1.0 + height_wave) + height_wave * 0.00002 * shock) * u_pole
              + tide_pull * tide_dir;
+
+    vec3 local_pos = pos - u_center;
+    vec3 parent_delta = local_pos;
+    float parent_dist = length(parent_delta);
+    float parent_safe = min(u_body1.y * 1.08 + ring_width * 0.03, u_morph1.w * 1.18);
+    if (parent_safe > 0.0 && parent_dist < parent_safe) {
+        vec3 parent_away = parent_dist > 1e-8 ? parent_delta / parent_dist : ring_dir;
+        pos += parent_away * (parent_safe - parent_dist);
+        local_pos = pos - u_center;
+    }
+
+    vec3 body_center = u_body0.x * u_b1 + u_body0.y * u_b2 + u_body0.z * u_pole;
+    vec3 body_delta = local_pos - body_center;
+    float body_dist = length(body_delta);
+    float body_safe = u_body0.w * 1.04 + ring_width * 0.035;
+    if (u_body1.x > 0.001 && body_safe > 0.0 && body_dist < body_safe) {
+        vec3 body_away = body_dist > 1e-8 ? body_delta / body_dist : -tide_dir;
+        float push = (body_safe - body_dist) * clamp(u_body1.x, 0.0, 1.0);
+        pos += body_away * push;
+    }
 
     v_color     = vec4(a_color, 1.0);
     gl_Position = u_vp * vec4(pos, 1.0);
