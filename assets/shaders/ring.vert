@@ -49,7 +49,7 @@ void main() {
         return;
     }
 
-    /* First-order Keplerian approximation — valid for e < 0.05 */
+    /* Expand compact CPU particle state into orbit position on the GPU. */
     float sinM = sin(a_M);
     float cosM = cos(a_M);
     float nu   = a_M + 2.0 * a_e * sinM;    /* true anomaly  */
@@ -83,9 +83,8 @@ void main() {
     float ring_width = max(u_morph1.w - u_morph1.z, 1e-8);
     float tide_pull = ring_width * tide * (0.028 + 0.060 * u_tide0.w);
     /*
-     * Keep impact motion as a local displacement in ring-width units.  A
-     * proportional radius multiplier makes the whole annulus look like it
-     * briefly rescales when a planet first touches it.
+     * Collision warp is an additive ring-width offset, not a radius scale.
+     * Fade it near edges so displaced particles never pile onto a hard clamp.
      */
     float edge_falloff = smoothstep(0.00, 0.12, r_norm)
                        * smoothstep(1.00, 0.88, r_norm);
@@ -98,7 +97,13 @@ void main() {
     vec3 local_orbit = ring_radius * ring_dir + height_offset;
     vec3 body_center = u_body0.x * u_b1 + u_body0.y * u_b2 + u_body0.z * u_pole;
 
-    /* Differential visual gravity: pull at particle minus pull at parent. */
+    /*
+     * Differential visual gravity.
+     *
+     * Pull the particle and the parent separately, then subtract.  This reads
+     * like a tidal field instead of translating the whole ring toward the
+     * perturber.
+     */
     vec3 to_body = body_center - local_orbit;
     float soft = max(u_body0.w * 0.70, ring_width * 0.055);
     float inv_particle = inversesqrt(dot(to_body, to_body) + soft * soft);
@@ -125,11 +130,20 @@ void main() {
     vec3 local_pos = pos - u_center;
     vec3 parent_delta = local_pos;
     float parent_dist = length(parent_delta);
-    float parent_safe = min(u_body1.y * 1.08 + ring_width * 0.03, u_morph1.w * 1.18);
-    if (parent_safe > 0.0 && parent_dist < parent_safe) {
-        vec3 parent_away = parent_dist > 1e-8 ? parent_delta / parent_dist : ring_dir;
-        pos += parent_away * (parent_safe - parent_dist);
-        local_pos = pos - u_center;
+    float parent_hide = min(u_body1.y * 1.03, u_morph1.w * 1.12);
+    float parent_fade = 1.0;
+    if (parent_hide > 0.0) {
+        /*
+         * Do not push swallowed particles onto a hard safety radius.  Fading
+         * them avoids artificial dense rings along the merged planet surface.
+         */
+        float fade_width = max(ring_width * 0.10, u_body1.y * 0.035);
+        parent_fade = smoothstep(parent_hide, parent_hide + fade_width, parent_dist);
+        if (parent_fade <= 0.001) {
+            v_color = vec4(0.0);
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+            return;
+        }
     }
 
     vec3 body_delta = local_pos - body_center;
@@ -141,6 +155,6 @@ void main() {
         return;
     }
 
-    v_color     = vec4(a_color, clamp(u_morph0.x, 0.0, 1.0));
+    v_color     = vec4(a_color, clamp(u_morph0.x, 0.0, 1.0) * parent_fade);
     gl_Position = u_vp * vec4(pos, 1.0);
 }

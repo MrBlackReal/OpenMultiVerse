@@ -47,6 +47,15 @@
  *   dist ∈ LOD fade range → reduced particle count, drawn from a shuffled LOD
  *                           buffer so all ring zones remain represented
  *   dist ∈ fade range     → reduced particles fade out smoothly
+ *
+ * Sections (search "§"):
+ *   § STATE    — constants, structs, static arrays, deterministic RNG
+ *   § MATH     — local scalar/vector helpers and planet filtering
+ *   § RESPONSE — smoothed visual state for shocks, tides, and merge handoff
+ *   § ORBITS   — basis construction, retuning, particle baking, damage passes
+ *   § CONTACT  — swept ring/body hitboxes, despawn, tidal perturbation
+ *   § GL       — VAO/VBO setup, distance LOD, render path
+ *   § API      — public lifecycle, ticking, rendering, collision hooks
  */
 #include "rings.h"
 #include "common.h"
@@ -91,7 +100,9 @@
 #define RING_TRANSFER_MIN_SECONDS ((float)DAY * 0.75f)
 #define RING_TRANSFER_MAX_SECONDS ((float)DAY * 8.0f)
 
-/* ── Zone ── one concentric annulus band of a ring disc ────────────────── */
+/* ── § STATE — constants, structs, static arrays, deterministic RNG ────── */
+
+/* One concentric annulus band from assets/universe.json. */
 typedef struct {
     float r_min, r_max;   /* inner / outer radius in km */
     float density;        /* fraction of total particles allocated to this zone */
@@ -151,14 +162,17 @@ typedef struct {
     int    initialized;
 } ParticleDisc;
 
-/* ── Disc instances loaded from universe.json ───────────────────────────── */
+/* Disc instances loaded from the "rings" array in assets/universe.json. */
 static ParticleDisc *s_discs   = NULL;
 static int           s_n_discs = 0;
 
-/* ── XorShift32 PRNG ─────────────────────────────────────────────────────
+/*
+ * XorShift32 PRNG.
+ *
  * Used for deterministic ring particle generation.  The seed is set per-disc
- * from "seed_full" / "seed_lod" in the JSON so regenerating (e.g. after a
- * collision retune) gives the same ring layout.                            */
+ * from "seed_full" / "seed_lod" in the JSON so repeated runs keep the same
+ * ring layout and LOD shuffle order.
+ */
 static uint32_t s_rng = 1;
 static void  s_seed(uint32_t seed) { s_rng = seed ? seed : 1; }
 static float s_randf(void) {
@@ -168,7 +182,8 @@ static float s_randf(void) {
     return (float)(s_rng >> 8) * (1.0f / (float)(1 << 24));
 }
 
-/* ── Ring collision helpers and smooth response state ───────────────────── */
+/* ── § MATH — local scalar/vector helpers and planet filtering ──────────── */
+
 static float clampf(float x, float lo, float hi)
 {
     return x < lo ? lo : (x > hi ? hi : x);
@@ -228,19 +243,23 @@ static float inv_smootherstep01f(float t)
     return 1.0f - smootherstep01f(t);
 }
 
+/*
+ * body_is_ring_perturber_planet — filter ring collision influences.
+ *
+ * Ring warping should react to planets, not moons or asteroid-sized debris.
+ * Body.type is not preserved after JSON loading, so this uses stable runtime
+ * properties: alive, non-star, star-parented, and planet-scale radius/mass.
+ */
 static int body_is_ring_perturber_planet(int idx)
 {
     if (idx < 0 || idx >= g_nbodies) return 0;
     if (!g_bodies[idx].alive || g_bodies[idx].is_star) return 0;
     if (g_bodies[idx].parent < 0 || !g_bodies[g_bodies[idx].parent].is_star) return 0;
 
-    /*
-     * Body.type is not kept after JSON loading.  This threshold keeps real and
-     * build-created planets, while excluding moons and dwarf/asteroid-sized
-     * bodies such as Ceres/Pluto-style objects.
-     */
     return g_bodies[idx].radius >= 2000.0e3 || g_bodies[idx].mass >= 1.0e23;
 }
+
+/* ── § RESPONSE — shocks, tides, and merge handoff state ────────────────── */
 
 static void disc_update_mid_motion(ParticleDisc *d)
 {
@@ -310,6 +329,12 @@ static float smooth_raise(float cur, float target, float rate)
     return cur + (target - cur) * clampf(rate, 0.0f, 1.0f);
 }
 
+/*
+ * smooth_raise_capped — smooth_raise with a per-call maximum step.
+ *
+ * This prevents first-contact samples from injecting too much visual energy in
+ * one frame, which previously read as a ring twitch at high simulation speeds.
+ */
 static float smooth_raise_capped(float cur, float target,
                                  float rate, float max_step)
 {
@@ -322,6 +347,13 @@ static float smooth_raise_capped(float cur, float target,
     return next;
 }
 
+/*
+ * disc_drive_response — drive local shock/contact warp uniforms.
+ *
+ * Called from both one-shot collision notifications and swept contact samples.
+ * The response is intentionally stateful and damped so repeated samples blend
+ * into a continuous warp instead of teleporting the active contact sector.
+ */
 static void disc_drive_response(ParticleDisc *d, float phase, float half_width,
                                 float severity, float overlap,
                                 float radial_center, float radial_width)
@@ -476,6 +508,13 @@ static void disc_drive_tide_response(ParticleDisc *d,
                                     0.18f + 0.30f * strength);
 }
 
+/*
+ * disc_drive_transfer_response — soft shock from parent-radius growth.
+ *
+ * During a merge the target planet can grow under its existing ring.  This
+ * produces a broad, gentle response so the handoff reads as gravitational
+ * disturbance rather than an instantaneous scale change.
+ */
 static void disc_drive_transfer_response(ParticleDisc *d,
                                          float old_parent_radius_km,
                                          float new_parent_radius_km,
@@ -572,6 +611,13 @@ static void disc_begin_motion_transfer(ParticleDisc *d,
     d->motion_blend_duration = duration;
 }
 
+/*
+ * disc_update_response — advance and decay visual response state.
+ *
+ * Called from rings_tick(), not render, so visual state stays tied to the
+ * simulation clock.  Large dt values are capped to avoid harsh decay/phase
+ * jumps when the user runs at very high simulation speed.
+ */
 static void disc_update_response(ParticleDisc *d, float dt)
 {
     float period, puff_tau, decay_tau, relax, parent_radius_km;
@@ -628,6 +674,8 @@ static void disc_update_response(ParticleDisc *d, float dt)
         }
     }
 }
+
+/* ── § ORBITS — basis construction, retuning, baking, damage passes ─────── */
 
 /* build_basis — ring-plane orthonormal frame from planet obliquity. */
 static void build_basis(ParticleDisc *d, float obl_deg)
@@ -761,6 +809,13 @@ static void shuffle_particles(float *data, float *n_arr, int n)
     }
 }
 
+/*
+ * damage_phase_from_world_dir — convert world impact direction to ring phase.
+ *
+ * If relative velocity has a useful in-plane component, prefer it so grazing
+ * hits smear along the travel direction.  Otherwise fall back to the collision
+ * normal supplied by collision.c.
+ */
 static float damage_phase_from_world_dir(const ParticleDisc *d,
                                          const double dir[3],
                                          const double rel_vel[3])
@@ -913,12 +968,8 @@ static void apply_disc_damage(ParticleDisc *d, int body_idx, double rel_speed,
                           vertical_sign, seed ^ 0x7f4a7c15u);
 }
 
-/*
- * Ring particle collision despawn helpers.
- *
- * Confirmed sphere/ring contact samples can tombstone swallowed particles
- * without compacting the fixed-size render buffers.
- */
+/* ── § CONTACT — swept hitboxes, despawn, tidal perturbation ────────────── */
+
 /*
  * despawn_contact_particles_array - remove particles swallowed by a planet.
  *
@@ -1160,6 +1211,13 @@ static void damage_disc(ParticleDisc *d, int body_idx, double rel_speed,
                       0.18f + 0.26f * severity, rel_vel);
 }
 
+/*
+ * disc_probe_contact_sample — evaluate one sphere/ring contact sample.
+ *
+ * The sample time is relative to the current frame endpoint.  Negative values
+ * are swept-history probes used to catch fast crossings; t=0 is the current
+ * body position.  Only current/near-current samples may despawn particles.
+ */
 static int disc_probe_contact_sample(ParticleDisc *d, int other_idx,
                                      double rel_speed, double sample_t)
 {
@@ -1320,6 +1378,14 @@ static void add_radial_crossing_times(double *times, int *count, double dt,
     add_contact_time(times, count, (-b + disc) / (2.0*a), dt);
 }
 
+/*
+ * update_disc_swept_contact — cheap broadphase + swept samples for one body.
+ *
+ * This is the ring equivalent of collision.c's swept-sphere thinking, but it
+ * runs only at the outer system step and only for planet-scale perturbers.
+ * Visual tide can start before physical contact; despawn requires confirmed
+ * overlap in disc_probe_contact_sample().
+ */
 static void update_disc_swept_contact(ParticleDisc *d, int other_idx, double dt)
 {
     Body *parent;
@@ -1413,6 +1479,8 @@ static void update_disc_swept_contact(ParticleDisc *d, int other_idx, double dt)
         disc_probe_contact_sample(d, other_idx, speed, times[s]);
     }
 }
+
+/* ── § GL — VAO/VBO setup, distance LOD, render path ───────────────────── */
 
 /* Set up the 8-float-per-particle VAO attribute pointers (loc 0..5).
  * Locations 0..4 are individual floats; loc 5 is vec3 (rgb). */
@@ -1603,7 +1671,7 @@ static void render_disc(const ParticleDisc *d, const float vp[16])
     glBindVertexArray(0);
 }
 
-/* ── public API ─────────────────────────────────────────────────────────── */
+/* ── § API — public lifecycle, ticking, rendering, collision hooks ─────── */
 
 /*
  * rings_init — parse "rings" array from universe.json and build all disc data.
@@ -1809,7 +1877,7 @@ void rings_tick(double dt)
     }
 }
 
-/* Draw all initialized, alive ring discs at their current LOD. */
+/* rings_render — draw all initialized, alive ring discs at current LOD. */
 void rings_render(const float vp[16])
 {
     for (int d = 0; d < s_n_discs; d++) {
@@ -1821,20 +1889,6 @@ void rings_render(const float vp[16])
     }
 }
 
-/*
- * rings_on_body_absorbed — handle ring ownership transfer after a collision.
- *
- * Two cases:
- *   - Impactor had a ring (disc->parent_idx == impactor_idx):
- *       If the target already has its own ring, just disable this one.
- *       Otherwise, retune it to orbit the target using the target's mass and obliquity.
- *
- *   - Target had a ring (disc->parent_idx == target_idx):
- *       Retune it to match the target's updated mass/obliquity after absorption.
- *
- * Stars and already-ringed targets don't inherit a second ring because overlapping
- * disc geometry would not look correct.
- */
 /*
  * rings_on_collision — strong one-shot ring response at body impact start.
  */
@@ -1867,6 +1921,15 @@ void rings_on_collision(int target_idx, int impactor_idx, double rel_speed,
     }
 }
 
+/*
+ * rings_on_body_absorbed — handle ring ownership transfer after a collision.
+ *
+ * Two cases:
+ *   - Impactor ring: inherit it if the target has no ring and is not a star.
+ *   - Target ring: retune it for the target's updated mass/obliquity.
+ *
+ * Visual and motion transfer blends hide the otherwise abrupt parent change.
+ */
 void rings_on_body_absorbed(int target_idx, int impactor_idx)
 {
     for (int d = 0; d < s_n_discs; d++) {
@@ -1935,7 +1998,7 @@ void rings_on_body_absorbed(int target_idx, int impactor_idx)
     }
 }
 
-/* Free all CPU-side particle data and GPU resources. */
+/* rings_shutdown — free CPU-side particle data and GPU resources. */
 void rings_shutdown(void)
 {
     for (int d = 0; d < s_n_discs; d++) {
