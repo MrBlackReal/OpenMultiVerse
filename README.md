@@ -117,6 +117,7 @@ Space is incomprehensibly large. Most simulations either abstract that away or c
 | Planet collision & merge — animation, particle spray, persistent craters, spin transfer | ✓ |
 | Build mode — spawn and place bodies at runtime | ✓ |
 | Atmospheric glow — Venus, Earth, Mars, gas giants, Titan | ✓ |
+| Looping background soundtrack | ✓ |
 | Procedural planet textures, axial tilt & rotation | ✓ |
 | Logarithmic depth buffer — cm to light-years in a single scene | ✓ |
 | Multiple star systems & nearby exoplanet systems | ✓ |
@@ -135,14 +136,15 @@ Space is incomprehensibly large. Most simulations either abstract that away or c
 **Windows (MSYS2 / MinGW-w64)**
 ```bash
 pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-make \
-          mingw-w64-x86_64-SDL2 mingw-w64-x86_64-SDL2_ttf mingw-w64-x86_64-glew
+          mingw-w64-x86_64-SDL2 mingw-w64-x86_64-SDL2_ttf \
+          mingw-w64-x86_64-SDL2_mixer mingw-w64-x86_64-glew
 mingw32-make
 ./verse.exe
 ```
 
 **Linux**
 ```bash
-sudo apt install build-essential libsdl2-dev libsdl2-ttf-dev libglew-dev
+sudo apt install build-essential libsdl2-dev libsdl2-ttf-dev libsdl2-mixer-dev libglew-dev
 make
 ./verse
 ```

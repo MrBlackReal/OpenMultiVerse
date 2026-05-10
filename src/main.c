@@ -47,6 +47,7 @@
 #include "build.h"
 #include "collision.h"
 #include "supernova.h"
+#include "audio.h"
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -303,7 +304,7 @@ static void toggle_fullscreen(void) {
 
 static int app_init(void) {
     boot_log("Initializing SDL");
-    if (SDL_Init(SDL_INIT_VIDEO) < 0) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0) {
         fprintf(stderr, "[Main] SDL_Init: %s\n", SDL_GetError());
         return 0;
     }
@@ -365,10 +366,14 @@ static int app_init(void) {
     update_viewport_size();
     boot_log("OpenGL context ready");
 
+    boot_log("Initializing audio");
+    audio_init();
+
     return 1;
 }
 
 static void app_quit(void) {
+    audio_shutdown();
     ui_shutdown();
     shutdown_runtime_world();
     SDL_GL_DeleteContext(s_ctx);

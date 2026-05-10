@@ -57,6 +57,9 @@ dkms.conf
 # Release packaging output
 dist/
 
+# Source audio/video exports; runtime uses compressed assets such as .ogg
+assets/*.mov
+
 # AI assistant worktrees
 .claude/worktrees/
 .codex/worktrees/

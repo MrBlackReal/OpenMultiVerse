@@ -8,6 +8,12 @@ VERSION=${1:-"dev"}
 NAME="verse-windows-x64-${VERSION}"
 DIST="dist/${NAME}"
 
+# Make packaging robust when launched from usr/bin/bash instead of a MINGW64
+# login shell. ldd resolves MinGW DLLs through PATH.
+if [ -d /mingw64/bin ]; then
+    export PATH="/mingw64/bin:${PATH}"
+fi
+
 echo ">>> Packaging verse for Windows: ${NAME}"
 
 # Clean and create output directory
@@ -23,6 +29,7 @@ cp verse.exe "${DIST}/"
 
 # Copy assets
 cp -r assets/ "${DIST}/"
+rm -f "${DIST}/assets/soundtrack.mov"
 
 # Copy all required DLLs (filter out Windows system DLLs)
 echo ">>> Collecting DLLs via ldd..."

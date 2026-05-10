@@ -24,6 +24,7 @@ This document is the definitive architectural reference for the **OpenVerse** so
    - [collision.c / collision.h — Impact & Merge System](#collisioncollisionh--impact--merge-system)
    - [build.c / build.h — Sandbox Body Placement](#buildcbuildh--sandbox-body-placement)
    - [ui.c / ui.h — 2D HUD Overlay](#uicuih--2d-hud-overlay)
+   - [audio.c / audio.h — Background Music](#audiocaudioh--background-music)
    - [camera.c / camera.h — Free-Look Camera](#cameraccamerah--free-look-camera)
    - [json.c / json.h — JSON Parser](#jsoncjsonh--json-parser)
    - [gl_utils.c / gl_utils.h — OpenGL Helpers](#gl_utilscgl_utilsh--opengl-helpers)
@@ -46,6 +47,7 @@ OpenVerse is a physically accurate solar system simulator:
 - **Windowing & Input:** SDL2
 - **Rendering:** OpenGL 3.3 Core Profile (GLSL 330)
 - **Text Rendering:** SDL2_ttf
+- **Audio:** SDL2_mixer
 - **Physics:** 2R-RESPA hierarchical N-body integrator
 - **Orbital Mechanics:** Keplerian elements (JPL J2000 tables)
 - **Data Source:** `assets/universe.json` — single flat JSON file defining all bodies
@@ -78,6 +80,7 @@ OpenVerse/
 │   ├── collision.c / .h   Solid-body impacts and merges
 │   ├── build.c / .h       Runtime body placement (sandbox mode)
 │   ├── ui.c / ui.h        2D HUD overlay
+│   ├── audio.c / audio.h  Looping soundtrack playback
 │   ├── camera.c / .h      Free-look camera state
 │   ├── json.c / json.h    Minimal recursive-descent JSON parser
 │   ├── gl_utils.c / .h    OpenGL shader/buffer utilities
@@ -110,6 +113,7 @@ The Makefile auto-detects the platform (Linux / macOS / Windows MSYS2 MinGW64) a
 **Dependencies:**
 - SDL2 (windowing, input, OpenGL context)
 - SDL2_ttf (font rendering for labels and HUD)
+- SDL2_mixer (streamed looping background music)
 - GLEW (OpenGL extension loading)
 - OpenGL 3.3+
 - OpenMP (parallelises multi-star-system warmup)
@@ -296,7 +300,7 @@ The top-level orchestrator. Owns:
 **Key sections:**
 | Lines (approx.) | What happens |
 |---|---|
-| Startup | SDL/GL init, shader loading, `universe_load()`, `render_init()`, warmup |
+| Startup | SDL/GL/audio init, shader loading, `universe_load()`, `render_init()`, warmup |
 | `handle_events()` | Keyboard (WASD, +/-, B, T, Space, Escape), mouse look |
 | `camera_move()` | Apply camera velocity each frame |
 | Physics block | `physics_refresh_timestep_model()`, RESPA loops per system, `collision_step()`, `asteroids_step()`, `rings_tick()` |
@@ -661,6 +665,22 @@ Renders a 2D screen-space HUD using `ui.vert` / `ui.frag` (orthographic projecti
 | `ui_init()` | Load font, prepare text caches, compile `ui.vert/frag` |
 | `ui_render()` | Draw all HUD elements |
 | `ui_shutdown()` | Cleanup |
+
+---
+
+### `audio.c` / `audio.h` — Background Music
+
+**Location:** `src/audio.c`, `src/audio.h`
+
+Small SDL_mixer wrapper that opens the audio device, loads `assets/soundtrack.ogg`, and starts it as looping streamed music with `Mix_PlayMusic(..., -1)`. Audio startup is non-fatal: if the mixer device or soundtrack asset is unavailable, the simulator logs the error and continues without music.
+
+**Functions:**
+
+| Function | Purpose |
+|---|---|
+| `audio_init()` | Open SDL_mixer and start the soundtrack loop |
+| `audio_set_music_volume(volume)` | Set music volume in the `[0, 1]` range |
+| `audio_shutdown()` | Stop playback and release mixer resources |
 
 ---
 

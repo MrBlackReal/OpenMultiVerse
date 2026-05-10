@@ -18,12 +18,12 @@ UNAME := $(shell uname -s 2>/dev/null || echo Windows)
 
 ifeq ($(UNAME), Linux)
     CFLAGS  += $(shell sdl2-config --cflags)
-    LDFLAGS  = $(shell sdl2-config --libs) -lSDL2_ttf -lGL -lGLEW -lm -fopenmp
+    LDFLAGS  = $(shell sdl2-config --libs) -lSDL2_ttf -lSDL2_mixer -lGL -lGLEW -lm -fopenmp
     EXT      =
 
 else ifeq ($(UNAME), Darwin)
     CFLAGS  += $(shell sdl2-config --cflags)
-    LDFLAGS  = $(shell sdl2-config --libs) -lSDL2_ttf -lGLEW \
+    LDFLAGS  = $(shell sdl2-config --libs) -lSDL2_ttf -lSDL2_mixer -lGLEW \
                -framework OpenGL -lm -fopenmp
     EXT      =
 
@@ -34,7 +34,7 @@ else
     SDL2_DIR ?= C:/msys64/mingw64
     CFLAGS  += -I$(SDL2_DIR)/include/SDL2 -I$(SDL2_DIR)/include
     LDFLAGS  = -L$(SDL2_DIR)/lib \
-               -lSDL2 -lSDL2_ttf \
+               -lSDL2 -lSDL2_ttf -lSDL2_mixer \
                -lglew32 \
                -lopengl32 -lglu32 \
                -lm -fopenmp
