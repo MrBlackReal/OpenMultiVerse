@@ -68,8 +68,8 @@ void main() {
     float split_t = smoothstep(-split_band, split_band, r_norm - u_morph2.x);
     float split_dir = split_t * 2.0 - 1.0;
     float split_fade = 1.0 - smoothstep(0.42, 0.78, u_morph2.y);
-    float radial_wave = u_morph0.z * shock * (0.55 + 0.70 * r_norm);
-    float contact_push = contact * split_fade * (0.040 + 0.090 * u_morph2.z);
+    float radial_wave = u_morph0.z * shock;
+    float contact_push = contact * split_fade * split_dir;
     float height_wave = u_morph0.y * (0.20 + 0.80 * shock) + contact * 1.10;
     float tide_dphi = abs(wrap_pi(phi - u_tide0.x));
     float tide_ang_width = mix(0.34, 1.35, clamp(u_tide0.z, 0.0, 1.0));
@@ -82,7 +82,14 @@ void main() {
     vec3 tide_dir = (tide_dir_local.x * u_b1 + tide_dir_local.y * u_b2 + tide_dir_local.z * u_pole) / tide_dir_len;
     float ring_width = max(u_morph1.w - u_morph1.z, 1e-8);
     float tide_pull = ring_width * tide * (0.028 + 0.060 * u_tide0.w);
-    float ring_radius = r * (1.0 + radial_wave * (r_norm - 0.12) + contact_push * split_dir);
+    /*
+     * Keep impact motion as a local displacement in ring-width units.  A
+     * proportional radius multiplier makes the whole annulus look like it
+     * briefly rescales when a planet first touches it.
+     */
+    float radial_offset = ring_width * (radial_wave * (r_norm - 0.45) * 0.045
+                                      + contact_push * 0.032);
+    float ring_radius = clamp(r + radial_offset, u_morph1.z, u_morph1.w);
     vec3 ring_dir = c * u_b1 + s * u_b2;
     vec3 height_offset = (a_height * (1.0 + height_wave) + height_wave * 0.00002 * shock) * u_pole;
     vec3 local_orbit = ring_radius * ring_dir + height_offset;
@@ -98,14 +105,19 @@ void main() {
     vec3 tidal_field = (particle_pull - parent_pull) * u_body0.w * u_body0.w;
     float field_len = length(tidal_field);
     vec3 field_dir = field_len > 1e-8 ? tidal_field / field_len : tide_dir;
-    float field_mag = field_len / (1.0 + field_len);
+    float field_mag = field_len / (0.62 + field_len);
+    float body_power = clamp(u_body1.x, 0.0, 1.0);
     float grav_pull = ring_width * field_mag * clamp(u_body1.x, 0.0, 1.0)
-                    * (0.040 + 0.135 * clamp(u_body1.x, 0.0, 1.0));
+                    * (0.070 + 0.210 * body_power);
+    vec3 shear_dir = normalize(-s * u_b1 + c * u_b2 + u_pole * u_tide1.z * 0.35);
+    float shear_phase = sin(tide_dphi) * sign(wrap_pi(phi - u_tide0.x));
+    float shear_pull = ring_width * tide * body_power * shear_phase * 0.055;
 
     vec3 pos = u_center
              + local_orbit
              + tide_pull * tide_dir
-             + grav_pull * field_dir;
+             + grav_pull * field_dir
+             + shear_pull * shear_dir;
 
     vec3 local_pos = pos - u_center;
     vec3 parent_delta = local_pos;

@@ -86,6 +86,8 @@
 #define TIDAL_MAX_DE          0.0012f
 #define TIDAL_WARP_MIN_WIDTH  0.14f
 #define TIDAL_WARP_MAX_WIDTH  0.95f
+#define RING_TRANSFER_MIN_SECONDS ((float)DAY * 0.75f)
+#define RING_TRANSFER_MAX_SECONDS ((float)DAY * 8.0f)
 
 /* ── Zone ── one concentric annulus band of a ring disc ────────────────── */
 typedef struct {
@@ -153,6 +155,19 @@ static void normalize3f_local(float v[3])
     v[2] /= len;
 }
 
+static void mix3f_local(const float a[3], const float b[3], float t, float out[3])
+{
+    out[0] = a[0] + (b[0] - a[0]) * t;
+    out[1] = a[1] + (b[1] - a[1]) * t;
+    out[2] = a[2] + (b[2] - a[2]) * t;
+}
+
+static float smootherstep01f(float t)
+{
+    t = clampf(t, 0.0f, 1.0f);
+    return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
+}
+
 static int body_is_ring_perturber_planet(int idx)
 {
     if (idx < 0 || idx >= g_nbodies) return 0;
@@ -213,6 +228,15 @@ static void disc_reset_response(ParticleDisc *d)
     d->tide_dir_u = 1.0f;
     d->tide_dir_v = 0.0f;
     d->tide_dir_n = 0.0f;
+    d->transfer_b1[0] = 1.0f; d->transfer_b1[1] = 0.0f; d->transfer_b1[2] = 0.0f;
+    d->transfer_b2[0] = 0.0f; d->transfer_b2[1] = 1.0f; d->transfer_b2[2] = 0.0f;
+    d->transfer_pole[0] = 0.0f; d->transfer_pole[1] = 0.0f; d->transfer_pole[2] = 1.0f;
+    d->transfer_offset[0] = d->transfer_offset[1] = d->transfer_offset[2] = 0.0f;
+    d->transfer_age = 0.0f;
+    d->transfer_duration = 0.0f;
+    d->motion_scale_start = 1.0f;
+    d->motion_blend_age = 0.0f;
+    d->motion_blend_duration = 0.0f;
     d->body_u_au = 0.0f;
     d->body_v_au = 0.0f;
     d->body_n_au = 0.0f;
@@ -226,16 +250,30 @@ static float smooth_raise(float cur, float target, float rate)
     return cur + (target - cur) * clampf(rate, 0.0f, 1.0f);
 }
 
+static float smooth_raise_capped(float cur, float target,
+                                 float rate, float max_step)
+{
+    float next;
+
+    if (target <= cur) return cur;
+    next = smooth_raise(cur, target, rate);
+    max_step = fmaxf(max_step, 0.0f);
+    if (next - cur > max_step) next = cur + max_step;
+    return next;
+}
+
 static void disc_drive_response(ParticleDisc *d, float phase, float half_width,
                                 float severity, float overlap,
                                 float radial_center, float radial_width)
 {
     float shock_target;
     float contact_target;
+    int soft_start;
 
     if (!d) return;
     severity = clampf(severity, 0.0f, 1.0f);
     overlap = clampf(overlap, 0.0f, 1.0f);
+    soft_start = (d->shock_amp <= 0.018f && d->contact_strength <= 0.030f);
 
     if (d->shock_amp <= 0.001f) {
         d->shock_phase = phase;
@@ -245,10 +283,18 @@ static void disc_drive_response(ParticleDisc *d, float phase, float half_width,
                          wrap_angle_pi(phase - d->shock_phase) * phase_blend);
     }
     d->shock_width = fmaxf(d->shock_width, half_width);
-    shock_target = (0.060f + 0.170f * severity) * (0.35f + 0.65f * overlap);
-    d->shock_amp = smooth_raise(d->shock_amp, shock_target, 0.12f + 0.12f * overlap);
+    shock_target = (0.050f + 0.135f * severity) * (0.30f + 0.70f * overlap);
+    d->shock_amp = smooth_raise_capped(d->shock_amp,
+                                       shock_target,
+                                       soft_start ? (0.035f + 0.045f * overlap)
+                                                  : (0.10f + 0.11f * overlap),
+                                       soft_start ? (0.012f + 0.014f * overlap)
+                                                  : (0.060f + 0.050f * overlap));
     d->shock_spin = d->mean_motion_mid * (0.22f + 0.60f * severity);
-    d->puff_target = fmaxf(d->puff_target, 0.16f + 0.62f * severity * overlap);
+    d->puff_target = fmaxf(d->puff_target,
+                           soft_start
+                               ? (0.06f + 0.24f * severity * overlap)
+                               : (0.13f + 0.48f * severity * overlap));
 
     radial_center = clampf(radial_center, 0.0f, 1.0f);
     radial_width = clampf(radial_width, 0.06f, 0.80f);
@@ -260,10 +306,13 @@ static void disc_drive_response(ParticleDisc *d, float phase, float half_width,
         d->contact_norm += (radial_center - d->contact_norm) * blend;
         d->contact_width += (radial_width - d->contact_width) * blend;
     }
-    contact_target = (0.22f + 0.78f * severity) * overlap;
-    d->contact_strength = smooth_raise(d->contact_strength,
-                                       contact_target,
-                                       0.10f + 0.18f * overlap);
+    contact_target = (0.16f + 0.62f * severity) * overlap;
+    d->contact_strength = smooth_raise_capped(d->contact_strength,
+                                              contact_target,
+                                              soft_start ? (0.030f + 0.055f * overlap)
+                                                         : (0.085f + 0.145f * overlap),
+                                              soft_start ? (0.014f + 0.018f * overlap)
+                                                         : (0.070f + 0.045f * overlap));
 }
 
 /*
@@ -308,16 +357,16 @@ static void disc_drive_tide_response(ParticleDisc *d,
 
     phase = atan2f((float)rv, (float)ru);
     radial_norm = clampf((float)((proj_r_km - ring_inner_km) / ring_width_km), 0.0f, 1.0f);
-    width = clampf((float)(other_r_km / ring_width_km) * 1.65f + strength * 0.20f,
+    width = clampf((float)(other_r_km / ring_width_km) * 2.10f + strength * 0.28f,
                    TIDAL_WARP_MIN_WIDTH, TIDAL_WARP_MAX_WIDTH);
 
     dir_u = (float)(ru / local_len);
     dir_v = (float)(rv / local_len);
     dir_n = (float)(rh / local_len);
 
-    strength *= clampf((float)(other_r_km / fmax(ring_width_km * 0.18, 1.0)),
-                       0.35f, 1.30f);
-    strength = clampf(strength * 0.80f, 0.0f, 1.0f);
+    strength *= clampf((float)(other_r_km / fmax(ring_width_km * 0.14, 1.0)),
+                       0.45f, 1.55f);
+    strength = clampf(strength * 1.05f, 0.0f, 1.0f);
     body_u_au = (float)(ru * RS);
     body_v_au = (float)(rv * RS);
     body_n_au = (float)(rh * RS);
@@ -361,10 +410,10 @@ static void disc_drive_tide_response(ParticleDisc *d,
 
     d->tide_strength = smooth_raise(d->tide_strength,
                                     strength,
-                                    0.08f + 0.20f * strength);
+                                    0.10f + 0.24f * strength);
     d->body_strength = smooth_raise(d->body_strength,
-                                    clampf(strength * 1.25f, 0.0f, 1.0f),
-                                    0.16f + 0.26f * strength);
+                                    clampf(strength * 1.45f, 0.0f, 1.0f),
+                                    0.18f + 0.30f * strength);
 }
 
 static void disc_drive_transfer_response(ParticleDisc *d,
@@ -387,6 +436,80 @@ static void disc_drive_transfer_response(ParticleDisc *d,
     if (d->mean_motion_mid > 1e-8f)
         d->shock_spin = d->mean_motion_mid * (0.14f + 0.34f * severity);
     d->parent_radius_ref_km = old_parent_radius_km;
+}
+
+/*
+ * disc_begin_visual_transfer - hide ownership jumps during merge retunes.
+ *
+ * Ring physics and ownership switch to the new parent immediately, but the
+ * rendered frame keeps the old center/basis as a decaying offset.  This makes
+ * impactor-ring handoff read as a continuous merge instead of a teleport.
+ */
+static void disc_begin_visual_transfer(ParticleDisc *d,
+                                       const double old_center_m[3],
+                                       const float old_b1[3],
+                                       const float old_b2[3],
+                                       const float old_pole[3],
+                                       int new_parent_idx)
+{
+    double dx, dy, dz, dist_m;
+    float duration;
+
+    if (!d || !old_center_m || new_parent_idx < 0 || new_parent_idx >= g_nbodies) return;
+
+    dx = old_center_m[0] - g_bodies[new_parent_idx].pos[0];
+    dy = old_center_m[1] - g_bodies[new_parent_idx].pos[1];
+    dz = old_center_m[2] - g_bodies[new_parent_idx].pos[2];
+    dist_m = sqrt(dx*dx + dy*dy + dz*dz);
+
+    d->transfer_offset[0] = (float)(dx * RS);
+    d->transfer_offset[1] = (float)(dy * RS);
+    d->transfer_offset[2] = (float)(dz * RS);
+    memcpy(d->transfer_b1, old_b1, 3 * sizeof(float));
+    memcpy(d->transfer_b2, old_b2, 3 * sizeof(float));
+    memcpy(d->transfer_pole, old_pole, 3 * sizeof(float));
+
+    duration = clampf(disc_mid_period_seconds(d) * 0.18f,
+                      RING_TRANSFER_MIN_SECONDS,
+                      RING_TRANSFER_MAX_SECONDS);
+    if (dist_m > 1.0)
+        duration = fmaxf(duration,
+                         clampf((float)(dist_m / fmax(g_bodies[new_parent_idx].radius, 1.0)) * (float)(DAY * 1.35),
+                                RING_TRANSFER_MIN_SECONDS,
+                                RING_TRANSFER_MAX_SECONDS));
+
+    d->transfer_age = 0.0f;
+    d->transfer_duration = duration;
+}
+
+/*
+ * disc_begin_motion_transfer - ease orbital speed after a parent mass retune.
+ *
+ * retune_disc_parent() must immediately rebuild n_arr[] for the new GM so the
+ * ring remains physically consistent.  Visually, however, a sudden n jump reads
+ * as a speed cut at merge completion.  Store only the old/new mean-motion ratio
+ * and apply it as a cheap scalar in rings_tick() until the handoff finishes.
+ */
+static void disc_begin_motion_transfer(ParticleDisc *d,
+                                       float old_mean_motion,
+                                       float duration)
+{
+    float ratio;
+
+    if (!d || old_mean_motion <= 1e-8f || d->mean_motion_mid <= 1e-8f ||
+        duration <= 0.0f) {
+        if (d) {
+            d->motion_scale_start = 1.0f;
+            d->motion_blend_age = 0.0f;
+            d->motion_blend_duration = 0.0f;
+        }
+        return;
+    }
+
+    ratio = old_mean_motion / d->mean_motion_mid;
+    d->motion_scale_start = clampf(ratio, 0.15f, 6.0f);
+    d->motion_blend_age = 0.0f;
+    d->motion_blend_duration = duration;
 }
 
 static void disc_update_response(ParticleDisc *d, float dt)
@@ -428,6 +551,22 @@ static void disc_update_response(ParticleDisc *d, float dt)
     if (d->contact_strength < 0.001f) d->contact_strength = 0.0f;
     if (d->tide_strength < 0.001f) d->tide_strength = 0.0f;
     if (d->body_strength < 0.001f) d->body_strength = 0.0f;
+
+    if (d->transfer_duration > 0.0f) {
+        d->transfer_age += dt;
+        if (d->transfer_age >= d->transfer_duration) {
+            d->transfer_age = d->transfer_duration = 0.0f;
+            d->transfer_offset[0] = d->transfer_offset[1] = d->transfer_offset[2] = 0.0f;
+        }
+    }
+    if (d->motion_blend_duration > 0.0f) {
+        d->motion_blend_age += dt;
+        if (d->motion_blend_age >= d->motion_blend_duration) {
+            d->motion_scale_start = 1.0f;
+            d->motion_blend_age = 0.0f;
+            d->motion_blend_duration = 0.0f;
+        }
+    }
 }
 
 /* build_basis — ring-plane orthonormal frame from planet obliquity. */
@@ -915,6 +1054,7 @@ static void damage_disc(ParticleDisc *d, int body_idx, double rel_speed,
 {
     float phase;
     float severity;
+    float visual_severity;
     float half_width;
     float overlap;
 
@@ -923,12 +1063,13 @@ static void damage_disc(ParticleDisc *d, int body_idx, double rel_speed,
 
     phase = damage_phase_from_world_dir(d, dir, rel_vel);
     severity = clampf((float)(rel_speed / 15000.0), 0.18f, 1.0f);
-    half_width = clampf(0.34f + 0.42f * severity, DAMAGE_MIN_WIDTH, DAMAGE_MAX_WIDTH);
-    overlap = 0.85f;
+    visual_severity = clampf(severity * 0.55f, 0.10f, 0.72f);
+    half_width = clampf(0.28f + 0.34f * visual_severity, DAMAGE_MIN_WIDTH, 0.82f);
+    overlap = 0.62f;
 
-    disc_drive_response(d, phase, half_width, severity, overlap, 0.5f, 0.65f);
+    disc_drive_response(d, phase, half_width, visual_severity, overlap, 0.5f, 0.65f);
     apply_disc_damage(d, body_idx, rel_speed, phase, half_width,
-                      0.50f + 0.45f * severity, rel_vel);
+                      0.18f + 0.26f * severity, rel_vel);
 }
 
 static int disc_probe_contact_sample(ParticleDisc *d, int other_idx,
@@ -1033,7 +1174,13 @@ static int disc_probe_contact_sample(ParticleDisc *d, int other_idx,
         float radial_width = clampf((float)(cross_r_km / ring_width_km) * 1.35f,
                                     0.08f, 0.85f);
         int killed = 0;
-        if (sample_t >= -1e-6)
+        /*
+         * Do not erase particles on the mathematical first touch.  Waiting for
+         * a small real penetration keeps grazing contacts from reading as a
+         * one-frame pop while still removing particles once the sphere is
+         * visibly inside the ring volume.
+         */
+        if (sample_t >= -1e-6 && plane_overlap > 0.08f && radial_overlap > 0.015f)
             killed = despawn_disc_contact_particles(d, other_idx, rel_speed,
                                                     ru, rv, rh, other_r_km,
                                                     severity);
@@ -1126,7 +1273,7 @@ static void update_disc_swept_contact(ParticleDisc *d, int other_idx, double dt)
     motion_km = v_mps * dt * 0.001;
     reach_km = other_r_km + motion_km;
     ring_width_km = fmax(d->ring_r_outer_km - d->ring_r_inner_km, 1.0);
-    tidal_reach_km = fmax(other_r_km * 12.0, ring_width_km * 2.40) + motion_km;
+    tidal_reach_km = fmax(other_r_km * 14.0, ring_width_km * 3.10) + motion_km;
 
     if (h_km > tidal_reach_km) return;
     if (proj_r_km + tidal_reach_km < d->ring_r_inner_km) return;
@@ -1308,26 +1455,45 @@ static void build_sprite_quad(float *verts,
 static void render_disc(const ParticleDisc *d, const float vp[16])
 {
     Body *par = &g_bodies[d->parent_idx];
-    float px = (float)(par->pos[0] * RS);
-    float py = (float)(par->pos[1] * RS);
-    float pz = (float)(par->pos[2] * RS);
+    float rb1[3], rb2[3], rpole[3];
+    float blend = 1.0f;
+    float ox = 0.0f, oy = 0.0f, oz = 0.0f;
+    float px, py, pz;
+    rb1[0] = d->b1[0]; rb1[1] = d->b1[1]; rb1[2] = d->b1[2];
+    rb2[0] = d->b2[0]; rb2[1] = d->b2[1]; rb2[2] = d->b2[2];
+    rpole[0] = d->pole[0]; rpole[1] = d->pole[1]; rpole[2] = d->pole[2];
+    if (d->transfer_duration > 0.0f) {
+        blend = smootherstep01f(d->transfer_age / d->transfer_duration);
+        ox = d->transfer_offset[0] * (1.0f - blend);
+        oy = d->transfer_offset[1] * (1.0f - blend);
+        oz = d->transfer_offset[2] * (1.0f - blend);
+        mix3f_local(d->transfer_b1, d->b1, blend, rb1);
+        mix3f_local(d->transfer_b2, d->b2, blend, rb2);
+        mix3f_local(d->transfer_pole, d->pole, blend, rpole);
+        normalize3f_local(rb1);
+        normalize3f_local(rb2);
+        normalize3f_local(rpole);
+    }
+    px = (float)(par->pos[0] * RS) + ox;
+    py = (float)(par->pos[1] * RS) + oy;
+    pz = (float)(par->pos[2] * RS) + oz;
     /* Camera-relative distance in double → float to avoid float32 cancellation */
-    float dx   = (float)(par->pos[0] * RS - g_cam.pos[0]);
-    float dy   = (float)(par->pos[1] * RS - g_cam.pos[1]);
-    float dz   = (float)(par->pos[2] * RS - g_cam.pos[2]);
+    float dx   = px - (float)g_cam.pos[0];
+    float dy   = py - (float)g_cam.pos[1];
+    float dz   = pz - (float)g_cam.pos[2];
     float dist = sqrtf(dx*dx + dy*dy + dz*dz);
 
     if (dist > SPRITE_DIST) {
         if (!d->sprite_shader) return;
 
         float quad[18];
-        build_sprite_quad(quad, px, py, pz, d->sprite_r, d->b1, d->b2);
+        build_sprite_quad(quad, px, py, pz, d->sprite_r, rb1, rb2);
 
         glUseProgram(d->sprite_shader);
         glUniformMatrix4fv(d->sp_loc_vp,     1, GL_FALSE, vp);
         glUniform3f       (d->sp_loc_center,  px, py, pz);
-        glUniform3fv      (d->sp_loc_b1,    1, d->b1);
-        glUniform3fv      (d->sp_loc_b2,    1, d->b2);
+        glUniform3fv      (d->sp_loc_b1,    1, rb1);
+        glUniform3fv      (d->sp_loc_b2,    1, rb2);
         glUniform4f       (d->sp_loc_morph0,
                            1.0f,
                            d->puff_cur,
@@ -1384,9 +1550,9 @@ static void render_disc(const ParticleDisc *d, const float vp[16])
         glUseProgram(d->shader);
         glUniformMatrix4fv(d->loc_vp,     1, GL_FALSE, vp);
         glUniform3f       (d->loc_center,  px, py, pz);
-        glUniform3fv      (d->loc_b1,    1, d->b1);
-        glUniform3fv      (d->loc_b2,    1, d->b2);
-        glUniform3fv      (d->loc_pole,  1, d->pole);
+        glUniform3fv      (d->loc_b1,    1, rb1);
+        glUniform3fv      (d->loc_b2,    1, rb2);
+        glUniform3fv      (d->loc_pole,  1, rpole);
         glUniform4f       (d->loc_morph0,
                            1.0f,
                            d->puff_cur,
@@ -1621,22 +1787,32 @@ void rings_tick(double dt)
 
     for (int d = 0; d < s_n_discs; d++) {
         ParticleDisc *disc = &s_discs[d];
+        float motion_scale = 1.0f;
         if (!disc->initialized) continue;
         if (disc->parent_idx < 0 || disc->parent_idx >= g_nbodies) continue;
         if (!g_bodies[disc->parent_idx].alive) continue;
         disc_update_response(disc, dt > 0.0 ? (float)dt : 0.0f);
 
+        if (disc->motion_blend_duration > 0.0f) {
+            float t = smootherstep01f(disc->motion_blend_age /
+                                      disc->motion_blend_duration);
+            motion_scale = disc->motion_scale_start +
+                           (1.0f - disc->motion_scale_start) * t;
+        }
+
         for (int i = 0; i < disc->n_full; i++) {
             if (disc->data_full[i*8+1] <= 0.0f) continue;
             float M = disc->data_full[i*8+0]
-                    + (float)((double)disc->n_arr_full[i] * dt);
+                    + (float)((double)disc->n_arr_full[i] *
+                              (double)motion_scale * dt);
             if (M >= TWO_PI) M -= TWO_PI * (float)(int)(M / TWO_PI);
             disc->data_full[i*8+0] = M;
         }
         for (int i = 0; i < disc->n_lod; i++) {
             if (disc->data_lod[i*8+1] <= 0.0f) continue;
             float M = disc->data_lod[i*8+0]
-                    + (float)((double)disc->n_arr_lod[i] * dt);
+                    + (float)((double)disc->n_arr_lod[i] *
+                              (double)motion_scale * dt);
             if (M >= TWO_PI) M -= TWO_PI * (float)(int)(M / TWO_PI);
             disc->data_lod[i*8+0] = M;
         }
@@ -1710,6 +1886,16 @@ void rings_on_body_absorbed(int target_idx, int impactor_idx)
         if (disc->parent_idx == impactor_idx) {
             int target_has_ring = 0;
             float old_parent_radius_km = disc->parent_radius_ref_km;
+            float old_mean_motion = disc->mean_motion_mid;
+            double old_center_m[3] = {
+                g_bodies[impactor_idx].pos[0],
+                g_bodies[impactor_idx].pos[1],
+                g_bodies[impactor_idx].pos[2]
+            };
+            float old_b1[3], old_b2[3], old_pole[3];
+            memcpy(old_b1, disc->b1, 3 * sizeof(float));
+            memcpy(old_b2, disc->b2, 3 * sizeof(float));
+            memcpy(old_pole, disc->pole, 3 * sizeof(float));
             for (int k = 0; k < s_n_discs; k++) {
                 if (k == d || !s_discs[k].initialized) continue;
                 if (s_discs[k].parent_idx == target_idx) {
@@ -1722,6 +1908,10 @@ void rings_on_body_absorbed(int target_idx, int impactor_idx)
                 disc->initialized = 0;
             } else {
                 retune_disc_parent(disc, target_idx);
+                disc_begin_visual_transfer(disc, old_center_m, old_b1, old_b2,
+                                           old_pole, target_idx);
+                disc_begin_motion_transfer(disc, old_mean_motion,
+                                           disc->transfer_duration);
                 disc_clear_hit_cooldown(disc);
                 disc_drive_transfer_response(disc,
                                              old_parent_radius_km,
@@ -1730,8 +1920,22 @@ void rings_on_body_absorbed(int target_idx, int impactor_idx)
             }
         } else if (disc->parent_idx == target_idx) {
             float old_parent_radius_km = disc->parent_radius_ref_km;
+            float old_mean_motion = disc->mean_motion_mid;
+            double old_center_m[3] = {
+                g_bodies[target_idx].pos[0],
+                g_bodies[target_idx].pos[1],
+                g_bodies[target_idx].pos[2]
+            };
+            float old_b1[3], old_b2[3], old_pole[3];
+            memcpy(old_b1, disc->b1, 3 * sizeof(float));
+            memcpy(old_b2, disc->b2, 3 * sizeof(float));
+            memcpy(old_pole, disc->pole, 3 * sizeof(float));
             /* Target's own ring: retune for updated mass after absorption */
             retune_disc_parent(disc, target_idx);
+            disc_begin_visual_transfer(disc, old_center_m, old_b1, old_b2,
+                                       old_pole, target_idx);
+            disc_begin_motion_transfer(disc, old_mean_motion,
+                                       disc->transfer_duration);
             disc_clear_hit_cooldown(disc);
             disc_drive_transfer_response(disc,
                                          old_parent_radius_km,

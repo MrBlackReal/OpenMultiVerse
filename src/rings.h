@@ -43,6 +43,13 @@ typedef struct {
 
     /* Ring-plane basis — computed from parent obliquity at init */
     float  b1[3], b2[3], pole[3];
+    float  transfer_b1[3], transfer_b2[3], transfer_pole[3];
+    float  transfer_offset[3];
+    float  transfer_age;
+    float  transfer_duration;
+    float  motion_scale_start;  /* old/new mean-motion ratio during retune */
+    float  motion_blend_age;
+    float  motion_blend_duration;
     float  sprite_r;      /* sprite quad half-extent (AU)                 */
 
     /* Particle shader (ring.vert + color.frag) */

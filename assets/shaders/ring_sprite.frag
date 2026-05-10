@@ -5,7 +5,7 @@
  * Discards pixels outside the ring annulus; colours remaining pixels
  * according to the four ring zones (C, B, Cassini gap, A).  The optional
  * morph uniforms mirror ring.vert so distant rings keep the same collision
- * scale and shock shape as the particle LOD.
+ * shock shape as the particle LOD.
  */
 in vec3 v_pos;
 
@@ -48,9 +48,11 @@ void main() {
     float split_t = smoothstep(-split_band, split_band, ring_norm - u_morph2.x);
     float split_dir = split_t * 2.0 - 1.0;
     float split_fade = 1.0 - smoothstep(0.42, 0.78, u_morph2.y);
-    float r_eff_km = r_km / max(1.0 + u_morph0.z * shock * 0.55
-                                      + contact * split_dir * split_fade * 0.08
-                                      + tide * 0.10, 1e-4);
+    float ring_width_km = max(u_morph1.w - u_morph1.z, 1.0);
+    float r_offset_km = ring_width_km * (u_morph0.z * shock * (ring_norm - 0.45) * 0.035
+                                       + contact * split_dir * split_fade * 0.026
+                                       + tide * 0.030);
+    float r_eff_km = r_km - r_offset_km;
 
     const float C_IN   =  74658.0;
     const float C_OUT  =  92000.0;

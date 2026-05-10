@@ -3,8 +3,8 @@
  * ring_sprite_generic.frag - simple procedural ring disc for far-LOD
  *
  * Generic version for faint/narrow rings (Uranus, Neptune).  It shares the
- * same morph uniforms as the particle ring so collision scale and shock
- * motion remain continuous across the LOD switch.
+ * same morph uniforms as the particle ring so collision shock motion remains
+ * continuous across the LOD switch.
  */
 
 in vec3 v_pos;
@@ -52,9 +52,11 @@ void main() {
     float split_t = smoothstep(-split_band, split_band, ring_norm - u_morph2.x);
     float split_dir = split_t * 2.0 - 1.0;
     float split_fade = 1.0 - smoothstep(0.42, 0.78, u_morph2.y);
-    float r_eff_km = r_km / max(1.0 + u_morph0.z * shock * 0.50
-                                      + contact * split_dir * split_fade * 0.07
-                                      + tide * 0.10, 1e-4);
+    float ring_width_km = max(u_morph1.w - u_morph1.z, 1.0);
+    float r_offset_km = ring_width_km * (u_morph0.z * shock * (ring_norm - 0.45) * 0.032
+                                       + contact * split_dir * split_fade * 0.024
+                                       + tide * 0.030);
+    float r_eff_km = r_km - r_offset_km;
 
     if (r_eff_km < u_r_inner_km || r_eff_km > u_r_outer_km) discard;
 
