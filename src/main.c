@@ -731,6 +731,7 @@ int main(int argc, char **argv) {
                             physics_respa_inner_system(root, dt_inner);
                         }
                         physics_respa_end_system(root, dt_outer);
+                        rings_step_system(root, dt_outer);
                         trails_tick_system(root, dt_outer);
                         if (local_encounter) {
                             collision_step_system(root, dt_outer);

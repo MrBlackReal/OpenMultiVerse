@@ -1429,20 +1429,18 @@
 
   // ----------------------------------------------------------------
   // Ring systems (one entry per ringed planet)
-  // shader_type: "saturn"  — uses ring_sprite.frag (hardcoded zones)
-  //              "generic" — uses ring_sprite_generic.frag (uniform-driven)
+  // Rings are rendered as Keplerian particles at every distance. n_lod is the
+  // target reduced particle count after the distance-based LOD ramp.
   // ----------------------------------------------------------------
   "rings": [
     {
       "body":          "Saturn",
-      "shader_type":   "saturn",
       "n_full":        25000,
       "n_lod":         2000,
       "seed_full":     1234,
       "seed_lod":      5678,
       "e_max":         0.008,
       "h_scale":       5e-7,
-      "sprite_r_au":   0.0009604,
       "zones": [
         { "r_min_km":  74658, "r_max_km":  92000, "density": 0.10, "color": [0.60, 0.56, 0.50] },
         { "r_min_km":  92000, "r_max_km": 117580, "density": 0.60, "color": [0.88, 0.82, 0.68] },
@@ -1453,18 +1451,12 @@
     {
       // Uranus — obliquity 97.77°, rings nearly perpendicular to ecliptic
       "body":              "Uranus",
-      "shader_type":       "generic",
       "n_full":            8000,
       "n_lod":             1000,
       "seed_full":         43981,
       "seed_lod":          61185,
       "e_max":             0.003,
       "h_scale":           2e-7,
-      "sprite_r_au":       0.0003593,
-      "sprite_r_inner_km": 41800.0,
-      "sprite_r_outer_km": 51200.0,
-      "sprite_color":      [0.28, 0.28, 0.30],
-      "sprite_alpha_max":  0.35,
       "zones": [
         { "r_min_km": 41800, "r_max_km": 45000, "density": 0.35, "color": [0.26, 0.26, 0.28] },
         { "r_min_km": 45000, "r_max_km": 48000, "density": 0.25, "color": [0.22, 0.22, 0.24] },
@@ -1474,18 +1466,12 @@
     {
       // Neptune — Galle, Le Verrier, Lassell, Arago, Adams rings
       "body":              "Neptune",
-      "shader_type":       "generic",
       "n_full":            6000,
       "n_lod":             800,
       "seed_full":         9029,
       "seed_lod":          26505,
       "e_max":             0.003,
       "h_scale":           2e-7,
-      "sprite_r_au":       0.0004435,
-      "sprite_r_inner_km": 41900.0,
-      "sprite_r_outer_km": 63200.0,
-      "sprite_color":      [0.30, 0.26, 0.24],
-      "sprite_alpha_max":  0.25,
       "zones": [
         { "r_min_km": 41900, "r_max_km": 42900, "density": 0.20, "color": [0.28, 0.24, 0.22] },
         { "r_min_km": 53000, "r_max_km": 57500, "density": 0.40, "color": [0.30, 0.26, 0.24] },

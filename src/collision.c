@@ -2036,6 +2036,7 @@ static void absorb_body(int target, int impactor, double rel_speed,
                 outcome==COLLISION_VIS_MAJOR?"MAJOR":"CRATER");
     }
     impact_dir_for_pair(target, impactor, collision_dt, dir);
+    rings_on_collision(target, impactor, rel_speed, dir, rel_vel);
     if (outcome == COLLISION_VIS_MERGE) {
         begin_merge_event(target, impactor, rel_speed, dir, rel_vel, old_radius,
                           collision_dt, frame_dt);
