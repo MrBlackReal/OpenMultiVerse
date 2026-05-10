@@ -34,6 +34,7 @@ uniform vec4 u_tide1;    /* local direction to perturber: b1,b2,pole */
 uniform vec4 u_body0;    /* perturber local center xyz (AU), visual radius (AU) */
 uniform vec4 u_body1;    /* perturber visibility strength, parent visual radius (AU), unused */
 uniform vec4 u_light0;   /* sun direction from parent xyz, ambient light */
+uniform float u_shadow_strength;
 
 out vec4 v_color;
 
@@ -161,17 +162,21 @@ void main() {
     float point_t = 1.0 - smoothstep(0.0006, 0.0040, dist);
     float incidence = abs(dot(u_pole, u_light0.xyz));
     float diffuse = mix(u_light0.w, 1.0, incidence);
-    float sun_side = dot(local_pos, u_light0.xyz);
-    vec3 shadow_axis = local_pos - u_light0.xyz * sun_side;
-    float shadow_d2 = dot(shadow_axis, shadow_axis);
-    float parent_r = u_body1.y;
-    float shadow_inner = parent_r * 0.92;
-    float shadow_outer = parent_r * 1.24;
-    float shadow = sun_side < 0.0
-                 ? smoothstep(shadow_inner * shadow_inner,
-                              shadow_outer * shadow_outer,
-                              shadow_d2)
-                 : 1.0;
+    float shadow = 1.0;
+    if (u_shadow_strength > 0.001) {
+        float sun_side = dot(local_pos, u_light0.xyz);
+        vec3 shadow_axis = local_pos - u_light0.xyz * sun_side;
+        float shadow_d2 = dot(shadow_axis, shadow_axis);
+        float parent_r = u_body1.y;
+        float shadow_inner = parent_r * 0.92;
+        float shadow_outer = parent_r * 1.24;
+        float planet_shadow = sun_side < 0.0
+                            ? smoothstep(shadow_inner * shadow_inner,
+                                         shadow_outer * shadow_outer,
+                                         shadow_d2)
+                            : 1.0;
+        shadow = mix(1.0, planet_shadow, u_shadow_strength);
+    }
     float light = mix(u_light0.w * 0.55, diffuse, shadow);
     float alpha = clamp(u_morph0.x, 0.0, 1.0) * parent_fade;
     v_color     = vec4(a_color * light, alpha);
