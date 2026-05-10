@@ -41,15 +41,12 @@
  *   b2   = (0, sin(obl), −cos(obl))   — 90° from pole in the ring plane
  *   pole = (0, cos(obl),  sin(obl))   — planet's rotation axis
  *
- * ── LOD switching ─────────────────────────────────────────────────────────
+ * ── LOD and distance fade ─────────────────────────────────────────────────
  *
- *   dist > SPRITE_DIST  →  flat sprite quad (single textured disc billboard)
- *   dist ∈ [LOD_DIST, SPRITE_DIST] →  reduced particle count (n_lod)
- *   dist ≤ LOD_DIST     →  full particle count (n_full)
- *
- * The sprite quad uses ring_sprite.frag (Saturn texture) or
- * ring_sprite_generic.frag (procedural ring drawn by inner/outer radius),
- * selected by the JSON "shader_type" field.
+ *   dist ≤ LOD_DIST       → full particle count
+ *   dist ∈ LOD fade range → reduced particle count, drawn from a shuffled LOD
+ *                           buffer so all ring zones remain represented
+ *   dist ∈ fade range     → reduced particles fade out smoothly
  */
 #include "rings.h"
 #include "body.h"
@@ -63,8 +60,10 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#define SPRITE_DIST   0.2f    /* AU: farther than this → flat sprite */
-#define LOD_DIST      0.05f   /* AU: farther than this → reduced count */
+#define LOD_DIST      0.05f   /* AU: full particle count up to this range */
+#define LOD_FADE_END  0.24f   /* AU: reduced particle count reached here */
+#define RING_FADE_START 0.34f /* AU: distant particles start fading out */
+#define RING_FADE_END   0.62f /* AU: rings are fully hidden past this */
 #define MAX_ZONES     16      /* maximum annulus zones per ring descriptor */
 #define DAMAGE_MIN_WIDTH     0.18f
 #define DAMAGE_MAX_WIDTH     1.00f
@@ -166,6 +165,11 @@ static float smootherstep01f(float t)
 {
     t = clampf(t, 0.0f, 1.0f);
     return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
+}
+
+static float inv_smootherstep01f(float t)
+{
+    return 1.0f - smootherstep01f(t);
 }
 
 static int body_is_ring_perturber_planet(int idx)
@@ -670,6 +674,34 @@ static void bake_particles(float *data, float *n_arr, int n,
             double a_m = (double)a_au * 1.496e11;   /* AU → metres */
             n_arr[idx] = (float)sqrt(gm / (a_m * a_m * a_m));
         }
+    }
+}
+
+/*
+ * shuffle_particles - decorrelate draw order for distance-based thinning.
+ *
+ * The baker writes zones contiguously.  Since distant LOD renders only the
+ * first N vertices from the LOD VBO, shuffle once after baking so every partial
+ * draw remains a representative sample of all ring bands.
+ */
+static void shuffle_particles(float *data, float *n_arr, int n)
+{
+    if (!data || !n_arr || n <= 1) return;
+    for (int i = n - 1; i > 0; i--) {
+        int j = (int)(s_randf() * (float)(i + 1));
+        float tmp_particle[8];
+        float tmp_n;
+        if (j < 0) j = 0;
+        if (j > i) j = i;
+        if (j == i) continue;
+
+        memcpy(tmp_particle, data + i * 8, sizeof(tmp_particle));
+        memcpy(data + i * 8, data + j * 8, sizeof(tmp_particle));
+        memcpy(data + j * 8, tmp_particle, sizeof(tmp_particle));
+
+        tmp_n = n_arr[i];
+        n_arr[i] = n_arr[j];
+        n_arr[j] = tmp_n;
     }
 }
 
@@ -1377,80 +1409,16 @@ static void init_disc_gl(ParticleDisc *d)
     setup_particle_attribs();
     glBindVertexArray(0);
 
-    /* Sprite shader: "saturn" → textured disc; anything else → procedural */
-    const char *frag = d->use_generic_sprite
-                       ? "assets/shaders/ring_sprite_generic.frag"
-                       : "assets/shaders/ring_sprite.frag";
-    d->sprite_shader = gl_shader_load("assets/shaders/ring_sprite.vert", frag);
-    if (!d->sprite_shader) return;
-
-    d->sp_loc_vp     = glGetUniformLocation(d->sprite_shader, "u_vp");
-    d->sp_loc_center = glGetUniformLocation(d->sprite_shader, "u_center");
-    d->sp_loc_b1     = glGetUniformLocation(d->sprite_shader, "u_b1");
-    d->sp_loc_b2     = glGetUniformLocation(d->sprite_shader, "u_b2");
-    d->sp_loc_morph0 = glGetUniformLocation(d->sprite_shader, "u_morph0");
-    d->sp_loc_morph1 = glGetUniformLocation(d->sprite_shader, "u_morph1");
-    d->sp_loc_morph2 = glGetUniformLocation(d->sprite_shader, "u_morph2");
-    d->sp_loc_tide0  = glGetUniformLocation(d->sprite_shader, "u_tide0");
-    d->sp_loc_tide1  = glGetUniformLocation(d->sprite_shader, "u_tide1");
-
-    if (d->use_generic_sprite) {
-        d->sp_loc_r_inner    = glGetUniformLocation(d->sprite_shader, "u_r_inner_km");
-        d->sp_loc_r_outer    = glGetUniformLocation(d->sprite_shader, "u_r_outer_km");
-        d->sp_loc_ring_color = glGetUniformLocation(d->sprite_shader, "u_ring_color");
-        d->sp_loc_alpha_max  = glGetUniformLocation(d->sprite_shader, "u_alpha_max");
-    }
-
-    /* Sprite quad VBO: 6 vertices × 3 floats (one quad, two triangles) */
-    d->sprite_vao = gl_vao_create();
-    d->sprite_vbo = gl_vbo_create(6 * 3 * sizeof(float), NULL, GL_DYNAMIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3*sizeof(float), (void*)0);
-    glBindVertexArray(0);
 }
 
 /*
- * build_sprite_quad — construct a flat ring disc quad in world space.
+ * render_disc — render one ring disc with distance-thinned particles.
  *
- * The disc lies in the ring plane (spanned by b1, b2).  The quad extends
- * from (cx−R, cy−R) to (cx+R, cy+R) in ring-plane coordinates.  R is set
- * to the disc's outer sprite radius so the sprite covers the full ring extent.
- */
-static void build_sprite_quad(float *verts,
-                               float cx, float cy, float cz,
-                               float R,
-                               const float b1[3], const float b2[3])
-{
-    float c[4][3];
-    for (int i = 0; i < 4; i++) {
-        float sb1 = (i == 1 || i == 2) ?  R : -R;
-        float sb2 = (i == 2 || i == 3) ?  R : -R;
-        c[i][0] = cx + sb1*b1[0] + sb2*b2[0];
-        c[i][1] = cy + sb1*b1[1] + sb2*b2[1];
-        c[i][2] = cz + sb1*b1[2] + sb2*b2[2];
-    }
-    memcpy(verts+0,  c[0], 12);
-    memcpy(verts+3,  c[1], 12);
-    memcpy(verts+6,  c[2], 12);
-    memcpy(verts+9,  c[0], 12);
-    memcpy(verts+12, c[2], 12);
-    memcpy(verts+15, c[3], 12);
-}
-
-/*
- * render_disc — render one ring disc at the appropriate LOD.
- *
- * Camera-relative distance (computed in double → float) determines which path:
- *
- *   SPRITE path (dist > SPRITE_DIST):
- *     Build a flat quad in the ring plane and draw it with the sprite shader.
- *     This replaces thousands of individual particles with one textured disc
- *     that is indistinguishable at the viewing distance.
- *
- *   PARTICLE path (dist ≤ SPRITE_DIST):
- *     Upload updated mean anomaly data (M0 array) to the VBO via glBufferSubData.
- *     ring.vert solves Kepler's equation on the GPU and positions each particle.
- *     Full particle count within LOD_DIST; reduced count beyond that.
+ * The sprite path is intentionally gone: all visible rings are drawn through
+ * ring.vert so close and distant collision warps stay visually consistent.
+ * Past LOD_DIST we switch to the shuffled LOD buffer and draw a progressively
+ * smaller prefix.  Past RING_FADE_START, alpha fades to zero before the ring
+ * is skipped entirely.
  */
 static void render_disc(const ParticleDisc *d, const float vp[16])
 {
@@ -1482,123 +1450,101 @@ static void render_disc(const ParticleDisc *d, const float vp[16])
     float dy   = py - (float)g_cam.pos[1];
     float dz   = pz - (float)g_cam.pos[2];
     float dist = sqrtf(dx*dx + dy*dy + dz*dz);
+    float alpha = 1.0f;
+    int n;
+    float *data;
+    GLuint vao;
+    GLuint vbo;
 
-    if (dist > SPRITE_DIST) {
-        if (!d->sprite_shader) return;
+    if (!d->shader) return;
+    if (dist >= RING_FADE_END) return;
 
-        float quad[18];
-        build_sprite_quad(quad, px, py, pz, d->sprite_r, rb1, rb2);
-
-        glUseProgram(d->sprite_shader);
-        glUniformMatrix4fv(d->sp_loc_vp,     1, GL_FALSE, vp);
-        glUniform3f       (d->sp_loc_center,  px, py, pz);
-        glUniform3fv      (d->sp_loc_b1,    1, rb1);
-        glUniform3fv      (d->sp_loc_b2,    1, rb2);
-        glUniform4f       (d->sp_loc_morph0,
-                           1.0f,
-                           d->puff_cur,
-                           d->shock_amp,
-                           d->shock_phase);
-        glUniform4f       (d->sp_loc_morph1,
-                           d->shock_width,
-                           d->shock_spin,
-                           d->ring_r_inner_km,
-                           d->ring_r_outer_km);
-        glUniform4f       (d->sp_loc_morph2,
-                           d->contact_norm,
-                           d->contact_width,
-                           d->contact_strength,
-                           0.0f);
-        glUniform4f       (d->sp_loc_tide0,
-                           d->tide_phase,
-                           d->tide_radius_norm,
-                           d->tide_width,
-                           d->tide_strength);
-        glUniform4f       (d->sp_loc_tide1,
-                           d->tide_dir_u,
-                           d->tide_dir_v,
-                           d->tide_dir_n,
-                           0.0f);
-
-        if (d->use_generic_sprite) {
-            glUniform1f (d->sp_loc_r_inner,    d->sp_r_inner_km);
-            glUniform1f (d->sp_loc_r_outer,    d->sp_r_outer_km);
-            glUniform3fv(d->sp_loc_ring_color, 1, d->sp_color);
-            glUniform1f (d->sp_loc_alpha_max,  d->sp_alpha_max);
-        }
-
-        glBindVertexArray(d->sprite_vao);
-        glBindBuffer(GL_ARRAY_BUFFER, d->sprite_vbo);
-        glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(quad), quad);
-
-        glEnable(GL_DEPTH_TEST);
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
-        glDisable(GL_BLEND);
-        glBindVertexArray(0);
-
-    } else {
-        if (!d->shader) return;
-
-        /* Select full or LOD particle buffer by distance */
-        int    n   = (dist > LOD_DIST) ? d->n_lod    : d->n_full;
-        float *data= (dist > LOD_DIST) ? d->data_lod  : d->data_full;
-        GLuint vao = (dist > LOD_DIST) ? d->vao_lod   : d->vao_full;
-        GLuint vbo = (dist > LOD_DIST) ? d->vbo_lod   : d->vbo_full;
-
-        glUseProgram(d->shader);
-        glUniformMatrix4fv(d->loc_vp,     1, GL_FALSE, vp);
-        glUniform3f       (d->loc_center,  px, py, pz);
-        glUniform3fv      (d->loc_b1,    1, rb1);
-        glUniform3fv      (d->loc_b2,    1, rb2);
-        glUniform3fv      (d->loc_pole,  1, rpole);
-        glUniform4f       (d->loc_morph0,
-                           1.0f,
-                           d->puff_cur,
-                           d->shock_amp,
-                           d->shock_phase);
-        glUniform4f       (d->loc_morph1,
-                           d->shock_width,
-                           d->shock_spin,
-                           d->ring_r_inner_km / 1.496e8f,
-                           d->ring_r_outer_km / 1.496e8f);
-        glUniform4f       (d->loc_morph2,
-                           d->contact_norm,
-                           d->contact_width,
-                           d->contact_strength,
-                           0.0f);
-        glUniform4f       (d->loc_tide0,
-                           d->tide_phase,
-                           d->tide_radius_norm,
-                           d->tide_width,
-                           d->tide_strength);
-        glUniform4f       (d->loc_tide1,
-                           d->tide_dir_u,
-                           d->tide_dir_v,
-                           d->tide_dir_n,
-                           0.0f);
-        glUniform4f       (d->loc_body0,
-                           d->body_u_au,
-                           d->body_v_au,
-                           d->body_n_au,
-                           d->body_radius_au);
-        glUniform4f       (d->loc_body1,
-                           d->body_strength,
-                           (float)(collision_visual_radius(d->parent_idx, par->radius) * RS),
-                           0.0f,
-                           0.0f);
-
-        glBindVertexArray(vao);
-        glBindBuffer(GL_ARRAY_BUFFER, vbo);
-        /* Upload updated M0 values (and unchanged a,e,omega,h,rgb) each frame */
-        glBufferSubData(GL_ARRAY_BUFFER, 0, n * 8 * sizeof(float), data);
-
-        glEnable(GL_DEPTH_TEST);
-        glPointSize(1.0f);
-        glDrawArrays(GL_POINTS, 0, n);
-        glBindVertexArray(0);
+    if (dist > RING_FADE_START) {
+        alpha = inv_smootherstep01f((dist - RING_FADE_START) /
+                                    fmaxf(RING_FADE_END - RING_FADE_START, 1e-5f));
+        if (alpha <= 0.001f) return;
     }
+
+    if (dist <= LOD_DIST || d->n_lod <= 0) {
+        n = d->n_full;
+        data = d->data_full;
+        vao = d->vao_full;
+        vbo = d->vbo_full;
+    } else {
+        float lod_t = smootherstep01f((dist - LOD_DIST) /
+                                      fmaxf(LOD_FADE_END - LOD_DIST, 1e-5f));
+        float count_f = (float)d->n_full + ((float)d->n_lod - (float)d->n_full) * lod_t;
+        int min_visible = d->n_lod < 24 ? d->n_lod : 24;
+
+        n = (int)(count_f + 0.5f);
+        if (n < min_visible) n = min_visible;
+        if (n > d->n_full) n = d->n_full;
+        if (n > d->n_lod) {
+            data = d->data_full;
+            vao = d->vao_full;
+            vbo = d->vbo_full;
+        } else {
+            data = d->data_lod;
+            vao = d->vao_lod;
+            vbo = d->vbo_lod;
+        }
+    }
+    if (n <= 0 || !data || !vao || !vbo) return;
+
+    glUseProgram(d->shader);
+    glUniformMatrix4fv(d->loc_vp,     1, GL_FALSE, vp);
+    glUniform3f       (d->loc_center,  px, py, pz);
+    glUniform3fv      (d->loc_b1,    1, rb1);
+    glUniform3fv      (d->loc_b2,    1, rb2);
+    glUniform3fv      (d->loc_pole,  1, rpole);
+    glUniform4f       (d->loc_morph0,
+                       alpha,
+                       d->puff_cur,
+                       d->shock_amp,
+                       d->shock_phase);
+    glUniform4f       (d->loc_morph1,
+                       d->shock_width,
+                       d->shock_spin,
+                       d->ring_r_inner_km / 1.496e8f,
+                       d->ring_r_outer_km / 1.496e8f);
+    glUniform4f       (d->loc_morph2,
+                       d->contact_norm,
+                       d->contact_width,
+                       d->contact_strength,
+                       0.0f);
+    glUniform4f       (d->loc_tide0,
+                       d->tide_phase,
+                       d->tide_radius_norm,
+                       d->tide_width,
+                       d->tide_strength);
+    glUniform4f       (d->loc_tide1,
+                       d->tide_dir_u,
+                       d->tide_dir_v,
+                       d->tide_dir_n,
+                       0.0f);
+    glUniform4f       (d->loc_body0,
+                       d->body_u_au,
+                       d->body_v_au,
+                       d->body_n_au,
+                       d->body_radius_au);
+    glUniform4f       (d->loc_body1,
+                       d->body_strength,
+                       (float)(collision_visual_radius(d->parent_idx, par->radius) * RS),
+                       0.0f,
+                       0.0f);
+
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    /* Upload updated M0 values (and unchanged a,e,omega,h,rgb) each frame. */
+    glBufferSubData(GL_ARRAY_BUFFER, 0, n * 8 * sizeof(float), data);
+
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glPointSize(1.0f);
+    glDrawArrays(GL_POINTS, 0, n);
+    glDisable(GL_BLEND);
+    glBindVertexArray(0);
 }
 
 /* ── public API ─────────────────────────────────────────────────────────── */
@@ -1640,14 +1586,12 @@ void rings_init(const char *path)
     JsonNode *rnode = rings_arr->first_child;
     while (rnode) {
         const char *body_name   = json_str(json_get(rnode, "body"),        "");
-        const char *shader_type = json_str(json_get(rnode, "shader_type"), "generic");
         int    n_full      = (int)json_num(json_get(rnode, "n_full"),       1000);
         int    n_lod       = (int)json_num(json_get(rnode, "n_lod"),         200);
         uint32_t seed_full = (uint32_t)json_num(json_get(rnode, "seed_full"), 1234);
         uint32_t seed_lod  = (uint32_t)json_num(json_get(rnode, "seed_lod"),  5678);
         float  e_max       = (float)json_num(json_get(rnode, "e_max"),       0.01);
         float  h_scale     = (float)json_num(json_get(rnode, "h_scale"),     1e-6);
-        float  sprite_r    = (float)json_num(json_get(rnode, "sprite_r_au"), 0.001);
 
         int par_idx = -1;
         for (int i = 0; i < g_nbodies; i++) {
@@ -1682,8 +1626,6 @@ void rings_init(const char *path)
         disc->parent_idx         = par_idx;
         disc->n_full             = n_full;
         disc->n_lod              = n_lod;
-        disc->sprite_r           = sprite_r;
-        disc->use_generic_sprite = (strcmp(shader_type, "saturn") != 0);
         disc->base_h_scale       = h_scale;
         disc->ring_r_inner_km    = zones[0].r_min;
         disc->ring_r_outer_km    = zones[0].r_max;
@@ -1695,16 +1637,6 @@ void rings_init(const char *path)
         }
         disc->parent_radius_ref_km = (float)(g_bodies[par_idx].radius * 0.001);
         disc_reset_response(disc);
-
-        if (disc->use_generic_sprite) {
-            disc->sp_r_inner_km = (float)json_num(json_get(rnode, "sprite_r_inner_km"), 0.0);
-            disc->sp_r_outer_km = (float)json_num(json_get(rnode, "sprite_r_outer_km"), 1.0);
-            JsonNode *sc = json_get(rnode, "sprite_color");
-            disc->sp_color[0]   = (float)json_num(json_idx(sc, 0), 0.7);
-            disc->sp_color[1]   = (float)json_num(json_idx(sc, 1), 0.7);
-            disc->sp_color[2]   = (float)json_num(json_idx(sc, 2), 0.7);
-            disc->sp_alpha_max  = (float)json_num(json_get(rnode, "sprite_alpha_max"), 0.3);
-        }
 
         disc->data_full  = (float*)malloc(n_full * 8 * sizeof(float));
         disc->data_lod   = (float*)malloc(n_lod  * 8 * sizeof(float));
@@ -1722,10 +1654,12 @@ void rings_init(const char *path)
         s_seed(seed_full);
         bake_particles(disc->data_full, disc->n_arr_full, n_full,
                        zones, n_zones, gm, e_max, h_scale);
+        shuffle_particles(disc->data_full, disc->n_arr_full, n_full);
 
         s_seed(seed_lod);
         bake_particles(disc->data_lod, disc->n_arr_lod, n_lod,
                        zones, n_zones, gm, e_max, h_scale);
+        shuffle_particles(disc->data_lod, disc->n_arr_lod, n_lod);
 
         init_disc_gl(disc);
         disc->initialized = 1;
@@ -1957,9 +1891,6 @@ void rings_shutdown(void)
         if (disc->vbo_lod)       glDeleteBuffers(1,      &disc->vbo_lod);
         if (disc->vao_lod)       glDeleteVertexArrays(1, &disc->vao_lod);
         if (disc->shader)        glDeleteProgram(disc->shader);
-        if (disc->sprite_vbo)    glDeleteBuffers(1,      &disc->sprite_vbo);
-        if (disc->sprite_vao)    glDeleteVertexArrays(1, &disc->sprite_vao);
-        if (disc->sprite_shader) glDeleteProgram(disc->sprite_shader);
     }
     free(s_discs);
     s_discs   = NULL;

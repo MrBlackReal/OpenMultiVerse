@@ -6,9 +6,9 @@
  * treats them as a unit.
  *
  * LOD strategy (per disc, based on camera distance to parent body):
- *   dist > SPRITE_DIST AU  →  flat procedural sprite quad
- *   dist > LOD_DIST    AU  →  n_lod  Keplerian particles
- *   dist ≤ LOD_DIST    AU  →  n_full Keplerian particles
+ *   dist ≤ LOD_DIST AU       → full Keplerian particle count
+ *   dist > LOD_DIST AU       → smoothly reduced particle subset
+ *   dist > RING_FADE_START AU → reduced particles fade out
  *
  * Per-particle data layout in data_full / data_lod  (8 floats):
  *   [0] M      — mean anomaly (rad), advanced by rings_tick each physics step
@@ -50,7 +50,6 @@ typedef struct {
     float  motion_scale_start;  /* old/new mean-motion ratio during retune */
     float  motion_blend_age;
     float  motion_blend_duration;
-    float  sprite_r;      /* sprite quad half-extent (AU)                 */
 
     /* Particle shader (ring.vert + color.frag) */
     GLuint shader;
@@ -60,19 +59,6 @@ typedef struct {
     GLuint loc_body0, loc_body1;
     GLuint vao_full, vbo_full;
     GLuint vao_lod,  vbo_lod;
-
-    /* Sprite shader — Saturn uses ring_sprite.frag (hardcoded zones);
-     * other planets use ring_sprite_generic.frag (uniform-driven).     */
-    GLuint sprite_shader;
-    GLuint sp_loc_vp, sp_loc_center, sp_loc_b1, sp_loc_b2;
-    GLuint sp_loc_morph0, sp_loc_morph1, sp_loc_morph2;
-    GLuint sp_loc_tide0, sp_loc_tide1;
-    int    use_generic_sprite;
-    /* Generic sprite extra uniforms */
-    GLuint sp_loc_r_inner, sp_loc_r_outer, sp_loc_ring_color, sp_loc_alpha_max;
-    float  sp_r_inner_km, sp_r_outer_km;
-    float  sp_color[3];
-    float  sp_alpha_max;
 
     float  hit_cooldown[RING_COLLISION_SEGMENTS * RING_COLLISION_RADIAL_BINS];
     float  puff_cur;
@@ -97,7 +83,6 @@ typedef struct {
     float  body_radius_au;
     float  body_strength;
 
-    GLuint sprite_vao, sprite_vbo;
     int    initialized;
 } ParticleDisc;
 

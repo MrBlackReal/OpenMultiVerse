@@ -25,7 +25,7 @@ uniform vec3 u_center;   /* Saturn world pos (AU) */
 uniform vec3 u_b1;       /* ring-plane basis 1 */
 uniform vec3 u_b2;       /* ring-plane basis 2 */
 uniform vec3 u_pole;     /* ring-plane normal (Saturn pole) */
-uniform vec4 u_morph0;   /* unused, puff, shock_amp, shock_phase */
+uniform vec4 u_morph0;   /* alpha, puff, shock_amp, shock_phase */
 uniform vec4 u_morph1;   /* shock_width, shock_spin, inner_au, outer_au */
 uniform vec4 u_morph2;   /* contact_norm, contact_width, contact_strength, unused */
 uniform vec4 u_tide0;    /* phase, radius_norm, width, strength */
@@ -141,6 +141,6 @@ void main() {
         return;
     }
 
-    v_color     = vec4(a_color, 1.0);
+    v_color     = vec4(a_color, clamp(u_morph0.x, 0.0, 1.0));
     gl_Position = u_vp * vec4(pos, 1.0);
 }
