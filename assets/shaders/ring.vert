@@ -34,7 +34,7 @@ uniform vec4 u_tide1;    /* local direction to perturber: b1,b2,pole */
 uniform vec4 u_body0;    /* perturber local center xyz (AU), visual radius (AU) */
 uniform vec4 u_body1;    /* perturber visibility strength, parent visual radius (AU), unused */
 uniform vec4 u_light0;   /* sun direction from parent xyz, ambient light */
-uniform float u_shadow_strength;
+uniform float u_shadow_strength; /* 0 = skip planet shadow, 1 = full shadow */
 
 out vec4 v_color;
 

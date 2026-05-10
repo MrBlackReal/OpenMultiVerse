@@ -75,8 +75,8 @@
 #define LOD_FADE_END  0.24f   /* AU: reduced particle count reached here */
 #define RING_FADE_START 0.34f /* AU: distant particles start fading out */
 #define RING_FADE_END   0.62f /* AU: rings are fully hidden past this */
-#define RING_SHADOW_FULL_DIST 0.08f
-#define RING_SHADOW_FADE_END  0.18f
+#define RING_SHADOW_FULL_DIST 0.08f /* AU: full planet shadow detail up to this range */
+#define RING_SHADOW_FADE_END  0.18f /* AU: planet shadow skipped past this range */
 #define MAX_ZONES     16      /* maximum annulus zones per ring descriptor */
 #define RING_COLLISION_SEGMENTS 32
 #define RING_COLLISION_RADIAL_BINS 4
@@ -146,11 +146,11 @@ typedef struct {
     float  motion_blend_duration;
 
     GLuint shader;
-    GLuint loc_vp, loc_center, loc_b1, loc_b2, loc_pole;
-    GLuint loc_morph0, loc_morph1, loc_morph2;
-    GLuint loc_tide0, loc_tide1;
-    GLuint loc_body0, loc_body1;
-    GLuint loc_light0, loc_shadow_strength;
+    GLint  loc_vp, loc_center, loc_b1, loc_b2, loc_pole;
+    GLint  loc_morph0, loc_morph1, loc_morph2;
+    GLint  loc_tide0, loc_tide1;
+    GLint  loc_body0, loc_body1;
+    GLint  loc_light0, loc_shadow_strength;
     GLuint vao_full, vbo_full;
     GLuint vao_lod,  vbo_lod;
 
