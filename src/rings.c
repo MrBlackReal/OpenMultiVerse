@@ -148,6 +148,7 @@ typedef struct {
     GLuint loc_morph0, loc_morph1, loc_morph2;
     GLuint loc_tide0, loc_tide1;
     GLuint loc_body0, loc_body1;
+    GLuint loc_light0;
     GLuint vao_full, vbo_full;
     GLuint vao_lod,  vbo_lod;
 
@@ -1518,6 +1519,7 @@ static void init_disc_gl(ParticleDisc *d)
     d->loc_tide1  = glGetUniformLocation(d->shader, "u_tide1");
     d->loc_body0  = glGetUniformLocation(d->shader, "u_body0");
     d->loc_body1  = glGetUniformLocation(d->shader, "u_body1");
+    d->loc_light0 = glGetUniformLocation(d->shader, "u_light0");
 
     /* Full-count VAO/VBO */
     d->vao_full = gl_vao_create();
@@ -1583,6 +1585,8 @@ static void render_disc(const ParticleDisc *d, const float vp_camrel[16])
     float *data;
     GLuint vao;
     GLuint vbo;
+    float sun_x = 0.0f, sun_y = 0.0f, sun_z = 0.0f;
+    float ring_ambient = 0.35f;
 
     if (!d->shader) return;
     if (dist >= RING_FADE_END) return;
@@ -1618,6 +1622,26 @@ static void render_disc(const ParticleDisc *d, const float vp_camrel[16])
         }
     }
     if (n <= 0 || !data || !vao || !vbo) return;
+
+    {
+        int star_idx = body_root_star(d->parent_idx);
+        if (star_idx >= 0 && star_idx < g_nbodies &&
+            g_bodies[star_idx].alive && g_bodies[star_idx].is_star) {
+            double sx = g_bodies[star_idx].pos[0] - par->pos[0];
+            double sy = g_bodies[star_idx].pos[1] - par->pos[1];
+            double sz = g_bodies[star_idx].pos[2] - par->pos[2];
+            double sl = sqrt(sx*sx + sy*sy + sz*sz);
+            if (sl > 1.0) {
+                sun_x = (float)(sx / sl);
+                sun_y = (float)(sy / sl);
+                sun_z = (float)(sz / sl);
+            } else {
+                ring_ambient = 1.0f;
+            }
+        } else {
+            ring_ambient = 1.0f;
+        }
+    }
 
     glUseProgram(d->shader);
     glUniformMatrix4fv(d->loc_vp,     1, GL_FALSE, vp_camrel);
@@ -1660,6 +1684,11 @@ static void render_disc(const ParticleDisc *d, const float vp_camrel[16])
                        (float)(collision_visual_radius(d->parent_idx, par->radius) * RS),
                        0.0f,
                        0.0f);
+    glUniform4f       (d->loc_light0,
+                       sun_x,
+                       sun_y,
+                       sun_z,
+                       ring_ambient);
 
     glBindVertexArray(vao);
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
