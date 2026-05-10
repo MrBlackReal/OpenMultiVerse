@@ -657,7 +657,7 @@ static void add_parent_velocity(BodyCreateSpec *spec, int parent)
  */
 int build_place_current(void)
 {
-    if (!g_build_mode || g_nbodies >= MAX_BODIES) return -1;
+    if (!g_build_mode || !universe_can_add_body()) return -1;
 
     const BuildPreset *p = build_current_preset();
     if (!p) return -1;

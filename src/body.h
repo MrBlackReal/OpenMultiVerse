@@ -54,9 +54,13 @@ typedef struct {
 } Body;
 
 /* g_bodies is a heap-allocated array that grows via realloc.
+ * g_nbodies is the high-water slot count, not the number of alive bodies.
+ * Absorbed slots stay addressable for stable indices and may be reused by
+ * universe_add_body() once their Body.alive flag is clear.
  * g_bodies_cap is the current allocated capacity.
- * MAX_BODIES (common.h) is used only as the initial allocation size
- * and as the compile-time bound for per-frame stack arrays in render/labels. */
+ * MAX_BODIES (common.h) is also the compile-time bound for per-frame arrays
+ * in render/labels/physics/collision, so runtime-added body indices stay
+ * below that value. */
 extern Body *g_bodies;
 extern int   g_nbodies;
 extern int   g_bodies_cap;

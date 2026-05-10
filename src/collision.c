@@ -171,6 +171,35 @@ void collision_snapshot_positions(void)
 
 void collision_on_body_added(int body_idx)
 {
+    if (body_idx >= 0 && body_idx < MAX_BODIES) {
+        memset(&s_radius_fx[body_idx], 0, sizeof(s_radius_fx[body_idx]));
+        for (int i = 0; i < MAX_BODIES; i++) {
+            s_pair_next[body_idx][i] = 0.0;
+            s_pair_next[i][body_idx] = 0.0;
+        }
+        s_system_dirty[body_idx] = 0;
+        s_system_hot[body_idx] = 0.0;
+        if (body_idx < g_nbodies) {
+            s_pos_before[body_idx][0] = g_bodies[body_idx].pos[0];
+            s_pos_before[body_idx][1] = g_bodies[body_idx].pos[1];
+            s_pos_before[body_idx][2] = g_bodies[body_idx].pos[2];
+            s_vel_before[body_idx][0] = g_bodies[body_idx].vel[0];
+            s_vel_before[body_idx][1] = g_bodies[body_idx].vel[1];
+            s_vel_before[body_idx][2] = g_bodies[body_idx].vel[2];
+        }
+    }
+
+    for (int i = 0; i < MAX_IMPACTS; i++) {
+        if (s_impacts[i].body == body_idx) s_impacts[i].active = 0;
+    }
+    for (int i = 0; i < MAX_PERSISTENT_SCARS; i++) {
+        if (s_perm_scars[i].body == body_idx) s_perm_scars[i].active = 0;
+    }
+    for (int i = 0; i < MAX_MERGES; i++) {
+        if (s_merges[i].target == body_idx || s_merges[i].impactor == body_idx)
+            s_merges[i].active = 0;
+    }
+
     int root = body_root_star(body_idx);
     if (root >= 0) mark_system_dirty(root, SYSTEM_HOT_DURATION);
 }

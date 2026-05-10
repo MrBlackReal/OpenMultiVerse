@@ -36,6 +36,12 @@ void universe_load(const char *path);
 /* Add a fully specified runtime body. Returns the new body index, or -1. */
 int universe_add_body(const BodyCreateSpec *spec);
 
+/* Number of currently alive bodies, excluding absorbed/reused slots. */
+int universe_live_body_count(void);
+
+/* True while another runtime body can be placed without exceeding MAX_BODIES. */
+int universe_can_add_body(void);
+
 /* Reassign planets/dwarf bodies to the nearest star after sandbox edits. */
 void universe_rebind_to_nearest_stars(void);
 

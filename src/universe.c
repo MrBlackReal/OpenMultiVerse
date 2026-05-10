@@ -95,8 +95,14 @@ static void ensure_capacity(int needed)
  */
 static void alloc_trail(Body *bo)
 {
-    bo->trail = (double(*)[3])calloc(TRAIL_LEN, 3 * sizeof(double));
-    bo->trail_seg_len = (double*)calloc(TRAIL_LEN, sizeof(double));
+    if (bo->trail)
+        memset(bo->trail, 0, TRAIL_LEN * 3 * sizeof(double));
+    else
+        bo->trail = (double(*)[3])calloc(TRAIL_LEN, 3 * sizeof(double));
+    if (bo->trail_seg_len)
+        memset(bo->trail_seg_len, 0, TRAIL_LEN * sizeof(double));
+    else
+        bo->trail_seg_len = (double*)calloc(TRAIL_LEN, sizeof(double));
     if (!bo->trail || !bo->trail_seg_len) {
         fprintf(stderr, "[universe] trail alloc failed\n");
         exit(1);
@@ -138,6 +144,29 @@ static int find_body_index(const char *name, int n)
     int i;
     for (i = 0; i < n; i++)
         if (strcmp(g_bodies[i].name, name) == 0) return i;
+    return -1;
+}
+
+int universe_live_body_count(void)
+{
+    int n = 0;
+    for (int i = 0; i < g_nbodies; i++) {
+        if (g_bodies[i].alive) n++;
+    }
+    return n;
+}
+
+int universe_can_add_body(void)
+{
+    return universe_live_body_count() < MAX_BODIES;
+}
+
+static int find_reusable_body_slot(void)
+{
+    int n = g_nbodies < MAX_BODIES ? g_nbodies : MAX_BODIES;
+    for (int i = 0; i < n; i++) {
+        if (!g_bodies[i].alive) return i;
+    }
     return -1;
 }
 
@@ -495,17 +524,40 @@ void universe_load(const char *path)
  */
 int universe_add_body(const BodyCreateSpec *spec)
 {
+    int idx, reused_slot;
+    double (*old_trail)[3] = NULL;
+    double *old_trail_seg_len = NULL;
+    Body *bo;
+
     if (!spec) return -1;
-    if (g_nbodies >= MAX_BODIES) {
-        fprintf(stderr, "[universe] cannot add body '%s': MAX_BODIES reached\n",
+    if (!universe_can_add_body()) {
+        fprintf(stderr, "[universe] cannot add body '%s': live MAX_BODIES reached\n",
                 spec->name ? spec->name : "unknown");
         return -1;
     }
 
-    ensure_capacity(g_nbodies + 1);
-    int idx = g_nbodies++;
-    Body *bo = &g_bodies[idx];
+    idx = find_reusable_body_slot();
+    reused_slot = (idx >= 0);
+    if (!reused_slot) {
+        if (g_nbodies >= MAX_BODIES) {
+            fprintf(stderr, "[universe] cannot add body '%s': no reusable body slots\n",
+                    spec->name ? spec->name : "unknown");
+            return -1;
+        }
+        ensure_capacity(g_nbodies + 1);
+        idx = g_nbodies++;
+    }
+
+    bo = &g_bodies[idx];
+    if (reused_slot) {
+        old_trail = bo->trail;
+        old_trail_seg_len = bo->trail_seg_len;
+    }
     body_defaults(bo);
+    if (reused_slot) {
+        bo->trail = old_trail;
+        bo->trail_seg_len = old_trail_seg_len;
+    }
 
     strncpy(bo->name, spec->name ? spec->name : "Body", 31);
     bo->name[31] = '\0';
