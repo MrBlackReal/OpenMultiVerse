@@ -87,9 +87,12 @@ void main() {
      * proportional radius multiplier makes the whole annulus look like it
      * briefly rescales when a planet first touches it.
      */
-    float radial_offset = ring_width * (radial_wave * (r_norm - 0.45) * 0.045
-                                      + contact_push * 0.032);
-    float ring_radius = clamp(r + radial_offset, u_morph1.z, u_morph1.w);
+    float edge_falloff = smoothstep(0.00, 0.12, r_norm)
+                       * smoothstep(1.00, 0.88, r_norm);
+    float radial_offset = ring_width * edge_falloff
+                        * (radial_wave * (r_norm - 0.45) * 0.045
+                         + contact_push * 0.032);
+    float ring_radius = r + radial_offset;
     vec3 ring_dir = c * u_b1 + s * u_b2;
     vec3 height_offset = (a_height * (1.0 + height_wave) + height_wave * 0.00002 * shock) * u_pole;
     vec3 local_orbit = ring_radius * ring_dir + height_offset;

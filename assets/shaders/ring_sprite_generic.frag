@@ -53,9 +53,12 @@ void main() {
     float split_dir = split_t * 2.0 - 1.0;
     float split_fade = 1.0 - smoothstep(0.42, 0.78, u_morph2.y);
     float ring_width_km = max(u_morph1.w - u_morph1.z, 1.0);
-    float r_offset_km = ring_width_km * (u_morph0.z * shock * (ring_norm - 0.45) * 0.032
-                                       + contact * split_dir * split_fade * 0.024
-                                       + tide * 0.030);
+    float edge_falloff = smoothstep(0.00, 0.12, ring_norm)
+                       * smoothstep(1.00, 0.88, ring_norm);
+    float r_offset_km = ring_width_km * edge_falloff
+                      * (u_morph0.z * shock * (ring_norm - 0.45) * 0.032
+                       + contact * split_dir * split_fade * 0.024
+                       + tide * 0.030);
     float r_eff_km = r_km - r_offset_km;
 
     if (r_eff_km < u_r_inner_km || r_eff_km > u_r_outer_km) discard;
