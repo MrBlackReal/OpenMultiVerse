@@ -1683,7 +1683,7 @@ void render_frame(const float view[16], const float proj[16],
     }
 
     /* ------------------------------------------------------------------ 4. Rings + Asteroid belts */
-    rings_render(vp);
+    rings_render(vp_camrel);
     asteroids_render(vp_camrel);
 
     /* ------------------------------------------------------------------ 5. Trails */

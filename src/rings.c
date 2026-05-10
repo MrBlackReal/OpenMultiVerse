@@ -1544,13 +1544,14 @@ static void init_disc_gl(ParticleDisc *d)
  * smaller prefix.  Past RING_FADE_START, alpha fades to zero before the ring
  * is skipped entirely.
  */
-static void render_disc(const ParticleDisc *d, const float vp[16])
+static void render_disc(const ParticleDisc *d, const float vp_camrel[16])
 {
     Body *par = &g_bodies[d->parent_idx];
     float rb1[3], rb2[3], rpole[3];
     float blend = 1.0f;
     float ox = 0.0f, oy = 0.0f, oz = 0.0f;
     float px, py, pz;
+    double cx, cy, cz;
     rb1[0] = d->b1[0]; rb1[1] = d->b1[1]; rb1[2] = d->b1[2];
     rb2[0] = d->b2[0]; rb2[1] = d->b2[1]; rb2[2] = d->b2[2];
     rpole[0] = d->pole[0]; rpole[1] = d->pole[1]; rpole[2] = d->pole[2];
@@ -1566,13 +1567,16 @@ static void render_disc(const ParticleDisc *d, const float vp[16])
         normalize3f_local(rb2);
         normalize3f_local(rpole);
     }
-    px = (float)(par->pos[0] * RS) + ox;
-    py = (float)(par->pos[1] * RS) + oy;
-    pz = (float)(par->pos[2] * RS) + oz;
-    /* Camera-relative distance in double → float to avoid float32 cancellation */
-    float dx   = px - (float)g_cam.pos[0];
-    float dy   = py - (float)g_cam.pos[1];
-    float dz   = pz - (float)g_cam.pos[2];
+    cx = par->pos[0] * RS + (double)ox;
+    cy = par->pos[1] * RS + (double)oy;
+    cz = par->pos[2] * RS + (double)oz;
+    /* Camera-relative centre in double -> float to avoid float32 cancellation. */
+    px = (float)(cx - g_cam.pos[0]);
+    py = (float)(cy - g_cam.pos[1]);
+    pz = (float)(cz - g_cam.pos[2]);
+    float dx   = px;
+    float dy   = py;
+    float dz   = pz;
     float dist = sqrtf(dx*dx + dy*dy + dz*dz);
     float alpha = 1.0f;
     int n;
@@ -1616,7 +1620,7 @@ static void render_disc(const ParticleDisc *d, const float vp[16])
     if (n <= 0 || !data || !vao || !vbo) return;
 
     glUseProgram(d->shader);
-    glUniformMatrix4fv(d->loc_vp,     1, GL_FALSE, vp);
+    glUniformMatrix4fv(d->loc_vp,     1, GL_FALSE, vp_camrel);
     glUniform3f       (d->loc_center,  px, py, pz);
     glUniform3fv      (d->loc_b1,    1, rb1);
     glUniform3fv      (d->loc_b2,    1, rb2);
@@ -1878,14 +1882,14 @@ void rings_tick(double dt)
 }
 
 /* rings_render — draw all initialized, alive ring discs at current LOD. */
-void rings_render(const float vp[16])
+void rings_render(const float vp_camrel[16])
 {
     for (int d = 0; d < s_n_discs; d++) {
         if (s_discs[d].initialized &&
             s_discs[d].parent_idx >= 0 &&
             s_discs[d].parent_idx < g_nbodies &&
             g_bodies[s_discs[d].parent_idx].alive)
-            render_disc(&s_discs[d], vp);
+            render_disc(&s_discs[d], vp_camrel);
     }
 }
 

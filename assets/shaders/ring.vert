@@ -21,7 +21,7 @@ layout(location = 4) in float a_height; /* vertical offset (AU)            */
 layout(location = 5) in vec3  a_color;
 
 uniform mat4 u_vp;
-uniform vec3 u_center;   /* Saturn world pos (AU) */
+uniform vec3 u_center;   /* camera-relative ring centre (AU) */
 uniform vec3 u_b1;       /* ring-plane basis 1 */
 uniform vec3 u_b2;       /* ring-plane basis 2 */
 uniform vec3 u_pole;     /* ring-plane normal (Saturn pole) */
