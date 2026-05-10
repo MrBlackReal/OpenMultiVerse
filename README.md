@@ -111,13 +111,14 @@ Space is incomprehensibly large. Most simulations either abstract that away or c
 | Feature | Status |
 |---|---|
 | N-body gravity — RESPA hierarchical integrator, adaptive per-system timestep | ✓ |
-| Full solar system — Sun, 8 planets, dwarf planets, and major moons | ✓ |
+| Full solar system — Sun, 8 planets, dwarf planets, large asteroids, and major moons | ✓ |
 | Ring systems — Saturn (Keplerian particles), Uranus & Neptune rings | ✓ |
 | Asteroid belts — Main Belt & Kuiper Belt with gravity-integrated particles | ✓ |
 | Planet collision & merge — animation, particle spray, persistent craters, spin transfer | ✓ |
 | Build mode — spawn and place bodies at runtime | ✓ |
 | Atmospheric glow — Venus, Earth, Mars, gas giants, Titan | ✓ |
 | Looping background soundtrack | ✓ |
+| Catalog-backed skybox — Yale Bright Star Catalog J2000 stars | ✓ |
 | Procedural planet textures, axial tilt & rotation | ✓ |
 | Logarithmic depth buffer — cm to light-years in a single scene | ✓ |
 | Multiple star systems & nearby exoplanet systems | ✓ |

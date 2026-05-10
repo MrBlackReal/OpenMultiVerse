@@ -1,5 +1,5 @@
 /*
- * starfield.h — procedural starfield rendered as a skybox (rotation only)
+ * starfield.h — catalog-backed starfield rendered as a skybox (rotation only)
  */
 #pragma once
 #include "common.h"

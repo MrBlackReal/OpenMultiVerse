@@ -45,7 +45,7 @@ extern int g_win_h;
 #define MAX_BODIES         128
 #define TRAIL_LEN          16384   /* trail circular buffer size (per body, all bodies) */
 #define TRAIL_MASK         (TRAIL_LEN - 1)  /* for fast power-of-2 modulo */
-#define NUM_STARS          4000
+#define NUM_STARS          4000    /* procedural fallback skybox count */
 
 /* Trail sampling: fixed global spatial resolution. */
 #define TRAIL_MIN_SEGMENT_LEN       2.0e4        /* m */

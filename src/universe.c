@@ -14,7 +14,8 @@
  *                                  Optional "velocity_km_s" sets bulk proper-motion
  *                                  velocity for the whole system (applied last).
  *
- *   "planet" / "dwarf_planet"    — Keplerian orbit around "parent" star.
+ *   "planet" / "dwarf_planet" /
+ *   "asteroid"                   — Keplerian orbit around "parent" star.
  *                                  "parent" must name a star already loaded in Pass 1.
  *
  *   "moon"                       — parent-relative orbit around "parent" planet/moon
@@ -23,7 +24,7 @@
  * Three-pass load order (why passes matter):
  *   Pass 1 — stars first, so absolute world positions exist before any body tries
  *             to reference a star as its parent.
- *   Pass 2 — planets/dwarf_planets: find_body_index() can locate the parent star
+ *   Pass 2 — planets/dwarf_planets/asteroids: find_body_index() can locate the parent star
  *             because all stars are already in g_bodies[].
  *   Pass 3 — moons: parent planets are fully positioned so moon_to_state() receives
  *             the correct world-space parent GM and can add the parent offset.
@@ -301,7 +302,7 @@ void universe_load(const char *path)
     }
 
     /* ================================================================
-     * Pass 2 — Planets and dwarf_planets
+     * Pass 2 — Planets, dwarf_planets, and asteroids
      *
      * keplerian_to_state() returns a heliocentric position/velocity in SI
      * units (metres, m/s) relative to the parent star.  The star's world
@@ -315,13 +316,15 @@ void universe_load(const char *path)
      * ensure_capacity uses an integer index (par_idx) that survives realloc,
      * taking a pointer to g_bodies[par_idx] before realloc would be UB.
      * ================================================================ */
-    fprintf(stdout, "[Boot] Universe pass 2/3: planets and dwarf planets\n");
+    fprintf(stdout, "[Boot] Universe pass 2/3: planets, dwarf planets, and asteroids\n");
     fflush(stdout);
     {
         JsonNode *bn;
         for (bn = bodies_arr->first_child; bn; bn = bn->next) {
             const char *type = json_str(json_get(bn, "type"), "");
-            if (strcmp(type, "planet") != 0 && strcmp(type, "dwarf_planet") != 0)
+            if (strcmp(type, "planet") != 0 &&
+                strcmp(type, "dwarf_planet") != 0 &&
+                strcmp(type, "asteroid") != 0)
                 continue;
 
             const char *name     = json_str(json_get(bn, "name"),      "unknown");
@@ -333,7 +336,7 @@ void universe_load(const char *path)
 
             int par_idx = find_body_index(par_name, g_nbodies);
             if (par_idx < 0) {
-                fprintf(stderr, "[universe] planet '%s': parent '%s' not found\n",
+                fprintf(stderr, "[universe] orbiting body '%s': parent '%s' not found\n",
                         name, par_name);
                 json_free(root); exit(1);
             }

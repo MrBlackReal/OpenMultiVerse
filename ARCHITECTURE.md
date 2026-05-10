@@ -402,7 +402,7 @@ Parses `assets/universe.json` and populates `g_bodies`. Also provides the runtim
 
 | Function | Purpose |
 |---|---|
-| `universe_load(path)` | Parse JSON, create all bodies in 3 passes: 1) stars, 2) planets/dwarf planets, 3) moons. Applies centre-of-mass velocity correction per star system. |
+| `universe_load(path)` | Parse JSON, create all bodies in 3 passes: 1) stars, 2) planets/dwarf planets/asteroids, 3) moons. Applies centre-of-mass velocity correction per star system. |
 | `universe_add_body(spec)` | Add a single body at runtime (build mode, collision merge). Returns new body index. Allocates trail buffer. |
 | `universe_rebind_to_nearest_stars()` | Reassign orphaned planets to the nearest star (used after a star is added via build mode). |
 | `universe_shutdown()` | Free all trail buffers and `g_bodies`. |
@@ -498,29 +498,32 @@ The Sun always renders at highest priority. Non-star labels are hidden past `MAX
 
 ### `starfield.c` / `starfield.h` — Background Stars
 
-**Location:** `src/starfield.c` (~105 lines), `src/starfield.h` (~12 lines)
+**Location:** `src/starfield.c`, `src/starfield.h`, `assets/bright_star_catalog.csv`
 
-4000 procedurally generated background stars distributed on the unit sphere.
+Catalog-backed skybox using the Yale Bright Star Catalog v5/BSC5 subset in
+`assets/bright_star_catalog.csv`. The asset stores J2000.0 equatorial RA/Dec,
+visual magnitude, and approximate color temperature for stars with `V <= 6.70`.
+At startup, the loader rotates RA/Dec into the simulation's ecliptic GL frame
+and uses magnitude tiers for point size. If the catalog asset is missing, the
+old deterministic 4000-star procedural generator is used as a fallback.
 
-**Spectral type color distribution:**
-| Type | Fraction | Color |
-|---|---|---|
-| O/B | 3% | Blue-white |
-| A | 10% | White |
-| F | 17% | Yellow-white |
-| G | 25% | Yellow |
-| K | 23% | Orange |
-| M | 22% | Red |
+**Catalog fields:**
+| Field | Purpose |
+|---|---|
+| `ra_deg` / `dec_deg` | J2000.0 equatorial sky position |
+| `visual_magnitude` | Apparent brightness; drives display brightness and LOD tier |
+| `color_temperature_k` | Approximate stellar color temperature converted to RGB |
 
 **Functions:**
 
 | Function | Purpose |
 |---|---|
-| `starfield_init()` | Generate 4000 stars with realistic spectral colors (constant seed for reproducibility) |
+| `starfield_init()` | Load BSC5 catalog stars, or generate fallback stars if the asset is unavailable |
 | `starfield_render(view_rot, proj)` | Draw as `GL_POINTS` using rotation-only VP matrix (stars stay fixed) |
 | `starfield_shutdown()` | Cleanup |
 
-Two LOD tiers: 1px points (most stars) and 2px points (last quarter of buffer).
+Three magnitude tiers: faint stars render as 1px points, mid-brightness stars as
+2px points, and the brightest stars as 3px points.
 
 ---
 
@@ -758,7 +761,7 @@ Included by almost every file. Defines all physical and rendering constants:
 | `GRAV_EPSILON` | 1e-14 m/s² | Minimum gravity threshold |
 | `MAX_BODIES` | 128 | Maximum body array capacity |
 | `TRAIL_LEN` | 4096 | Trail samples per body |
-| `NUM_STARS` | 4000 | Background star count |
+| `NUM_STARS` | 4000 | Procedural fallback star count |
 | `RS` | 1/AU | Metres → GL unit scale factor |
 | `SYS_TRAIL_FADE_START/END` | AU | Trail LOD fade range |
 | `SYS_DOT_FADE_START/END` | AU | Asteroid LOD fade range |
@@ -1093,7 +1096,7 @@ camera.c     → camera.h                 (minimal, mostly state)
 ## 11. Adding New Features — Where to Edit
 
 ### Add a new planet or moon
-→ Edit `assets/universe.json`. Add a JSON object under `"bodies"` with `"type": "planet"` or `"type": "moon"`, a `"parent"` name, and either `"keplerian"` (planet) or `"moon_keplerian"` (moon) elements. No code changes required.
+→ Edit `assets/universe.json`. Add a JSON object under `"bodies"` with `"type": "planet"`, `"dwarf_planet"`, `"asteroid"`, or `"moon"`, a `"parent"` name, and either `"keplerian"` (star-orbiting body) or `"moon_keplerian"` (moon) elements. No code changes required.
 
 ### Add a planet surface appearance
 → Edit `assets/shaders/phong.frag`. Add a new `case` in the `u_planet_type` switch. Increment the type counter and assign the new index when constructing the body in `render.c` (search for `u_planet_type` uniform upload).

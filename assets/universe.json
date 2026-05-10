@@ -48,7 +48,7 @@
       "radius_km": 6051.8,
       "color": [0.95, 0.78, 0.35],
       "obliquity_deg": 177.4,
-      "rotation_period_days": 243.025,
+      "rotation_period_days": -243.025,
       "keplerian": {
         "a": 0.72333566,
         "e": 0.00677672,
@@ -117,7 +117,7 @@
       "type": "planet",
       "parent": "Sun",
       "mass": 1.898e27,
-      "radius_km": 71492.0,
+      "radius_km": 69911.0,
       "color": [0.82, 0.65, 0.45],
       "obliquity_deg": 3.13,
       "rotation_period_days": 0.41354,
@@ -141,7 +141,7 @@
       "type": "planet",
       "parent": "Sun",
       "mass": 5.683e26,
-      "radius_km": 60268.0,
+      "radius_km": 58232.0,
       "color": [1.00, 0.90, 0.60],
       "obliquity_deg": 26.73,
       "rotation_period_days": 0.44401,
@@ -165,10 +165,10 @@
       "type": "planet",
       "parent": "Sun",
       "mass": 8.681e25,
-      "radius_km": 25559.0,
+      "radius_km": 25362.0,
       "color": [0.55, 0.82, 0.96],
       "obliquity_deg": 97.77,
-      "rotation_period_days": 0.71833,
+      "rotation_period_days": -0.71833,
       "keplerian": {
         "a": 19.18916464,
         "e": 0.04725744,
@@ -189,7 +189,7 @@
       "type": "planet",
       "parent": "Sun",
       "mass": 1.024e26,
-      "radius_km": 24764.0,
+      "radius_km": 24622.0,
       "color": [0.25, 0.38, 0.95],
       "obliquity_deg": 28.32,
       "rotation_period_days": 0.67125,
@@ -209,7 +209,7 @@
     },
 
     // ----------------------------------------------------------------
-    // Dwarf planets — Solar System
+    // Dwarf planets and large asteroids — Solar System
     // ----------------------------------------------------------------
     {
       "name": "Ceres",
@@ -230,7 +230,7 @@
 
     {
       "name": "Pallas",
-      "type": "dwarf_planet",
+      "type": "asteroid",
       "parent": "Sun",
       "mass": 2.06e20,
       "radius_km": 256.5,
@@ -247,7 +247,7 @@
 
     {
       "name": "Vesta",
-      "type": "dwarf_planet",
+      "type": "asteroid",
       "parent": "Sun",
       "mass": 2.59076e20,
       "radius_km": 262.7,
@@ -264,7 +264,7 @@
 
     {
       "name": "Hygiea",
-      "type": "dwarf_planet",
+      "type": "asteroid",
       "parent": "Sun",
       "mass": 8.67e19,
       "radius_km": 203.6,
@@ -281,7 +281,7 @@
 
     {
       "name": "Interamnia",
-      "type": "dwarf_planet",
+      "type": "asteroid",
       "parent": "Sun",
       "mass": 7.493e19,
       "radius_km": 153.2,
@@ -713,14 +713,14 @@
     },
 
     // ================================================================
-    // Alpha Centauri A — 4.244 ly
+    // Alpha Centauri A — 4.37 ly
     // G2V; primary of the Alpha Centauri AB binary.
     // Proper motion: radial ~-22 km/s (approaching), transverse ~+4 km/s.
     // ================================================================
     {
       "name": "Alpha Cen A",
       "type": "star",
-      "pos_ly": [4.020506, -0.919840, -1.336536],
+      "pos_ly": [4.049513, -0.926515, -1.346234],
       "mass": 2.188e30,
       "radius_km": 855300.0,
       "color": [1.0, 0.88, 0.55],
@@ -737,7 +737,7 @@
     {
       "name": "Proxima Centauri",
       "type": "star",
-      "pos_ly": [3.818, -0.876, -1.271],
+      "pos_ly": [3.983267, -0.911320, -1.153947],
       "mass": 2.446e29,
       "radius_km": 107300.0,
       "color": [1.0, 0.38, 0.12],
@@ -792,7 +792,7 @@
     {
       "name": "Alpha Cen B",
       "type": "star",
-      "pos_ly": [4.020852, -0.919917, -1.336647],
+      "pos_ly": [4.049884, -0.926515, -1.346234],
       "mass": 1.804e30,
       "radius_km": 600300.0,
       "color": [1.0, 0.82, 0.50],
@@ -1299,12 +1299,12 @@
       "name": "TRAPPIST-1 b",
       "type": "planet",
       "parent": "TRAPPIST-1",
-      "mass": 6.074e24,
+      "mass": 8.204e24,
       "radius_km": 7110.0,
       "color": [0.82, 0.55, 0.38],
       "keplerian": {
         "a": 0.01154,
-        "e": 0.006,
+        "e": 0.010,
         "i": 0.0,
         "Omega": 0.0,
         "omega_tilde": 0.0,
@@ -1317,12 +1317,12 @@
       "name": "TRAPPIST-1 c",
       "type": "planet",
       "parent": "TRAPPIST-1",
-      "mass": 6.904e24,
+      "mass": 7.812e24,
       "radius_km": 6990.0,
       "color": [0.88, 0.72, 0.48],
       "keplerian": {
         "a": 0.01580,
-        "e": 0.002,
+        "e": 0.010,
         "i": 0.0,
         "Omega": 0.0,
         "omega_tilde": 0.0,
@@ -1335,12 +1335,12 @@
       "name": "TRAPPIST-1 d",
       "type": "planet",
       "parent": "TRAPPIST-1",
-      "mass": 1.773e24,
+      "mass": 2.318e24,
       "radius_km": 5020.0,
       "color": [0.45, 0.62, 0.72],
       "keplerian": {
         "a": 0.02228,
-        "e": 0.001,
+        "e": 0.010,
         "i": 0.0,
         "Omega": 0.0,
         "omega_tilde": 0.0,
@@ -1353,12 +1353,12 @@
       "name": "TRAPPIST-1 e",
       "type": "planet",
       "parent": "TRAPPIST-1",
-      "mass": 4.611e24,
+      "mass": 4.133e24,
       "radius_km": 5861.0,
       "color": [0.28, 0.48, 0.88],
       "keplerian": {
         "a": 0.02925,
-        "e": 0.005,
+        "e": 0.010,
         "i": 0.0,
         "Omega": 0.0,
         "omega_tilde": 0.0,
@@ -1376,7 +1376,7 @@
       "name": "TRAPPIST-1 f",
       "type": "planet",
       "parent": "TRAPPIST-1",
-      "mass": 5.578e24,
+      "mass": 6.206e24,
       "radius_km": 6658.0,
       "color": [0.40, 0.60, 0.75],
       "keplerian": {
@@ -1394,12 +1394,12 @@
       "name": "TRAPPIST-1 g",
       "type": "planet",
       "parent": "TRAPPIST-1",
-      "mass": 6.856e24,
+      "mass": 7.890e24,
       "radius_km": 7193.0,
       "color": [0.62, 0.72, 0.82],
       "keplerian": {
         "a": 0.04683,
-        "e": 0.002,
+        "e": 0.000,
         "i": 0.0,
         "Omega": 0.0,
         "omega_tilde": 0.0,
@@ -1412,17 +1412,136 @@
       "name": "TRAPPIST-1 h",
       "type": "planet",
       "parent": "TRAPPIST-1",
-      "mass": 1.977e24,
+      "mass": 1.947e24,
       "radius_km": 4810.0,
       "color": [0.78, 0.84, 0.92],
       "keplerian": {
         "a": 0.06189,
-        "e": 0.006,
+        "e": 0.010,
         "i": 0.0,
         "Omega": 0.0,
         "omega_tilde": 0.0,
         "L": 309.0
       }
+    },
+
+    // ================================================================
+    // Additional nearby systems without confirmed exoplanets.
+    // Positions are ICRS J2000 Cartesian coordinates derived from
+    // catalogue RA/Dec/parallax; velocities use catalogue space motion
+    // where enough data is available. "No confirmed planets" means no
+    // confirmed exoplanet entry in the NASA Exoplanet Archive at add time.
+    // ================================================================
+
+    // Ross 154 — 9.71 ly
+    // M3.5Ve flare star in Sagittarius; no confirmed planets.
+    {
+      "name": "Ross 154",
+      "type": "star",
+      "pos_ly": [1.914924, -8.669395, -3.922534],
+      "mass": 3.520e29,
+      "radius_km": 167000.0,
+      "color": [1.0, 0.36, 0.11],
+      "obliquity_deg": 0.0,
+      "rotation_period_days": 2.87,
+      "velocity_km_s": [6.499, 12.398, 1.738]
+    },
+
+    // DX Cancri — 11.68 ly
+    // M6.5V flare star in Cancer; very low mass, no confirmed planets.
+    {
+      "name": "DX Cancri",
+      "type": "star",
+      "pos_ly": [-6.341378, 8.277508, 5.261768],
+      "mass": 2.108e29,
+      "radius_km": 85960.0,
+      "color": [1.0, 0.26, 0.07],
+      "obliquity_deg": 0.0,
+      "rotation_period_days": 0.46,
+      "velocity_km_s": [7.274, 21.592, -5.224]
+    },
+
+    // Procyon A — 11.46 ly
+    // F5IV-V subgiant/main-sequence star with white dwarf companion.
+    // No confirmed planets.
+    {
+      "name": "Procyon A",
+      "type": "star",
+      "pos_ly": [-4.792368, 10.359379, 1.043789],
+      "mass": 2.982e30,
+      "radius_km": 1425700.0,
+      "color": [1.0, 0.94, 0.72],
+      "obliquity_deg": 0.0,
+      "rotation_period_days": 10.3,
+      "velocity_km_s": [12.028, 5.504, -17.611]
+    },
+
+    // Procyon B — white dwarf companion; approximate 15 AU binary separation.
+    {
+      "name": "Procyon B",
+      "type": "star",
+      "pos_ly": [-4.792131, 10.359379, 1.043789],
+      "mass": 1.177e30,
+      "radius_km": 8600.0,
+      "color": [0.88, 0.92, 1.0],
+      "obliquity_deg": 0.0,
+      "rotation_period_days": 1.0,
+      "velocity_km_s": [12.028, -5.616, -17.611]
+    },
+
+    // Kruger 60 A — 13.15 ly
+    // M3V red dwarf in Cepheus; binary with Kruger 60 B, no confirmed planets.
+    {
+      "name": "Kruger 60 A",
+      "type": "star",
+      "pos_ly": [6.467871, -2.745769, 11.113238],
+      "mass": 5.370e29,
+      "radius_km": 230000.0,
+      "color": [1.0, 0.42, 0.15],
+      "obliquity_deg": 0.0,
+      "rotation_period_days": 30.0,
+      "velocity_km_s": [-15.777, -8.739, -32.788]
+    },
+
+    // Kruger 60 B — M4Ve flare companion; approximate 9.2 AU separation.
+    {
+      "name": "Kruger 60 B",
+      "type": "star",
+      "pos_ly": [6.468016, -2.745769, 11.113238],
+      "mass": 3.580e29,
+      "radius_km": 160000.0,
+      "color": [1.0, 0.34, 0.10],
+      "obliquity_deg": 0.0,
+      "rotation_period_days": 30.0,
+      "velocity_km_s": [-15.777, -15.319, -32.788]
+    },
+
+    // Ross 248 — 10.31 ly
+    // M5.0V red dwarf in Andromeda; no confirmed planets.
+    {
+      "name": "Ross 248",
+      "type": "star",
+      "pos_ly": [7.368107, -0.582559, 7.181874],
+      "mass": 2.705e29,
+      "radius_km": 111000.0,
+      "color": [1.0, 0.30, 0.08],
+      "obliquity_deg": 0.0,
+      "rotation_period_days": 4.2,
+      "velocity_km_s": [-38.721, 4.752, -71.114]
+    },
+
+    // Van Maanen's Star — 14.06 ly
+    // Nearest single white dwarf; no confirmed planets.
+    {
+      "name": "Van Maanen's Star",
+      "type": "star",
+      "pos_ly": [13.675513, 2.979556, 1.320236],
+      "mass": 1.193e30,
+      "radius_km": 9000.0,
+      "color": [0.78, 0.84, 1.0],
+      "obliquity_deg": 0.0,
+      "rotation_period_days": 1.0,
+      "velocity_km_s": [40.6, 8.8, 3.9]
     }
 
   ],
