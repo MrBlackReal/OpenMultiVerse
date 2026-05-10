@@ -1,90 +1,11 @@
 /*
  * rings.h — Keplerian ring particle system (Saturn, Uranus, Neptune)
  *
- * ParticleDisc is a self-contained ring system for one planet.
- * Three instances are maintained internally (rings.c); the public API
- * treats them as a unit.
- *
- * LOD strategy (per disc, based on camera distance to parent body):
- *   dist ≤ LOD_DIST AU       → full Keplerian particle count
- *   dist > LOD_DIST AU       → smoothly reduced particle subset
- *   dist > RING_FADE_START AU → reduced particles fade out
- *
- * Per-particle data layout in data_full / data_lod  (8 floats):
- *   [0] M      — mean anomaly (rad), advanced by rings_tick each physics step
- *   [1] a      — semi-major axis (AU), static
- *   [2] e      — eccentricity, static
- *   [3] omega  — argument of periapsis (rad), static
- *   [4] height — vertical offset (AU), static
- *   [5..7] cr,cg,cb — zone colour, static
+ * rings.c owns all particle buffers, LOD state, collision response, and GPU
+ * resources.  Callers only initialize, step, notify collision events, render,
+ * and shut the system down.
  */
-/* Negative particle semi-major axes are tombstones for collision despawn.
- * Arrays stay fixed-size so despawning does not disturb render buffers. */
 #pragma once
-#include "common.h"
-#include "camera.h"
-
-#define RING_COLLISION_SEGMENTS 32
-#define RING_COLLISION_RADIAL_BINS 4
-
-typedef struct {
-    int    parent_idx;    /* g_bodies index of central body               */
-    int    n_full;        /* full LOD particle count                      */
-    int    n_lod;         /* reduced LOD particle count                   */
-    float *data_full;     /* 8 floats × n_full: M,a,e,ω,h,cr,cg,cb       */
-    float *data_lod;      /* 8 floats × n_lod                             */
-    float *n_arr_full;    /* Keplerian mean motion (rad/s) — CPU only     */
-    float *n_arr_lod;
-    float  ring_r_inner_km;
-    float  ring_r_outer_km;
-    float  parent_radius_ref_km;
-    float  base_h_scale;
-    float  mean_motion_mid;
-
-    /* Ring-plane basis — computed from parent obliquity at init */
-    float  b1[3], b2[3], pole[3];
-    float  transfer_b1[3], transfer_b2[3], transfer_pole[3];
-    float  transfer_offset[3];
-    float  transfer_age;
-    float  transfer_duration;
-    float  motion_scale_start;  /* old/new mean-motion ratio during retune */
-    float  motion_blend_age;
-    float  motion_blend_duration;
-
-    /* Particle shader (ring.vert + color.frag) */
-    GLuint shader;
-    GLuint loc_vp, loc_center, loc_b1, loc_b2, loc_pole;
-    GLuint loc_morph0, loc_morph1, loc_morph2;
-    GLuint loc_tide0, loc_tide1;
-    GLuint loc_body0, loc_body1;
-    GLuint vao_full, vbo_full;
-    GLuint vao_lod,  vbo_lod;
-
-    float  hit_cooldown[RING_COLLISION_SEGMENTS * RING_COLLISION_RADIAL_BINS];
-    float  puff_cur;
-    float  puff_target;
-    float  shock_phase;
-    float  shock_width;
-    float  shock_amp;
-    float  shock_spin;
-    float  contact_norm;
-    float  contact_width;
-    float  contact_strength;
-    float  tide_phase;
-    float  tide_radius_norm;
-    float  tide_width;
-    float  tide_strength;
-    float  tide_dir_u;
-    float  tide_dir_v;
-    float  tide_dir_n;
-    float  body_u_au;
-    float  body_v_au;
-    float  body_n_au;
-    float  body_radius_au;
-    float  body_strength;
-
-    int    initialized;
-} ParticleDisc;
 
 /* rings_init — parse ring configs from the given universe.json path. */
 void rings_init(const char *path);

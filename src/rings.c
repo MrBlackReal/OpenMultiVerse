@@ -6,9 +6,9 @@
  * Each ring particle follows a Keplerian elliptical orbit:
  *   - The CPU advances the mean anomaly M each physics step: M += n × dt
  *     where n = √(GM/a³) is the mean motion in rad/s.
- *   - The GPU (ring.vert) solves the Kepler equation E − e·sin(E) = M
- *     via Newton-Raphson each frame to compute the particle's screen position.
- *     This offloads the O(N) per-particle position computation entirely to the GPU.
+ *   - The GPU (ring.vert) evaluates a first-order Kepler approximation each
+ *     frame to compute particle positions.  This keeps the O(N) position work
+ *     on the GPU while staying cheap enough for particle-only distant rings.
  *
  * ── Per-particle data layout (8 floats per particle) ────────────────────
  *
@@ -49,7 +49,9 @@
  *   dist ∈ fade range     → reduced particles fade out smoothly
  */
 #include "rings.h"
+#include "common.h"
 #include "body.h"
+#include "camera.h"
 #include "collision.h"
 #include "physics.h"
 #include "gl_utils.h"
@@ -65,8 +67,9 @@
 #define RING_FADE_START 0.34f /* AU: distant particles start fading out */
 #define RING_FADE_END   0.62f /* AU: rings are fully hidden past this */
 #define MAX_ZONES     16      /* maximum annulus zones per ring descriptor */
+#define RING_COLLISION_SEGMENTS 32
+#define RING_COLLISION_RADIAL_BINS 4
 #define DAMAGE_MIN_WIDTH     0.18f
-#define DAMAGE_MAX_WIDTH     1.00f
 #define DAMAGE_MAX_ECC       0.080f
 #define DAMAGE_MIN_A_SCALE   0.88f
 #define DAMAGE_MAX_A_SCALE   1.18f
@@ -94,6 +97,59 @@ typedef struct {
     float density;        /* fraction of total particles allocated to this zone */
     float r, g, b;        /* base particle color */
 } Zone;
+
+/* ParticleDisc is an internal, self-contained ring system for one planet.
+ *
+ * Per-particle data layout in data_full / data_lod (8 floats):
+ *   [0] M      — mean anomaly (rad), advanced by rings_tick()
+ *   [1] a      — semi-major axis (AU); negative values are despawn tombstones
+ *   [2] e      — eccentricity
+ *   [3] omega  — argument of periapsis (rad)
+ *   [4] height — vertical offset from the ring plane (AU)
+ *   [5..7] rgb — particle colour
+ */
+typedef struct {
+    int    parent_idx;    /* g_bodies index of central body               */
+    int    n_full;        /* close-range particle count                   */
+    int    n_lod;         /* reduced particle count for distant rendering */
+    float *data_full;     /* 8 floats × n_full                            */
+    float *data_lod;      /* 8 floats × n_lod                             */
+    float *n_arr_full;    /* Keplerian mean motion (rad/s), CPU only      */
+    float *n_arr_lod;
+
+    float  ring_r_inner_km;
+    float  ring_r_outer_km;
+    float  parent_radius_ref_km;
+    float  base_h_scale;
+    float  mean_motion_mid;
+
+    float  b1[3], b2[3], pole[3]; /* parent ring-plane basis */
+    float  transfer_b1[3], transfer_b2[3], transfer_pole[3];
+    float  transfer_offset[3];
+    float  transfer_age;
+    float  transfer_duration;
+    float  motion_scale_start;    /* old/new mean-motion ratio during retune */
+    float  motion_blend_age;
+    float  motion_blend_duration;
+
+    GLuint shader;
+    GLuint loc_vp, loc_center, loc_b1, loc_b2, loc_pole;
+    GLuint loc_morph0, loc_morph1, loc_morph2;
+    GLuint loc_tide0, loc_tide1;
+    GLuint loc_body0, loc_body1;
+    GLuint vao_full, vbo_full;
+    GLuint vao_lod,  vbo_lod;
+
+    float  hit_cooldown[RING_COLLISION_SEGMENTS * RING_COLLISION_RADIAL_BINS];
+    float  puff_cur, puff_target;
+    float  shock_phase, shock_width, shock_amp, shock_spin;
+    float  contact_norm, contact_width, contact_strength;
+    float  tide_phase, tide_radius_norm, tide_width, tide_strength;
+    float  tide_dir_u, tide_dir_v, tide_dir_n;
+    float  body_u_au, body_v_au, body_n_au, body_radius_au, body_strength;
+
+    int    initialized;
+} ParticleDisc;
 
 /* ── Disc instances loaded from universe.json ───────────────────────────── */
 static ParticleDisc *s_discs   = NULL;
@@ -1378,7 +1434,7 @@ static void setup_particle_attribs(void) {
 /* Compile shaders and upload initial particle data for one disc. */
 static void init_disc_gl(ParticleDisc *d)
 {
-    /* ring.vert solves the Kepler equation per-particle on the GPU */
+    /* ring.vert evaluates the compact Keplerian particle state on the GPU. */
     d->shader = gl_shader_load("assets/shaders/ring.vert",
                                "assets/shaders/color.frag");
     if (!d->shader) return;

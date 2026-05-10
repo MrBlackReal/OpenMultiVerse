@@ -91,8 +91,6 @@ OpenVerse/
         ├── solid.vert/frag        Orbital trail lines
         ├── color.vert/frag        Starfield GL_POINTS
         ├── ring.vert              Keplerian ring particles
-        ├── ring_sprite.vert/frag  Saturn-specific sprite rings
-        ├── ring_sprite_generic.frag  Generic sprite rings (Uranus/Neptune)
         ├── asteroid_particle.vert Asteroid belt GL_POINTS
         ├── impact_particle.vert/frag  Collision debris
         ├── label.vert/frag        Body name billboard quads
@@ -546,11 +544,11 @@ Keplerian ring particle systems for Saturn, Uranus, and Neptune.
 |---|---|
 | `rings_init(path)` | Parse ring zones from JSON, generate particle arrays, upload VBOs, compile shaders |
 | `rings_tick(dt)` | Advance mean anomalies: `M[i] += n[i] * dt` |
-| `rings_render(vp)` | LOD selection + draw (Keplerian particles or sprite quad) |
+| `rings_render(vp)` | Distance-thinned particle LOD + draw |
 | `rings_on_body_absorbed(target, impactor)` | Update parent index after a collision merge |
 | `rings_shutdown()` | Cleanup |
 
-Saturn uses a hardcoded Cassini-division-aware sprite shader (`ring_sprite.frag`). Other planets use a generic uniform-driven sprite (`ring_sprite_generic.frag`).
+Rings are rendered as particles at every visible distance. The renderer reduces the draw count from `n_full` toward `n_lod` with distance and fades out distant rings through the particle alpha uniform.
 
 ---
 
@@ -818,20 +816,12 @@ Simple `GL_LINE_STRIP` renderer. Takes camera-relative float positions. Uses `u_
 ### `ring.vert` — Keplerian Ring Particles
 
 Solves Kepler's equation on the GPU per vertex:
-1. Newton-Raphson: `M = E - e·sin(E)` → eccentric anomaly E
-2. True anomaly: `ν = 2·atan2(√(1+e)·sin(E/2), √(1-e)·cos(E/2))`
-3. Orbital radius: `r = a(1 - e·cos(E))`
-4. 3D position via ring-plane basis vectors `u_b1`, `u_b2`
+1. First-order true anomaly: `ν ≈ M + 2e·sin(M)`
+2. Orbital radius: `r ≈ a(1 - e·cos(M))`
+3. Collision/tidal warp offsets are applied in ring-width units
+4. 3D position via ring-plane basis vectors `u_b1`, `u_b2`, `u_pole`
 
 Input attributes: `M`, `a`, `e`, `ω`, `h` (vertical offset), `r/g/b`.
-
----
-
-### `ring_sprite.frag` / `ring_sprite_generic.frag` — Ring Sprites
-
-Far-LOD ring rendering: a single quad textured procedurally.
-- `ring_sprite.frag`: Saturn-specific hardcoded Cassini-division zone map
-- `ring_sprite_generic.frag`: uniform-driven (`u_r_inner`, `u_r_outer`, `u_ring_color`, `u_alpha_max`) for Uranus/Neptune
 
 ---
 
