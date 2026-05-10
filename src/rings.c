@@ -1669,8 +1669,9 @@ static void render_disc(const ParticleDisc *d, const float vp_camrel[16])
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glPointSize(1.0f);
+    glEnable(GL_PROGRAM_POINT_SIZE);
     glDrawArrays(GL_POINTS, 0, n);
+    glDisable(GL_PROGRAM_POINT_SIZE);
     glDisable(GL_BLEND);
     glBindVertexArray(0);
 }

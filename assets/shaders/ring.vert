@@ -12,6 +12,7 @@
  *
  * This makes inner particles orbit faster than outer ones (Kepler's 3rd law)
  * and gives each particle a slightly elliptical path around Saturn.
+ * Point size stays at the legacy 1 px until close range, then grows smoothly.
  */
 layout(location = 0) in float a_M;      /* mean anomaly (rad)              */
 layout(location = 1) in float a_a;      /* semi-major axis (AU)            */
@@ -155,6 +156,9 @@ void main() {
         return;
     }
 
+    float dist = length(pos);
+    float point_t = 1.0 - smoothstep(0.0006, 0.0040, dist);
     v_color     = vec4(a_color, clamp(u_morph0.x, 0.0, 1.0) * parent_fade);
+    gl_PointSize = mix(1.0, 2.1, point_t);
     gl_Position = u_vp * vec4(pos, 1.0);
 }
