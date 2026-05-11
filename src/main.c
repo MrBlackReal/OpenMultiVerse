@@ -513,11 +513,8 @@ static void handle_event(const SDL_Event *e, float dt, int *running) {
             break;
         case SDLK_b:
             if (!e->key.repeat) {
-                if (g_inspect_mode) {
-                    inspect_cancel();
-                    s_freelook = 1;
-                    SDL_SetRelativeMouseMode(SDL_TRUE);
-                }
+                if (g_inspect_mode)
+                    leave_inspect_keep_mouse();
                 build_toggle();
             }
             break;

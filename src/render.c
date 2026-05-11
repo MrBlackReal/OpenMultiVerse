@@ -385,8 +385,6 @@ static void draw_ring_2d(const float rel[3], float dr,
         }
     }
 
-    if (vtx == 0) return;
-
     glUseProgram(s_build_ui_shader);
     glUniform2f(s_build_ui_screen, (float)WIN_W, (float)WIN_H);
     glUniform1i(s_build_ui_use_tex, 0);
