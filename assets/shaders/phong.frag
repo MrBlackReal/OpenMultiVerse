@@ -401,14 +401,16 @@ void main() {
         if (kind == 1) {
             float crater_floor = 1.0 - smoothstep(0.0, rad * 0.72, ang);
             float hot_rim = ring * (1.0 - progress * 0.65);
-            surface = mix(surface, surface * 0.12, crater_floor * 0.58);
-            surface = mix(surface, mix(lava_deep, lava_molten, core), core * heat * 0.72);
-            surface = mix(surface, vec3(0.08, 0.05, 0.04), ring * 0.32);
+            float glow_cover = heat * (0.42 + 0.28 * (1.0 - progress));
+            surface = mix(surface, surface * 0.42, crater_floor * heat * 0.22);
+            surface = mix(surface, mix(lava_deep, lava_molten, core), core * glow_cover);
+            surface = mix(surface, vec3(0.08, 0.05, 0.04), ring * heat * 0.14);
             lava_emit += lava_molten * (core * 1.5 + hot_rim * 0.9) * heat;
         } else if (kind == 2) {
             float ash = outer * 0.35;
-            surface = mix(surface, surface * 0.18, ring * heat * 0.72 + ash);
-            surface = mix(surface, mix(lava_deep, lava_hot, core), melt * heat * 0.88);
+            float glow_cover = heat * (0.50 + 0.28 * (1.0 - progress));
+            surface = mix(surface, surface * 0.34, ring * heat * 0.24 + ash * 0.45);
+            surface = mix(surface, mix(lava_deep, lava_hot, core), melt * glow_cover);
             lava_emit += lava * (core * 1.8 + melt * 0.9 + outer * 0.35) * heat;
         } else if (kind == 3) {
             float flood = 1.0 - smoothstep(0.0, rad * 1.08, ang);
@@ -467,6 +469,7 @@ void main() {
             vec3 scar_p = vec3(dot(NL, scar_t1),
                                dot(NL, scar_t2),
                                dot(NL, idir) - cos(rad));
+            float cap_gate = 1.0 - smoothstep(rad * 1.02, rad * 1.22, ang);
             vec2 crater_uv = scar_p.xy / max(rad, 0.001);
             float crater_r = length(crater_uv);
             float crater_ang = atan(crater_uv.y, crater_uv.x);
@@ -515,7 +518,7 @@ void main() {
             float earth_crater = u_planet_type == 1 ? 1.0 : 0.0;
             float size_fade = smoothstep(0.006, 0.18, rad);
             float crater_alpha = mix(0.58, 1.0, earth_crater) * mix(0.08, 1.0, size_fade)
-                               * (1.0 - s_intersection * 0.95);
+                               * (1.0 - s_intersection * 0.35) * cap_gate;
             vec3 warm_brown = mix(vec3(0.18, 0.14, 0.11), vec3(0.34, 0.26, 0.18), crater_coarse);
             vec3 dusty_brown = mix(vec3(0.24, 0.19, 0.14), vec3(0.42, 0.33, 0.24), crater_fine);
             vec3 ridge_brown = mix(vec3(0.32, 0.25, 0.18), vec3(0.50, 0.40, 0.30), crater_coarse * 0.65 + crater_fine * 0.35);
