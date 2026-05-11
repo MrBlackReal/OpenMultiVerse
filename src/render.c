@@ -328,49 +328,110 @@ static void build_draw_text(BuildTextCache *tc, float x, float y, float h) {
     build_draw_ui_quad(x, y, w, h);
 }
 
-static void draw_screen_ring(float cx, float cy, float r, float alpha)
+/*
+ * draw_ring_3d — inspect-target ring rendered in 3D camera-relative space.
+ *
+ * Ring points are computed on the sphere's silhouette ring and projected
+ * through the perspective matrix, so the ring is always correctly centred
+ * on the body regardless of camera angle or FOV.
+ *
+ * Fixed 8 dashes; only physical size changes with distance.
+ * Each dash is approximated with SEGS_PER_DASH line segments for a
+ * smooth arc even when the ring is large on screen.
+ */
+static void draw_ring_3d(const float rel[3], float dr,
+                         float alpha, const float vp[16])
 {
-    enum { MAX_DASHES = 96 };
-    float v[MAX_DASHES * 2 * 4];
-    float phase;
-    float step;
-    int dashes;
+    enum { N_DASHES = 8, SEGS = 5 };
+    /* 8 dashes × 5 segs × 2 endpoints × 4 floats — well within the 768-float VBO */
+    float v[N_DASHES * SEGS * 2 * 4];
+    float D, corr, ring_r, Cx, Cy, Cz;
+    float p_hat[3], tmp[3], t1[3], t2[3], len;
+    float phase, step;
+    int vtx = 0;
+
     if (!s_build_ui_shader || !s_build_ui_vbo) return;
 
-    dashes = (int)(r * 0.28f);
-    if (dashes < 8) dashes = 8;
-    if (dashes > MAX_DASHES) dashes = MAX_DASHES;
+    D = sqrtf(rel[0]*rel[0] + rel[1]*rel[1] + rel[2]*rel[2]);
+    if (D < dr * 1.01f) return;
+
+    /* Silhouette ring geometry:
+     *   centre  = rel × (1 − R²/D²)   — lies on the same screen ray as rel
+     *   radius  = R × √(1 − R²/D²)    — exact silhouette radius
+     * Scale by 1.3 so the ring sits clearly outside the body silhouette. */
+    corr   = 1.0f - (dr * dr) / (D * D);
+    Cx     = rel[0] * corr;
+    Cy     = rel[1] * corr;
+    Cz     = rel[2] * corr;
+    ring_r = dr * sqrtf(corr) * 1.3f;
+
+    /* Two tangent vectors spanning the silhouette ring plane (perpendicular to rel) */
+    p_hat[0] = rel[0] / D;
+    p_hat[1] = rel[1] / D;
+    p_hat[2] = rel[2] / D;
+    if (fabsf(p_hat[1]) < 0.9f) { tmp[0]=0.0f; tmp[1]=1.0f; tmp[2]=0.0f; }
+    else                         { tmp[0]=1.0f; tmp[1]=0.0f; tmp[2]=0.0f; }
+
+    t1[0] = p_hat[1]*tmp[2] - p_hat[2]*tmp[1];
+    t1[1] = p_hat[2]*tmp[0] - p_hat[0]*tmp[2];
+    t1[2] = p_hat[0]*tmp[1] - p_hat[1]*tmp[0];
+    len   = sqrtf(t1[0]*t1[0] + t1[1]*t1[1] + t1[2]*t1[2]);
+    t1[0] /= len; t1[1] /= len; t1[2] /= len;
+
+    t2[0] = p_hat[1]*t1[2] - p_hat[2]*t1[1];
+    t2[1] = p_hat[2]*t1[0] - p_hat[0]*t1[2];
+    t2[2] = p_hat[0]*t1[1] - p_hat[1]*t1[0];
+
+    /* Minimum ring_r: keep the ring at least 12 px on screen.
+     * Uses Euclidean distance D with half_fov_tan() — the same formula the
+     * rest of render.c uses for px→AU conversions.  Immune to camera-angle
+     * variation (D is invariant under rotation); works for dr≈0 (asteroids). */
+    {
+        float ring_r_min = 12.0f * D * half_fov_tan() / (WIN_H * 0.5f);
+        if (ring_r < ring_r_min) ring_r = ring_r_min;
+    }
 
     phase = (float)SDL_GetTicks() * 0.00055f;
-    step = 2.0f * (float)PI / (float)dashes;
-    for (int i = 0; i < dashes; i++) {
-        float a0 = phase + (float)i * step;
-        float a1 = a0 + step * 0.36f;
-        int v0 = i * 2;
-        int v1 = v0 + 1;
-        v[v0*4+0] = cx + cosf(a0) * r;
-        v[v0*4+1] = cy + sinf(a0) * r;
-        v[v0*4+2] = 0.0f;
-        v[v0*4+3] = 0.0f;
-        v[v1*4+0] = cx + cosf(a1) * r;
-        v[v1*4+1] = cy + sinf(a1) * r;
-        v[v1*4+2] = 0.0f;
-        v[v1*4+3] = 0.0f;
+    step  = 2.0f * (float)PI / (float)N_DASHES;
+
+    for (int d = 0; d < N_DASHES; d++) {
+        float a0 = phase + (float)d * step;
+        float a1 = a0 + step * 0.45f;
+        for (int s = 0; s < SEGS; s++) {
+            float aa = a0 + (a1 - a0) * (float)s       / (float)SEGS;
+            float ab = a0 + (a1 - a0) * (float)(s + 1) / (float)SEGS;
+            float sx0, sy0, sx1, sy1;
+            float p0x = Cx + cosf(aa)*ring_r*t1[0] + sinf(aa)*ring_r*t2[0];
+            float p0y = Cy + cosf(aa)*ring_r*t1[1] + sinf(aa)*ring_r*t2[1];
+            float p0z = Cz + cosf(aa)*ring_r*t1[2] + sinf(aa)*ring_r*t2[2];
+            float p1x = Cx + cosf(ab)*ring_r*t1[0] + sinf(ab)*ring_r*t2[0];
+            float p1y = Cy + cosf(ab)*ring_r*t1[1] + sinf(ab)*ring_r*t2[1];
+            float p1z = Cz + cosf(ab)*ring_r*t1[2] + sinf(ab)*ring_r*t2[2];
+            if (!mat4_project(vp, p0x, p0y, p0z, WIN_W, WIN_H, &sx0, &sy0)) continue;
+            if (!mat4_project(vp, p1x, p1y, p1z, WIN_W, WIN_H, &sx1, &sy1)) continue;
+            /* mat4_project: y=0 at bottom; flip to y=0 at top for the UI shader */
+            sy0 = (float)WIN_H - sy0;
+            sy1 = (float)WIN_H - sy1;
+            v[vtx*4+0]=sx0; v[vtx*4+1]=sy0; v[vtx*4+2]=0.0f; v[vtx*4+3]=0.0f; vtx++;
+            v[vtx*4+0]=sx1; v[vtx*4+1]=sy1; v[vtx*4+2]=0.0f; v[vtx*4+3]=0.0f; vtx++;
+        }
     }
+
+    if (vtx == 0) return;
 
     glUseProgram(s_build_ui_shader);
     glUniform2f(s_build_ui_screen, (float)WIN_W, (float)WIN_H);
     glUniform1i(s_build_ui_use_tex, 0);
-    glUniform4f(s_build_ui_color, 0.78f, 0.96f, 1.0f, alpha);
+    glUniform4f(s_build_ui_color, 1.0f, 1.0f, 1.0f, alpha);
     glBindVertexArray(s_build_ui_vao);
     glBindBuffer(GL_ARRAY_BUFFER, s_build_ui_vbo);
-    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(v), v);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, vtx * 4 * sizeof(float), v);
     glDisable(GL_DEPTH_TEST);
     glDepthMask(GL_FALSE);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glLineWidth(1.35f);
-    glDrawArrays(GL_LINES, 0, dashes * 2);
+    glLineWidth(1.5f);
+    glDrawArrays(GL_LINES, 0, vtx);
     glLineWidth(1.0f);
     glDisable(GL_BLEND);
     glDepthMask(GL_TRUE);
@@ -1801,9 +1862,9 @@ void render_frame(const float view[16], const float proj[16],
 
     /* ------------------------------------------------------------------ 6.6. Inspect target ring */
     {
-        float sx, sy, rr, aa;
-        if (inspect_ring_screen(vp_camrel, info, &sx, &sy, &rr, &aa))
-            draw_screen_ring(sx, sy, rr, aa);
+        float rel[3], dr, aa;
+        if (inspect_ring_params(info, rel, &dr, &aa))
+            draw_ring_3d(rel, dr, aa, vp_camrel);
     }
 
     /* ------------------------------------------------------------------ 7. Labels */
