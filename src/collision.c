@@ -112,6 +112,7 @@ static ImpactEvent s_impacts[MAX_IMPACTS];
 static PersistentScar s_perm_scars[MAX_PERSISTENT_SCARS];
 static RadiusTransition s_radius_fx[MAX_BODIES];
 static MergeEvent s_merges[MAX_MERGES];
+static int s_absorbed_by[MAX_BODIES];
 static ImpactParticleState s_particles[MAX_COLLISION_PARTICLES];
 static double s_pair_next[MAX_BODIES][MAX_BODIES];
 static unsigned char s_system_dirty[MAX_BODIES];
@@ -144,6 +145,7 @@ void collision_reset(void)
     memset(s_perm_scars, 0, sizeof(s_perm_scars));
     memset(s_radius_fx, 0, sizeof(s_radius_fx));
     memset(s_merges, 0, sizeof(s_merges));
+    for (int i = 0; i < MAX_BODIES; i++) s_absorbed_by[i] = -1;
     memset(s_particles, 0, sizeof(s_particles));
     memset(s_pair_next, 0, sizeof(s_pair_next));
     memset(s_system_dirty, 0, sizeof(s_system_dirty));
@@ -1346,6 +1348,8 @@ static void finalize_absorb_body(int target, int impactor, double rel_speed,
     }
 
     rings_on_body_absorbed(target, impactor);
+    if (impactor >= 0 && impactor < MAX_BODIES)
+        s_absorbed_by[impactor] = target;
     b->alive = 0;
     b->mass = 0.0;
     a->trail_emitting = 1;
@@ -2521,6 +2525,12 @@ int collision_body_has_active_merge(int body_idx)
 {
     if (body_idx < 0 || body_idx >= g_nbodies) return 0;
     return body_is_in_merge(body_idx);
+}
+
+int collision_body_absorbed_by(int body_idx)
+{
+    if (body_idx < 0 || body_idx >= MAX_BODIES) return -1;
+    return s_absorbed_by[body_idx];
 }
 
 int collision_body_needs_dense_trail(int body_idx)

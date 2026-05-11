@@ -45,6 +45,7 @@
 #include "asteroids.h"
 #include "ui.h"
 #include "build.h"
+#include "inspect.h"
 #include "collision.h"
 #include "supernova.h"
 #include "audio.h"
@@ -111,6 +112,12 @@ static void boot_log(const char *msg) {
 
 static void clear_movement_keys(void) {
     s_key_w = s_key_s = s_key_a = s_key_d = s_key_q = s_key_e = 0;
+}
+
+static void leave_inspect_keep_mouse(void) {
+    inspect_cancel();
+    s_freelook = 1;
+    SDL_SetRelativeMouseMode(SDL_TRUE);
 }
 
 static int set_vsync(int enabled) {
@@ -243,6 +250,8 @@ static void init_runtime_world(void) {
     labels_init();
     boot_log("Initializing build mode");
     build_init();
+    boot_log("Initializing inspect mode");
+    inspect_init();
     boot_log("Refreshing physics timestep model");
     physics_refresh_timestep_model();
     warmup_universe();
@@ -470,12 +479,30 @@ static void handle_event(const SDL_Event *e, float dt, int *running) {
 
     case SDL_KEYDOWN:
         switch (e->key.keysym.sym) {
-        case SDLK_w: s_key_w = 1; break;
-        case SDLK_s: s_key_s = 1; break;
-        case SDLK_a: s_key_a = 1; break;
-        case SDLK_d: s_key_d = 1; break;
-        case SDLK_q: s_key_q = 1; break;
-        case SDLK_e: s_key_e = 1; break;
+        case SDLK_w:
+            s_key_w = 1;
+            if (g_inspect_orbit_mode) leave_inspect_keep_mouse();
+            break;
+        case SDLK_s:
+            s_key_s = 1;
+            if (g_inspect_orbit_mode) leave_inspect_keep_mouse();
+            break;
+        case SDLK_a:
+            s_key_a = 1;
+            if (g_inspect_orbit_mode) leave_inspect_keep_mouse();
+            break;
+        case SDLK_d:
+            s_key_d = 1;
+            if (g_inspect_orbit_mode) leave_inspect_keep_mouse();
+            break;
+        case SDLK_q:
+            s_key_q = 1;
+            if (g_inspect_orbit_mode) leave_inspect_keep_mouse();
+            break;
+        case SDLK_e:
+            s_key_e = 1;
+            if (g_inspect_orbit_mode) leave_inspect_keep_mouse();
+            break;
         case SDLK_r: cam_reset(); break;
         case SDLK_F11:
             if (!e->key.repeat) toggle_fullscreen();
@@ -485,7 +512,22 @@ static void handle_event(const SDL_Event *e, float dt, int *running) {
                 toggle_fullscreen();
             break;
         case SDLK_b:
-            if (!e->key.repeat) build_toggle();
+            if (!e->key.repeat) {
+                if (g_inspect_mode) {
+                    inspect_cancel();
+                    s_freelook = 1;
+                    SDL_SetRelativeMouseMode(SDL_TRUE);
+                }
+                build_toggle();
+            }
+            break;
+        case SDLK_i:
+            if (!e->key.repeat) {
+                if (g_build_mode) build_toggle();
+                inspect_toggle();
+                s_freelook = 1;
+                SDL_SetRelativeMouseMode(SDL_TRUE);
+            }
             break;
         case SDLK_TAB:
             build_set_tab_held(1);
@@ -511,6 +553,11 @@ static void handle_event(const SDL_Event *e, float dt, int *running) {
         case SDLK_ESCAPE:
             if (g_build_mode) {
                 build_toggle();
+                break;
+            }
+            if (g_inspect_mode) {
+                leave_inspect_keep_mouse();
+                clear_movement_keys();
                 break;
             }
             if (s_freelook) {
@@ -550,6 +597,10 @@ static void handle_event(const SDL_Event *e, float dt, int *running) {
             build_place_current();
             break;
         }
+        if (g_inspect_mode && e->button.button == SDL_BUTTON_LEFT) {
+            inspect_begin_orbit();
+            break;
+        }
         if (e->button.button == SDL_BUTTON_LEFT && !s_freelook) {
             s_freelook = 1;
             SDL_SetRelativeMouseMode(SDL_TRUE);
@@ -557,7 +608,9 @@ static void handle_event(const SDL_Event *e, float dt, int *running) {
         break;
 
     case SDL_MOUSEMOTION:
-        if (s_freelook) {
+        if (g_inspect_orbit_mode) {
+            inspect_orbit_mouse(e->motion.xrel, e->motion.yrel, s_mouse_sens);
+        } else if (s_freelook) {
             g_cam.yaw   += e->motion.xrel * s_mouse_sens;
             g_cam.pitch -= e->motion.yrel * s_mouse_sens;
             if (g_cam.pitch >  89.0f) g_cam.pitch =  89.0f;
@@ -566,6 +619,10 @@ static void handle_event(const SDL_Event *e, float dt, int *running) {
         break;
 
     case SDL_MOUSEWHEEL:
+        if (g_inspect_orbit_mode) {
+            inspect_orbit_zoom(e->wheel.y);
+            break;
+        }
         if (g_build_mode && g_build_tab_held) {
             build_scroll(e->wheel.y);
             break;
@@ -685,7 +742,7 @@ int main(int argc, char **argv) {
             handle_event(&e, dt, &running);
         }
 
-        if (!s_pause_menu_open)
+        if (!s_pause_menu_open && !g_inspect_orbit_mode)
             camera_move(dt);
 
         /* Physics — RESPA hierarchical integrator */
@@ -750,6 +807,9 @@ int main(int argc, char **argv) {
                 rings_tick(effective_sim_dt);
             }
         }
+
+        if (!s_pause_menu_open && g_inspect_orbit_mode)
+            inspect_orbit_update(dt);
 
         /* Build matrices.
          * view_rot: rotation-only lookAt (origin as eye). Used for all distant

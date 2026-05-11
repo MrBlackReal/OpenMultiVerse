@@ -55,6 +55,7 @@
 #include "asteroids.h"
 #include "labels.h"
 #include "build.h"
+#include "inspect.h"
 #include "collision.h"
 #include "gl_utils.h"
 #include "math3d.h"
@@ -325,6 +326,56 @@ static void build_draw_text(BuildTextCache *tc, float x, float y, float h) {
     glUniform4f(s_build_ui_color, 1, 1, 1, 1);
     glBindTexture(GL_TEXTURE_2D, tc->tex);
     build_draw_ui_quad(x, y, w, h);
+}
+
+static void draw_screen_ring(float cx, float cy, float r, float alpha)
+{
+    enum { MAX_DASHES = 96 };
+    float v[MAX_DASHES * 2 * 4];
+    float phase;
+    float step;
+    int dashes;
+    if (!s_build_ui_shader || !s_build_ui_vbo) return;
+
+    dashes = (int)(r * 0.28f);
+    if (dashes < 8) dashes = 8;
+    if (dashes > MAX_DASHES) dashes = MAX_DASHES;
+
+    phase = (float)SDL_GetTicks() * 0.00055f;
+    step = 2.0f * (float)PI / (float)dashes;
+    for (int i = 0; i < dashes; i++) {
+        float a0 = phase + (float)i * step;
+        float a1 = a0 + step * 0.36f;
+        int v0 = i * 2;
+        int v1 = v0 + 1;
+        v[v0*4+0] = cx + cosf(a0) * r;
+        v[v0*4+1] = cy + sinf(a0) * r;
+        v[v0*4+2] = 0.0f;
+        v[v0*4+3] = 0.0f;
+        v[v1*4+0] = cx + cosf(a1) * r;
+        v[v1*4+1] = cy + sinf(a1) * r;
+        v[v1*4+2] = 0.0f;
+        v[v1*4+3] = 0.0f;
+    }
+
+    glUseProgram(s_build_ui_shader);
+    glUniform2f(s_build_ui_screen, (float)WIN_W, (float)WIN_H);
+    glUniform1i(s_build_ui_use_tex, 0);
+    glUniform4f(s_build_ui_color, 0.78f, 0.96f, 1.0f, alpha);
+    glBindVertexArray(s_build_ui_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, s_build_ui_vbo);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(v), v);
+    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glLineWidth(1.35f);
+    glDrawArrays(GL_LINES, 0, dashes * 2);
+    glLineWidth(1.0f);
+    glDisable(GL_BLEND);
+    glDepthMask(GL_TRUE);
+    glEnable(GL_DEPTH_TEST);
+    glBindVertexArray(0);
 }
 
 /* Format a distance in AU into a human-readable string, adapting units. */
@@ -798,8 +849,8 @@ void render_init(void) {
         s_build_ui_use_tex = glGetUniformLocation(s_build_ui_shader, "u_use_tex");
         s_build_ui_tex     = glGetUniformLocation(s_build_ui_shader, "u_tex");
         s_build_ui_vao = gl_vao_create();
-        /* One quad: 6 vertices × 4 floats (xy, uv) */
-        s_build_ui_vbo = gl_vbo_create(24 * sizeof(float), NULL, GL_DYNAMIC_DRAW);
+        /* Shared overlay buffer: enough for one text quad or an inspect ring. */
+        s_build_ui_vbo = gl_vbo_create(96 * 2 * 4 * sizeof(float), NULL, GL_DYNAMIC_DRAW);
         glEnableVertexAttribArray(0);
         glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void*)0);
         glEnableVertexAttribArray(1);
@@ -1227,6 +1278,8 @@ void render_frame(const float view[16], const float proj[16],
         glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
     }
     glBindVertexArray(0);
+
+    inspect_pick_center(vp_camrel, info);
 
     /* ------------------------------------------------------------------ 2.5. Atmosphere glow
      * Separate additive pass: GL_SRC_ALPHA / GL_ONE, depth-tested but no depth write.
@@ -1745,6 +1798,13 @@ void render_frame(const float view[16], const float proj[16],
 
     /* ------------------------------------------------------------------ 6.5. Build preview */
     render_build_preview(vp_camrel);
+
+    /* ------------------------------------------------------------------ 6.6. Inspect target ring */
+    {
+        float sx, sy, rr, aa;
+        if (inspect_ring_screen(vp_camrel, info, &sx, &sy, &rr, &aa))
+            draw_screen_ring(sx, sy, rr, aa);
+    }
 
     /* ------------------------------------------------------------------ 7. Labels */
     labels_render(view_rot, proj, vp_camrel, info, dt);
