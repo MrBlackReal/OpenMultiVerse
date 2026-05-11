@@ -329,67 +329,45 @@ static void build_draw_text(BuildTextCache *tc, float x, float y, float h) {
 }
 
 /*
- * draw_ring_3d — inspect-target ring rendered in 3D camera-relative space.
+ * draw_ring_2d — inspect-target ring as a screen-space dashed circle.
  *
- * Ring points are computed on the sphere's silhouette ring and projected
- * through the perspective matrix, so the ring is always correctly centred
- * on the body regardless of camera angle or FOV.
+ * Centre: uses the corrected perspective divisor pz_adj = eye_z − R²/eye_z.
+ *   For an off-axis sphere the projected silhouette is an ellipse whose
+ *   centre is NOT proj(body_pos) — it shifts toward the screen edge.
+ *   Dividing the clip-space x/y by pz_adj instead of eye_z gives the true
+ *   visual centre of the sphere disc at any camera angle.
  *
- * Fixed 8 dashes; only physical size changes with distance.
- * Each dash is approximated with SEGS_PER_DASH line segments for a
- * smooth arc even when the ring is large on screen.
+ * Radius: dr × 1.3 projected at Euclidean distance D (angle-stable),
+ *   with a 12 px floor so the ring stays visible for any body at any distance.
  */
-static void draw_ring_3d(const float rel[3], float dr,
+static void draw_ring_2d(const float rel[3], float dr,
                          float alpha, const float vp[16])
 {
     enum { N_DASHES = 8, SEGS = 5 };
-    /* 8 dashes × 5 segs × 2 endpoints × 4 floats — well within the 768-float VBO */
     float v[N_DASHES * SEGS * 2 * 4];
-    float D, corr, ring_r, Cx, Cy, Cz;
-    float p_hat[3], tmp[3], t1[3], t2[3], len;
-    float phase, step;
+    float D, r_px, cx, cy, phase, step;
+    float clip_x, clip_y, clip_w, pz_adj;
     int vtx = 0;
 
     if (!s_build_ui_shader || !s_build_ui_vbo) return;
 
     D = sqrtf(rel[0]*rel[0] + rel[1]*rel[1] + rel[2]*rel[2]);
-    if (D < dr * 1.01f) return;
+    if (D < 1e-6f) return;
 
-    /* Silhouette ring geometry:
-     *   centre  = rel × (1 − R²/D²)   — lies on the same screen ray as rel
-     *   radius  = R × √(1 − R²/D²)    — exact silhouette radius
-     * Scale by 1.3 so the ring sits clearly outside the body silhouette. */
-    corr   = 1.0f - (dr * dr) / (D * D);
-    Cx     = rel[0] * corr;
-    Cy     = rel[1] * corr;
-    Cz     = rel[2] * corr;
-    ring_r = dr * sqrtf(corr) * 1.3f;
+    clip_x = vp[0]*rel[0] + vp[4]*rel[1] + vp[8] *rel[2] + vp[12];
+    clip_y = vp[1]*rel[0] + vp[5]*rel[1] + vp[9] *rel[2] + vp[13];
+    clip_w = vp[3]*rel[0] + vp[7]*rel[1] + vp[11]*rel[2] + vp[15];
+    if (clip_w <= 0.0f) return;
 
-    /* Two tangent vectors spanning the silhouette ring plane (perpendicular to rel) */
-    p_hat[0] = rel[0] / D;
-    p_hat[1] = rel[1] / D;
-    p_hat[2] = rel[2] / D;
-    if (fabsf(p_hat[1]) < 0.9f) { tmp[0]=0.0f; tmp[1]=1.0f; tmp[2]=0.0f; }
-    else                         { tmp[0]=1.0f; tmp[1]=0.0f; tmp[2]=0.0f; }
+    pz_adj = clip_w - dr * dr / clip_w;
+    if (pz_adj <= 0.0f) return;
 
-    t1[0] = p_hat[1]*tmp[2] - p_hat[2]*tmp[1];
-    t1[1] = p_hat[2]*tmp[0] - p_hat[0]*tmp[2];
-    t1[2] = p_hat[0]*tmp[1] - p_hat[1]*tmp[0];
-    len   = sqrtf(t1[0]*t1[0] + t1[1]*t1[1] + t1[2]*t1[2]);
-    t1[0] /= len; t1[1] /= len; t1[2] /= len;
+    cx = (clip_x / pz_adj + 1.0f) * 0.5f * (float)WIN_W;
+    cy = (float)WIN_H - (clip_y / pz_adj + 1.0f) * 0.5f * (float)WIN_H;
 
-    t2[0] = p_hat[1]*t1[2] - p_hat[2]*t1[1];
-    t2[1] = p_hat[2]*t1[0] - p_hat[0]*t1[2];
-    t2[2] = p_hat[0]*t1[1] - p_hat[1]*t1[0];
-
-    /* Minimum ring_r: keep the ring at least 12 px on screen.
-     * Uses Euclidean distance D with half_fov_tan() — the same formula the
-     * rest of render.c uses for px→AU conversions.  Immune to camera-angle
-     * variation (D is invariant under rotation); works for dr≈0 (asteroids). */
-    {
-        float ring_r_min = 12.0f * D * half_fov_tan() / (WIN_H * 0.5f);
-        if (ring_r < ring_r_min) ring_r = ring_r_min;
-    }
+    /* Screen radius using D (Euclidean), not eye_z, so it is angle-stable */
+    r_px = dr * 1.3f * (WIN_H * 0.5f) / (D * half_fov_tan());
+    if (r_px < 12.0f) r_px = 12.0f;
 
     phase = (float)SDL_GetTicks() * 0.00055f;
     step  = 2.0f * (float)PI / (float)N_DASHES;
@@ -400,20 +378,10 @@ static void draw_ring_3d(const float rel[3], float dr,
         for (int s = 0; s < SEGS; s++) {
             float aa = a0 + (a1 - a0) * (float)s       / (float)SEGS;
             float ab = a0 + (a1 - a0) * (float)(s + 1) / (float)SEGS;
-            float sx0, sy0, sx1, sy1;
-            float p0x = Cx + cosf(aa)*ring_r*t1[0] + sinf(aa)*ring_r*t2[0];
-            float p0y = Cy + cosf(aa)*ring_r*t1[1] + sinf(aa)*ring_r*t2[1];
-            float p0z = Cz + cosf(aa)*ring_r*t1[2] + sinf(aa)*ring_r*t2[2];
-            float p1x = Cx + cosf(ab)*ring_r*t1[0] + sinf(ab)*ring_r*t2[0];
-            float p1y = Cy + cosf(ab)*ring_r*t1[1] + sinf(ab)*ring_r*t2[1];
-            float p1z = Cz + cosf(ab)*ring_r*t1[2] + sinf(ab)*ring_r*t2[2];
-            if (!mat4_project(vp, p0x, p0y, p0z, WIN_W, WIN_H, &sx0, &sy0)) continue;
-            if (!mat4_project(vp, p1x, p1y, p1z, WIN_W, WIN_H, &sx1, &sy1)) continue;
-            /* mat4_project: y=0 at bottom; flip to y=0 at top for the UI shader */
-            sy0 = (float)WIN_H - sy0;
-            sy1 = (float)WIN_H - sy1;
-            v[vtx*4+0]=sx0; v[vtx*4+1]=sy0; v[vtx*4+2]=0.0f; v[vtx*4+3]=0.0f; vtx++;
-            v[vtx*4+0]=sx1; v[vtx*4+1]=sy1; v[vtx*4+2]=0.0f; v[vtx*4+3]=0.0f; vtx++;
+            v[vtx*4+0]=cx+cosf(aa)*r_px; v[vtx*4+1]=cy+sinf(aa)*r_px;
+            v[vtx*4+2]=0.0f; v[vtx*4+3]=0.0f; vtx++;
+            v[vtx*4+0]=cx+cosf(ab)*r_px; v[vtx*4+1]=cy+sinf(ab)*r_px;
+            v[vtx*4+2]=0.0f; v[vtx*4+3]=0.0f; vtx++;
         }
     }
 
@@ -1864,7 +1832,7 @@ void render_frame(const float view[16], const float proj[16],
     {
         float rel[3], dr, aa;
         if (inspect_ring_params(info, rel, &dr, &aa))
-            draw_ring_3d(rel, dr, aa, vp_camrel);
+            draw_ring_2d(rel, dr, aa, vp_camrel);
     }
 
     /* ------------------------------------------------------------------ 7. Labels */
