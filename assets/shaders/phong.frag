@@ -103,6 +103,21 @@ vec3 lava_color(float heat)
     return mix(vec3(0.98, 0.58, 0.14), vec3(1.00, 0.80, 0.34), (heat - 0.92) / 0.08);
 }
 
+vec3 local_surface_dir_to_world(vec3 local_dir)
+{
+    float cr = cos(u_rotation);
+    float sr = sin(u_rotation);
+    float tx = local_dir.x * cr - local_dir.z * sr;
+    float ty = local_dir.y;
+    float tz = local_dir.x * sr + local_dir.z * cr;
+
+    float co = cos(u_obliquity);
+    float so = sin(u_obliquity);
+    return normalize(vec3(co * tx + so * ty,
+                          -so * tx + co * ty,
+                          tz));
+}
+
 /* ======================================================================
  * Per-planet surface colour  (NL = normal in body-local frame)
  * ====================================================================== */
@@ -314,6 +329,7 @@ void main() {
 
     vec3 base_surface = surface_color(NL);
     vec3 surface = base_surface;
+    vec3 shade_N = N;
     vec3 lava_emit = vec3(0.0);
 
     /* Sun direction — computed once, reused for emission clamping inside the
@@ -401,14 +417,16 @@ void main() {
         if (kind == 1) {
             float crater_floor = 1.0 - smoothstep(0.0, rad * 0.72, ang);
             float hot_rim = ring * (1.0 - progress * 0.65);
-            surface = mix(surface, surface * 0.12, crater_floor * 0.58);
-            surface = mix(surface, mix(lava_deep, lava_molten, core), core * heat * 0.72);
-            surface = mix(surface, vec3(0.08, 0.05, 0.04), ring * 0.32);
+            float glow_cover = heat * (0.42 + 0.28 * (1.0 - progress));
+            surface = mix(surface, surface * 0.42, crater_floor * heat * 0.22);
+            surface = mix(surface, mix(lava_deep, lava_molten, core), core * glow_cover);
+            surface = mix(surface, vec3(0.08, 0.05, 0.04), ring * heat * 0.14);
             lava_emit += lava_molten * (core * 1.5 + hot_rim * 0.9) * heat;
         } else if (kind == 2) {
             float ash = outer * 0.35;
-            surface = mix(surface, surface * 0.18, ring * heat * 0.72 + ash);
-            surface = mix(surface, mix(lava_deep, lava_hot, core), melt * heat * 0.88);
+            float glow_cover = heat * (0.50 + 0.28 * (1.0 - progress));
+            surface = mix(surface, surface * 0.34, ring * heat * 0.24 + ash * 0.45);
+            surface = mix(surface, mix(lava_deep, lava_hot, core), melt * glow_cover);
             lava_emit += lava * (core * 1.8 + melt * 0.9 + outer * 0.35) * heat;
         } else if (kind == 3) {
             float flood = 1.0 - smoothstep(0.0, rad * 1.08, ang);
@@ -467,6 +485,7 @@ void main() {
             vec3 scar_p = vec3(dot(NL, scar_t1),
                                dot(NL, scar_t2),
                                dot(NL, idir) - cos(rad));
+            float cap_gate = 1.0 - smoothstep(rad * 1.02, rad * 1.22, ang);
             vec2 crater_uv = scar_p.xy / max(rad, 0.001);
             float crater_r = length(crater_uv);
             float crater_ang = atan(crater_uv.y, crater_uv.x);
@@ -515,7 +534,26 @@ void main() {
             float earth_crater = u_planet_type == 1 ? 1.0 : 0.0;
             float size_fade = smoothstep(0.006, 0.18, rad);
             float crater_alpha = mix(0.58, 1.0, earth_crater) * mix(0.08, 1.0, size_fade)
-                               * (1.0 - s_intersection * 0.95);
+                               * (1.0 - s_intersection * 0.35) * cap_gate;
+            vec3 crater_radial_dir = (scar_t1 * crater_uv.x + scar_t2 * crater_uv.y)
+                                   / max(crater_r, 0.001);
+            float bowl_slope = smoothstep(0.12, 0.62, crater_r)
+                             * (1.0 - smoothstep(0.62, 0.92, crater_r));
+            float rim_inner = smoothstep(0.60 + rim_shift, 0.84 + rim_shift, crater_r)
+                            * (1.0 - smoothstep(0.84 + rim_shift, 0.98 + rim_shift, crater_r));
+            float rim_outer = smoothstep(0.84 + rim_shift, 0.98 + rim_shift, crater_r)
+                            * (1.0 - smoothstep(0.98 + rim_shift, 1.16 + rim_shift, crater_r));
+            float normal_depth = crater_alpha * crater_mask * outer_fade;
+            vec3 rubble_normal = (scar_t1 * rubble_var + scar_t2 * chunk_var)
+                               * fractured_band * 0.18;
+            vec3 crater_local_n = normalize(NL
+                                      - crater_radial_dir * bowl_slope * (0.34 + depth * 0.18)
+                                      - crater_radial_dir * rim_inner * 0.22
+                                      + crater_radial_dir * rim_outer * 0.18
+                                      + rubble_normal);
+            shade_N = normalize(mix(shade_N,
+                                    local_surface_dir_to_world(crater_local_n),
+                                    normal_depth * 0.82));
             vec3 warm_brown = mix(vec3(0.18, 0.14, 0.11), vec3(0.34, 0.26, 0.18), crater_coarse);
             vec3 dusty_brown = mix(vec3(0.24, 0.19, 0.14), vec3(0.42, 0.33, 0.24), crater_fine);
             vec3 ridge_brown = mix(vec3(0.32, 0.25, 0.18), vec3(0.50, 0.40, 0.30), crater_coarse * 0.65 + crater_fine * 0.35);
@@ -561,6 +599,7 @@ void main() {
     }
 
     /* ---- Phong diffuse ------------------------------------------------ */
+    diff = max(dot(shade_N, L), 0.0);
     float light = u_ambient + (1.0 - u_ambient) * diff;
 
     frag_color = vec4(surface * light + lava_emit, 1.0);

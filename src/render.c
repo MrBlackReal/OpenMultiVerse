@@ -55,6 +55,7 @@
 #include "asteroids.h"
 #include "labels.h"
 #include "build.h"
+#include "inspect.h"
 #include "collision.h"
 #include "gl_utils.h"
 #include "math3d.h"
@@ -325,6 +326,83 @@ static void build_draw_text(BuildTextCache *tc, float x, float y, float h) {
     glUniform4f(s_build_ui_color, 1, 1, 1, 1);
     glBindTexture(GL_TEXTURE_2D, tc->tex);
     build_draw_ui_quad(x, y, w, h);
+}
+
+/*
+ * draw_ring_2d — inspect-target ring as a screen-space dashed circle.
+ *
+ * Centre: uses the corrected perspective divisor pz_adj = eye_z − R²/eye_z.
+ *   For an off-axis sphere the projected silhouette is an ellipse whose
+ *   centre is NOT proj(body_pos) — it shifts toward the screen edge.
+ *   Dividing the clip-space x/y by pz_adj instead of eye_z gives the true
+ *   visual centre of the sphere disc at any camera angle.
+ *
+ * Radius: dr × 1.3 projected at Euclidean distance D (angle-stable),
+ *   with a 12 px floor so the ring stays visible for any body at any distance.
+ */
+static void draw_ring_2d(const float rel[3], float dr,
+                         float alpha, const float vp[16])
+{
+    enum { N_DASHES = 8, SEGS = 5 };
+    float v[N_DASHES * SEGS * 2 * 4];
+    float D, r_px, cx, cy, phase, step;
+    float clip_x, clip_y, clip_w, pz_adj;
+    int vtx = 0;
+
+    if (!s_build_ui_shader || !s_build_ui_vbo) return;
+
+    D = sqrtf(rel[0]*rel[0] + rel[1]*rel[1] + rel[2]*rel[2]);
+    if (D < 1e-6f) return;
+
+    clip_x = vp[0]*rel[0] + vp[4]*rel[1] + vp[8] *rel[2] + vp[12];
+    clip_y = vp[1]*rel[0] + vp[5]*rel[1] + vp[9] *rel[2] + vp[13];
+    clip_w = vp[3]*rel[0] + vp[7]*rel[1] + vp[11]*rel[2] + vp[15];
+    if (clip_w <= 0.0f) return;
+
+    pz_adj = clip_w - dr * dr / clip_w;
+    if (pz_adj <= 0.0f) return;
+
+    cx = (clip_x / pz_adj + 1.0f) * 0.5f * (float)WIN_W;
+    cy = (float)WIN_H - (clip_y / pz_adj + 1.0f) * 0.5f * (float)WIN_H;
+
+    /* Screen radius using D (Euclidean), not eye_z, so it is angle-stable */
+    r_px = dr * 1.3f * (WIN_H * 0.5f) / (D * half_fov_tan());
+    if (r_px < 12.0f) r_px = 12.0f;
+
+    phase = (float)SDL_GetTicks() * 0.00055f;
+    step  = 2.0f * (float)PI / (float)N_DASHES;
+
+    for (int d = 0; d < N_DASHES; d++) {
+        float a0 = phase + (float)d * step;
+        float a1 = a0 + step * 0.45f;
+        for (int s = 0; s < SEGS; s++) {
+            float aa = a0 + (a1 - a0) * (float)s       / (float)SEGS;
+            float ab = a0 + (a1 - a0) * (float)(s + 1) / (float)SEGS;
+            v[vtx*4+0]=cx+cosf(aa)*r_px; v[vtx*4+1]=cy+sinf(aa)*r_px;
+            v[vtx*4+2]=0.0f; v[vtx*4+3]=0.0f; vtx++;
+            v[vtx*4+0]=cx+cosf(ab)*r_px; v[vtx*4+1]=cy+sinf(ab)*r_px;
+            v[vtx*4+2]=0.0f; v[vtx*4+3]=0.0f; vtx++;
+        }
+    }
+
+    glUseProgram(s_build_ui_shader);
+    glUniform2f(s_build_ui_screen, (float)WIN_W, (float)WIN_H);
+    glUniform1i(s_build_ui_use_tex, 0);
+    glUniform4f(s_build_ui_color, 1.0f, 1.0f, 1.0f, alpha);
+    glBindVertexArray(s_build_ui_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, s_build_ui_vbo);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, vtx * 4 * sizeof(float), v);
+    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glLineWidth(1.5f);
+    glDrawArrays(GL_LINES, 0, vtx);
+    glLineWidth(1.0f);
+    glDisable(GL_BLEND);
+    glDepthMask(GL_TRUE);
+    glEnable(GL_DEPTH_TEST);
+    glBindVertexArray(0);
 }
 
 /* Format a distance in AU into a human-readable string, adapting units. */
@@ -798,8 +876,8 @@ void render_init(void) {
         s_build_ui_use_tex = glGetUniformLocation(s_build_ui_shader, "u_use_tex");
         s_build_ui_tex     = glGetUniformLocation(s_build_ui_shader, "u_tex");
         s_build_ui_vao = gl_vao_create();
-        /* One quad: 6 vertices × 4 floats (xy, uv) */
-        s_build_ui_vbo = gl_vbo_create(24 * sizeof(float), NULL, GL_DYNAMIC_DRAW);
+        /* Shared overlay buffer: enough for one text quad or an inspect ring. */
+        s_build_ui_vbo = gl_vbo_create(96 * 2 * 4 * sizeof(float), NULL, GL_DYNAMIC_DRAW);
         glEnableVertexAttribArray(0);
         glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void*)0);
         glEnableVertexAttribArray(1);
@@ -1227,6 +1305,8 @@ void render_frame(const float view[16], const float proj[16],
         glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
     }
     glBindVertexArray(0);
+
+    inspect_pick_center(vp_camrel, info);
 
     /* ------------------------------------------------------------------ 2.5. Atmosphere glow
      * Separate additive pass: GL_SRC_ALPHA / GL_ONE, depth-tested but no depth write.
@@ -1745,6 +1825,13 @@ void render_frame(const float view[16], const float proj[16],
 
     /* ------------------------------------------------------------------ 6.5. Build preview */
     render_build_preview(vp_camrel);
+
+    /* ------------------------------------------------------------------ 6.6. Inspect target ring */
+    {
+        float rel[3], dr, aa;
+        if (inspect_ring_params(info, rel, &dr, &aa))
+            draw_ring_2d(rel, dr, aa, vp_camrel);
+    }
 
     /* ------------------------------------------------------------------ 7. Labels */
     labels_render(view_rot, proj, vp_camrel, info, dt);
