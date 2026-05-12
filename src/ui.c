@@ -32,7 +32,7 @@
  *   which moves the panel from off-screen left to its final position.
  *
  * Pause menu:
- *   A centred modal panel drawn over a 38%-alpha full-screen dark overlay.
+ *   White buttons float over a 40%-alpha full-screen dark overlay.
  *   Hit-testing uses the same PauseMenuLayout struct as drawing, so mouse
  *   hover and click coordinates map to the same item rectangles.
  */
@@ -40,6 +40,7 @@
 #include "camera.h"
 #include "physics.h"
 #include "build.h"
+#include "inspect.h"
 #include "body.h"
 #include "gl_utils.h"
 #include "ui_theme.h"
@@ -56,10 +57,9 @@
 #define BUILD_ITEM_FONT_SIZE 18
 #define MENU_TITLE_SIZE 24
 #define MENU_TEXT_SIZE  18
-#define MENU_HINT_SIZE  16
-#define PAUSE_MENU_PANEL_W 360.0f
-#define PAUSE_MENU_PANEL_H 312.0f
-#define PAUSE_MENU_ITEM_W (PAUSE_MENU_PANEL_W - 36.0f)
+#define PAUSE_MENU_PANEL_W 324.0f
+#define PAUSE_MENU_PANEL_H 198.0f
+#define PAUSE_MENU_ITEM_W PAUSE_MENU_PANEL_W
 #define PAUSE_MENU_ITEM_H 42.0f
 #define PAUSE_MENU_ITEM_ACTIVE_H 42.0f
 #define PAUSE_MENU_ITEM_GAP 10.0f
@@ -73,10 +73,14 @@
 static GLuint s_shader     = 0;
 static GLuint s_vao        = 0;
 static GLuint s_vbo        = 0;    /* 6 vertices × 4 floats (x,y,u,v)  */
+static GLuint s_pause_blur_tex = 0;
+static int    s_pause_blur_w = 0;
+static int    s_pause_blur_h = 0;
 static GLint  s_loc_screen  = -1;
 static GLint  s_loc_color   = -1;
 static GLint  s_loc_use_tex = -1;
 static GLint  s_loc_tex     = -1;
+static GLint  s_loc_texel_size = -1;
 
 static TTF_Font *s_font = NULL;
 static TTF_Font *s_build_item_font = NULL;
@@ -101,8 +105,6 @@ static TextCache s_tc_nearest = {0};
 static TextCache s_tc_build_title = {0};
 static TextCache s_tc_build_hint  = {0};
 static TextCache s_tc_build_items[8];
-static TextCache s_tc_pause_title = {0};
-static TextCache s_tc_pause_hint = {0};
 static TextCache s_tc_pause_items[4];
 
 static int s_pause_menu_visible = 0;
@@ -128,9 +130,9 @@ typedef struct {
     int n;
     float item_x;         /* x of item body (fixed) */
     float item_w;
+    float item_active_w;
     float item_h;
-    float strip_w;        /* inactive strip width (strip right-edge = item_x) */
-    float strip_active_w; /* active strip width (expands left) */
+    float strip_w;        /* strip right-edge = item_x */
     float gap;
     float items_y;        /* y of first item */
     float title_y;        /* y of "BUILD" title text */
@@ -168,8 +170,8 @@ static PauseMenuLayout pause_menu_layout(float W, float H)
     layout.panel_y = (H - PAUSE_MENU_PANEL_H) * 0.5f;
     layout.panel_w = PAUSE_MENU_PANEL_W;
     layout.panel_h = PAUSE_MENU_PANEL_H;
-    layout.item_x = layout.panel_x + 18.0f;
-    layout.first_item_y = layout.panel_y + 72.0f;
+    layout.item_x = layout.panel_x;
+    layout.first_item_y = layout.panel_y;
     return layout;
 }
 
@@ -185,9 +187,9 @@ static BuildBarLayout build_bar_layout(float W)
     const float TITLE_AREA_H = 72.0f;
     const float BOTTOM_AREA_H = 42.0f;
     layout.strip_w        = 8.0f;
-    layout.strip_active_w = 14.0f;
     layout.item_h         = PAUSE_MENU_ITEM_H;
     layout.item_w         = 112.0f;
+    layout.item_active_w  = 132.0f;
     layout.gap            = PAUSE_MENU_ITEM_GAP;
     layout.panel_x        = LEFT_MARGIN;
     layout.item_x         = layout.panel_x + PANEL_PAD + layout.strip_w;
@@ -354,6 +356,72 @@ static void draw_rect(float x, float y, float w, float h,
     draw_quad(x, y, w, h);
 }
 
+static void draw_tex(TextCache *tc, float x, float y, float h);
+
+static void draw_bottom_mode_label(float W, float H, const char *title, const char *hint)
+{
+    SDL_Color title_col = {255, 255, 255, 235};
+    SDL_Color hint_col  = {255, 255, 255, 170};
+    float title_y = hint ? H - 48.0f : H - 34.0f;
+    float title_w = 0.0f;
+    float hint_w = 0.0f;
+
+    update_text_with_font(&s_tc_build_title, s_menu_title_font, title, title_col);
+    if (hint)
+        update_text_with_font(&s_tc_build_hint, s_font, hint, hint_col);
+
+    if (s_tc_build_title.tex) {
+        title_w = (float)MENU_TITLE_SIZE * (float)s_tc_build_title.w / (float)s_tc_build_title.h;
+        draw_tex(&s_tc_build_title, (W - title_w) * 0.5f, title_y, (float)MENU_TITLE_SIZE);
+    }
+
+    if (hint && s_tc_build_hint.tex) {
+        hint_w = (float)FONT_SIZE * (float)s_tc_build_hint.w / (float)s_tc_build_hint.h;
+        draw_tex(&s_tc_build_hint, (W - hint_w) * 0.5f, H - 22.0f, (float)FONT_SIZE);
+    }
+
+    {
+        float bar_w = fmaxf(title_w, hint_w) + 28.0f;
+        if (bar_w > W * 0.55f) bar_w = W * 0.55f;
+        draw_rect((W - bar_w) * 0.5f, H - (float)BAR_H, bar_w, (float)BAR_H,
+                  1.0f, 1.0f, 1.0f, 1.0f);
+    }
+}
+
+static void draw_pause_blur(float W, float H)
+{
+    int win_w = WIN_W;
+    int win_h = WIN_H;
+    if (win_w <= 0 || win_h <= 0) return;
+
+    if (!s_pause_blur_tex || s_pause_blur_w != win_w || s_pause_blur_h != win_h) {
+        if (s_pause_blur_tex)
+            glDeleteTextures(1, &s_pause_blur_tex);
+        glGenTextures(1, &s_pause_blur_tex);
+        glBindTexture(GL_TEXTURE_2D, s_pause_blur_tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, win_w, win_h,
+                     0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+        s_pause_blur_w = win_w;
+        s_pause_blur_h = win_h;
+    } else {
+        glBindTexture(GL_TEXTURE_2D, s_pause_blur_tex);
+    }
+
+    glReadBuffer(GL_BACK);
+    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, win_w, win_h);
+
+    glUniform1i(s_loc_use_tex, 2);
+    glUniform2f(s_loc_texel_size, 1.0f / (float)win_w, 1.0f / (float)win_h);
+    glUniform4f(s_loc_color, 1.0f, 1.0f, 1.0f, 1.0f);
+    draw_quad(0.0f, 0.0f, W, H);
+}
+
 /* draw_tex — render a TextCache entry at pixel position (x, y) with a given
  * height in pixels. Width is computed from the texture's aspect ratio so
  * glyphs are never stretched. */
@@ -378,9 +446,8 @@ static void draw_tex(TextCache *tc, float x, float y, float h) {
  *   (ease=1 → ox = 0).
  *
  * Active item indication:
- *   The colour strip to the left of each item expands from strip_w to
- *   strip_active_w for the selected item. The item background alpha is 1.0
- *   (fully opaque white) for the active item, 0.72 for inactive.
+ *   The colour strip stays fixed-width. The selected white item body expands
+ *   to the right and uses full opacity.
  */
 static void draw_build_bar(float W)
 {
@@ -414,27 +481,10 @@ static void draw_build_bar(float W)
     /* Shift everything left by (1-ease) × full panel width+margin */
     float ox = (ease - 1.0f) * (layout.panel_x + layout.panel_w);
 
-    SDL_Color title_col = {255, 255, 255, 235};
-    SDL_Color hint_col  = {255, 255, 255, 170};
     SDL_Color item_col  = {0, 0, 0, 255};
+    const char *hint = g_build_tab_held ? "scroll to select" : "hold TAB and scroll";
 
-    update_text_with_font(&s_tc_build_title, s_menu_title_font, "BUILD", title_col);
-    update_text_with_font(&s_tc_build_hint, s_font,
-                          g_build_tab_held ? "scroll to select" : "hold TAB and scroll",
-                          hint_col);
-
-    draw_rect(layout.panel_x + ox, layout.panel_y, layout.panel_w, layout.panel_h,
-              UI_ACCENT_R, UI_ACCENT_G, UI_ACCENT_B, 1.0f);
-    /* White top border strip */
-    draw_rect(layout.panel_x + ox, layout.panel_y, layout.panel_w, 5.0f, 1.0f, 1.0f, 1.0f, 1.0f);
-
-    if (s_tc_build_title.tex) {
-        float tw = (float)MENU_TITLE_SIZE * (float)s_tc_build_title.w / (float)s_tc_build_title.h;
-        draw_tex(&s_tc_build_title,
-                 layout.panel_x + ox + (layout.panel_w - tw) * 0.5f,
-                 layout.title_y,
-                 (float)MENU_TITLE_SIZE);
-    }
+    draw_bottom_mode_label(W, (float)WIN_H, "BUILD", hint);
 
     int selected = build_selected_index();
 
@@ -443,12 +493,12 @@ static void draw_build_bar(float W)
         if (!p) continue;
         int active = (i == selected);
         float item_y  = layout.items_y + (layout.item_h + layout.gap) * (float)i;
-        float sw      = active ? layout.strip_active_w : layout.strip_w;
+        float item_w  = active ? layout.item_active_w : layout.item_w;
         float strip_x = layout.item_x - layout.strip_w + ox;
 
-        draw_rect(layout.item_x + ox, item_y, layout.item_w, layout.item_h,
+        draw_rect(layout.item_x + ox, item_y, item_w, layout.item_h,
                   1.0f, 1.0f, 1.0f, active ? 1.0f : 0.72f);
-        draw_rect(strip_x, item_y, sw, layout.item_h,
+        draw_rect(strip_x, item_y, layout.strip_w, layout.item_h,
                   p->col[0], p->col[1], p->col[2], 1.0f);
 
         update_text_with_font(&s_tc_build_items[i], s_build_item_font ? s_build_item_font : s_font,
@@ -457,19 +507,12 @@ static void draw_build_bar(float W)
             float tw     = (float)BUILD_ITEM_FONT_SIZE * (float)s_tc_build_items[i].w / (float)s_tc_build_items[i].h;
             float text_y = item_y + (layout.item_h - (float)BUILD_ITEM_FONT_SIZE) * 0.5f;
             draw_tex(&s_tc_build_items[i],
-                     layout.item_x + ox + (layout.item_w - tw) * 0.5f,
+                     layout.item_x + ox + (item_w - tw) * 0.5f,
                      text_y,
                      (float)BUILD_ITEM_FONT_SIZE);
         }
     }
 
-    if (s_tc_build_hint.tex) {
-        float tw = (float)FONT_SIZE * (float)s_tc_build_hint.w / (float)s_tc_build_hint.h;
-        draw_tex(&s_tc_build_hint,
-                 layout.panel_x + ox + (layout.panel_w - tw) * 0.5f,
-                 layout.hint_y,
-                 (float)FONT_SIZE);
-    }
 }
 
 /* ── pause menu ───────────────────────────────────────────────────────────── */
@@ -485,28 +528,13 @@ static void draw_pause_menu(float W, float H)
         "Leave"
     };
 
-    SDL_Color title_col = {255, 255, 255, 235};
     SDL_Color item_col = {0, 0, 0, 255};
-    SDL_Color hint_col = {255, 255, 255, 170};
 
-    update_text_with_font(&s_tc_pause_title, s_menu_title_font, "MENU", title_col);
-    update_text_with_font(&s_tc_pause_hint, s_font, "ENTER select  |  ESC continue", hint_col);
     for (int i = 0; i < 4; i++)
         update_text_with_font(&s_tc_pause_items[i], s_menu_font, labels[i], item_col);
 
-    /* Full-screen dark overlay at 38% opacity to focus attention on menu */
-    draw_rect(0.0f, 0.0f, W, H, 0.0f, 0.0f, 0.0f, 0.38f);
-    draw_rect(layout.panel_x, layout.panel_y, layout.panel_w, layout.panel_h,
-              UI_ACCENT_R, UI_ACCENT_G, UI_ACCENT_B, 1.0f);
-    draw_rect(layout.panel_x, layout.panel_y, layout.panel_w, 5.0f, 1.0f, 1.0f, 1.0f, 1.0f);
-
-    if (s_tc_pause_title.tex) {
-        float tw = (float)MENU_TITLE_SIZE * (float)s_tc_pause_title.w / (float)s_tc_pause_title.h;
-        draw_tex(&s_tc_pause_title,
-                 layout.panel_x + (layout.panel_w - tw) * 0.5f,
-                 layout.panel_y + 24.0f,
-                 (float)MENU_TITLE_SIZE);
-    }
+    draw_pause_blur(W, H);
+    draw_rect(0.0f, 0.0f, W, H, 0.0f, 0.0f, 0.0f, 0.40f);
 
     for (int i = 0; i < layout.n; i++) {
         int active = (i == s_pause_menu_selected);
@@ -525,14 +553,6 @@ static void draw_pause_menu(float W, float H)
                      (float)MENU_TEXT_SIZE);
         }
     }
-
-    if (s_tc_pause_hint.tex) {
-        float tw = (float)MENU_HINT_SIZE * (float)s_tc_pause_hint.w / (float)s_tc_pause_hint.h;
-        draw_tex(&s_tc_pause_hint,
-                 layout.panel_x + (layout.panel_w - tw) * 0.5f,
-                 layout.panel_y + layout.panel_h - 28.0f,
-                 (float)MENU_HINT_SIZE);
-    }
 }
 
 /* ── public API ───────────────────────────────────────────────────────────── */
@@ -545,6 +565,7 @@ void ui_init(void) {
     s_loc_color   = glGetUniformLocation(s_shader, "u_color");
     s_loc_use_tex = glGetUniformLocation(s_shader, "u_use_tex");
     s_loc_tex     = glGetUniformLocation(s_shader, "u_tex");
+    s_loc_texel_size = glGetUniformLocation(s_shader, "u_texel_size");
 
     s_vao = gl_vao_create();
     /* Single VBO for 6 vertices (2 triangles); re-uploaded per draw_quad call. */
@@ -696,6 +717,15 @@ void ui_render(void) {
     glBindVertexArray(s_vao);
     glBindBuffer(GL_ARRAY_BUFFER, s_vbo);
 
+    if (s_pause_menu_visible) {
+        draw_pause_menu(W, (float)WIN_H);
+        glBindVertexArray(0);
+        glDisable(GL_BLEND);
+        glDepthMask(GL_TRUE);
+        glEnable(GL_DEPTH_TEST);
+        return;
+    }
+
     /* Bar background (dim white), then fill */
     draw_rect(BX, BY, BW, BH, 1.0f, 1.0f, 1.0f, 0.15f);
     draw_rect(BX, BY, BW * t, BH, 1.0f, 1.0f, 1.0f, 0.85f);
@@ -724,7 +754,8 @@ void ui_render(void) {
     }
 
     draw_build_bar(W);
-    draw_pause_menu(W, (float)WIN_H);
+    if (!g_build_mode && g_inspect_mode)
+        draw_bottom_mode_label(W, (float)WIN_H, "INSPECT", "click to inspect planet");
 
     /* Restore 3D state */
     glBindVertexArray(0);
@@ -741,13 +772,12 @@ void ui_shutdown(void) {
     if (s_tc_build_title.tex) glDeleteTextures(1, &s_tc_build_title.tex);
     for (int i = 0; i < 8; i++)
         if (s_tc_build_items[i].tex) glDeleteTextures(1, &s_tc_build_items[i].tex);
-    if (s_tc_pause_title.tex) glDeleteTextures(1, &s_tc_pause_title.tex);
-    if (s_tc_pause_hint.tex) glDeleteTextures(1, &s_tc_pause_hint.tex);
     for (int i = 0; i < 4; i++)
         if (s_tc_pause_items[i].tex) glDeleteTextures(1, &s_tc_pause_items[i].tex);
     if (s_vbo)  glDeleteBuffers(1, &s_vbo);
     if (s_vao)  glDeleteVertexArrays(1, &s_vao);
     if (s_shader) glDeleteProgram(s_shader);
+    if (s_pause_blur_tex) glDeleteTextures(1, &s_pause_blur_tex);
     /* Close distinct font objects; shared fallback pointers must not be closed twice */
     if (s_menu_title_font && s_menu_title_font != s_menu_font && s_menu_title_font != s_font)
         TTF_CloseFont(s_menu_title_font);
@@ -757,7 +787,8 @@ void ui_shutdown(void) {
         TTF_CloseFont(s_menu_font);
     if (s_font)   TTF_CloseFont(s_font);
     TTF_Quit();
-    s_shader = s_vao = s_vbo = 0;
+    s_shader = s_vao = s_vbo = s_pause_blur_tex = 0;
+    s_pause_blur_w = s_pause_blur_h = 0;
     s_font = NULL;
     s_build_item_font = NULL;
     s_menu_font = NULL;
