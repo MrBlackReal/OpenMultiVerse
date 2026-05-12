@@ -13,8 +13,8 @@ Not a screensaver. Not a game. A sandbox for curiosity.
 
 <table>
   <tr>
-    <td><img src="https://github.com/user-attachments/assets/38309e42-acfb-4728-93d3-761169c5174b" alt="Planets"/><br/><sub><b>Discover planets and other celestial bodies</b></sub></td>
-    <td><img src="https://github.com/user-attachments/assets/f1493379-c699-411f-aa56-5355c950b04c" alt="Solar system"/><br/><sub><b>Simulate entire solar systems</b></sub></td>
+    <td><img src="https://github.com/user-attachments/assets/68655bf4-ddfc-48e9-80a6-be727c7c4ed4" alt="Planets"/><br/><sub><b>Discover planets and other celestial bodies</b></sub></td>
+    <td><img src="https://github.com/user-attachments/assets/2d2e0cfc-ca05-46a5-9c1c-76d5b31fec02" alt="Solar system"/><br/><sub><b>Simulate entire solar systems</b></sub></td>
   </tr>
   <tr>
     <td><img src="https://github.com/user-attachments/assets/3c1df437-4e81-4a35-b3c6-45ea37121afd" alt="Collision"/><br/><sub><b>Collision of bodies using orbital mechanics</b></sub></td>
