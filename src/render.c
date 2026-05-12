@@ -957,7 +957,7 @@ static void render_build_preview(const float vp_camrel[16])
         glBindVertexArray(0);
     }
 
-    /* Guide lines to nearest 3 bodies; alpha reduces for more distant targets */
+    /* Guide lines to nearest 3 bodies */
     if (s_build_line_shader) {
         float line_data[6 * 7];
         int v = 0;
@@ -967,7 +967,7 @@ static void render_build_preview(const float vp_camrel[16])
             float bx = (float)(b->pos[0] * RS - g_cam.pos[0]);
             float by = (float)(b->pos[1] * RS - g_cam.pos[1]);
             float bz = (float)(b->pos[2] * RS - g_cam.pos[2]);
-            float a = 0.62f - 0.12f * (float)k;   /* nearest=0.62, third=0.38 */
+            float a = 0.72f;
 
             line_data[v*7+0] = px; line_data[v*7+1] = py; line_data[v*7+2] = pz;
             line_data[v*7+3] = 1.0f; line_data[v*7+4] = 1.0f;
