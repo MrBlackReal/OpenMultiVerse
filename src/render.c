@@ -100,6 +100,7 @@ static GLint  s_sp_impact_heat  = -1;
 static GLint  s_sp_impact_prog  = -1;
 static GLint  s_sp_impact_seed  = -1;
 static GLint  s_sp_impact_kind  = -1;
+static GLint  s_sp_inside       = -1;   /* 1 when camera is inside the sphere */
 
 /*
  * get_planet_type — map body name to a procedural texture variant index.
@@ -690,6 +691,7 @@ void render_init(void) {
     s_sp_impact_prog  = glGetUniformLocation(s_sphere_shader, "u_impact_progress[0]");
     s_sp_impact_seed  = glGetUniformLocation(s_sphere_shader, "u_impact_seed[0]");
     s_sp_impact_kind  = glGetUniformLocation(s_sphere_shader, "u_impact_kind[0]");
+    s_sp_inside       = glGetUniformLocation(s_sphere_shader, "u_inside");
 
     /* Frame-constant uniforms (fov_tan, aspect, screen do not change at runtime) */
     glUseProgram(s_sphere_shader);
@@ -1228,13 +1230,21 @@ void render_frame(const float view[16], const float proj[16],
          * dcam = eye_z/cos(θ), which makes the threshold oscillate when the camera
          * rotates.  eye_z is invariant under pure rotation so the transition is stable. */
         float eye_z = (float)(dxd*cam_fwd[0] + dyd*cam_fwd[1] + dzd*cam_fwd[2]);
-        float px = (eye_z > 0.0f)
-                   ? (WIN_H / 2.0f) * dr / (eye_z * half_fov_tan() + 1e-9f)
-                   : 0.0f;
+        int inside_body = (dcam < dr);
+        float px;
+        if (inside_body) {
+            /* Camera is inside the sphere — always render as sphere (large px
+             * suppresses the dot, show=0 enables sphere rendering below). */
+            px = 1000.0f;
+        } else {
+            px = (eye_z > 0.0f)
+                 ? (WIN_H / 2.0f) * dr / (eye_z * half_fov_tan() + 1e-9f)
+                 : 0.0f;
+        }
         /* Threshold: sphere first appears when its diameter (2×px) equals the dot
          * diameter (2.5px), i.e. px = 1.25 = BODY_SPHERE_APPEAR_PX. */
         body_px[i]   = px;
-        info[i].show = (px < BODY_SPHERE_APPEAR_PX) ? 1 : 0;
+        info[i].show = (!inside_body && px < BODY_SPHERE_APPEAR_PX) ? 1 : 0;
 
         if (!g_bodies[i].alive || info[i].show) continue;
         if (b->is_star) continue;   /* stars rendered as glare only, not Phong spheres */
@@ -1302,6 +1312,7 @@ void render_frame(const float view[16], const float proj[16],
             glUniform1iv(s_sp_impact_kind, nspots, kinds);
         }
 
+        glUniform1i(s_sp_inside, inside_body);
         glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
     }
     glBindVertexArray(0);

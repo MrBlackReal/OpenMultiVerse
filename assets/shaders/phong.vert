@@ -17,6 +17,7 @@ uniform vec3  u_center;
 uniform float u_radius;
 uniform vec3  u_cam_right;
 uniform vec3  u_cam_up;
+uniform int   u_inside;   /* 1 when camera is inside the sphere */
 
 out vec2 v_uv;
 
@@ -24,13 +25,21 @@ const float BILL_SCALE = 2.0;
 
 void main() {
     vec2 off = a_uv * 2.0 - 1.0;           /* -1..+1                     */
+    v_uv = off * BILL_SCALE;               /* -BILL_SCALE..+BILL_SCALE   */
+
+    if (u_inside == 1) {
+        /* Camera is inside this body — billboard would be behind the camera.
+         * Use an oversized fullscreen NDC quad instead; the fragment shader
+         * reconstructs the per-pixel ray from gl_FragCoord independently of
+         * billboard position, so inside-surface rendering is correct. */
+        gl_Position = vec4(off.x * 2.0, off.y * 2.0, 0.0, 1.0);
+        return;
+    }
 
     /* Oversized billboard: BILL_SCALE * radius in each camera axis */
     vec3 world = u_center
                + u_cam_right * (off.x * u_radius * BILL_SCALE)
                + u_cam_up    * (off.y * u_radius * BILL_SCALE);
 
-    /* v_uv scaled to match: frag_bill = center + right*v_uv.x*radius + ... */
-    v_uv        = off * BILL_SCALE;         /* -BILL_SCALE..+BILL_SCALE   */
     gl_Position = u_vp * vec4(world, 1.0);
 }
