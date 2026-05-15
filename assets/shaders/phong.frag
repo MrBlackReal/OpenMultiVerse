@@ -332,6 +332,8 @@ void main() {
     vec3 surface = base_surface;
     vec3 shade_N = N;
     vec3 lava_emit = vec3(0.0);
+    float cloud_mask = 0.0;
+    float impact_light_block = 0.0;
 
     /* ---- Cloud layer (Earth only) --------------------------------------- */
     if (u_planet_type == 1) {
@@ -361,9 +363,7 @@ void main() {
         float cn1 = fbm(warped);
         float cn2 = fbm(warped * 2.1 + vec3(3.3, 7.6, 1.9));
         float cloud_val = cn1 * 0.70 + cn2 * 0.30;
-        float cloud_mask = smoothstep(0.48, 0.66, cloud_val);
-
-        surface = mix(surface, vec3(0.93, 0.95, 0.97), cloud_mask);
+        cloud_mask = smoothstep(0.48, 0.66, cloud_val);
     }
 
     /* Sun direction — computed once, reused for emission clamping inside the
@@ -440,6 +440,8 @@ void main() {
                    * (1.0 - smoothstep(rad * 0.72, rad * 1.02, ang));
         float outer = smoothstep(rad * 0.72, rad * 1.30, ang)
                     * (1.0 - smoothstep(rad * 1.30, rad * 1.85, ang));
+        impact_light_block = max(impact_light_block,
+                                 1.0 - smoothstep(rad * 0.80, rad * 1.18, ang));
         float lava_noise = fbm(NL * 10.5 + idir * 4.0 + vec3(progress * 5.0, progress * 2.2, progress * 3.7));
         float lava_var = (lava_noise - 0.5) * 0.22;
         vec3 lava_hot = lava_color(clamp(min(1.0, heat * 1.02 + 0.06) + lava_var * 0.55, 0.0, 1.0));
@@ -663,7 +665,14 @@ void main() {
 
         vec3 city_color   = mix(vec3(1.0, 0.92, 0.65), vec3(1.0, 0.75, 0.40),
                                 vnoise(NL * 22.0 + vec3(2.1, 6.3, 4.4)));
-        lava_emit += city_color * (core_lights + core_lights2 + core_lights3 + glow_lights) * pop_mask * 0.90;
+        lava_emit += city_color * (core_lights + core_lights2 + core_lights3 + glow_lights)
+                   * pop_mask * (1.0 - impact_light_block) * 0.90;
+    }
+
+    if (cloud_mask > 0.0) {
+        surface = mix(surface, vec3(0.93, 0.95, 0.97), cloud_mask);
+        lava_emit *= 1.0 - cloud_mask;
+        shade_N = normalize(mix(shade_N, N, cloud_mask));
     }
 
     /* ---- Phong diffuse ------------------------------------------------ */
