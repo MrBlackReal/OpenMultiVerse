@@ -88,7 +88,8 @@ static GLint  s_sp_color       = -1;
 static GLint  s_sp_emission    = -1;
 static GLint  s_sp_ambient     = -1;
 static GLint  s_sp_sun_world   = -1;
-static GLint  s_sp_rotation    = -1;
+static GLint  s_sp_rotation      = -1;
+static GLint  s_sp_cloud_rotation = -1;
 static GLint  s_sp_obliquity   = -1;
 static GLint  s_sp_ptype       = -1;   /* procedural texture variant index */
 static GLint  s_sp_star_heat   = -1;
@@ -679,7 +680,8 @@ void render_init(void) {
     s_sp_fov_tan   = glGetUniformLocation(s_sphere_shader, "u_fov_tan");
     s_sp_aspect    = glGetUniformLocation(s_sphere_shader, "u_aspect");
     s_sp_screen    = glGetUniformLocation(s_sphere_shader, "u_screen");
-    s_sp_rotation  = glGetUniformLocation(s_sphere_shader, "u_rotation");
+    s_sp_rotation        = glGetUniformLocation(s_sphere_shader, "u_rotation");
+    s_sp_cloud_rotation  = glGetUniformLocation(s_sphere_shader, "u_cloud_rotation");
     s_sp_obliquity = glGetUniformLocation(s_sphere_shader, "u_obliquity");
     s_sp_ptype     = glGetUniformLocation(s_sphere_shader, "u_planet_type");
     s_sp_star_heat = glGetUniformLocation(s_sphere_shader, "u_star_heat");
@@ -1278,7 +1280,8 @@ void render_frame(const float view[16], const float proj[16],
         glUniform3f(s_sp_color,    b->col[0], b->col[1], b->col[2]);
         glUniform1f(s_sp_emission, b->is_star ? 1.0f : 0.0f);
         glUniform1f(s_sp_ambient,  b->is_star ? 1.0f : 0.05f);
-        glUniform1f(s_sp_rotation,  (float)fmod(b->rotation_angle, 2.0 * PI));
+        glUniform1f(s_sp_rotation,        (float)fmod(b->rotation_angle, 2.0 * PI));
+        glUniform1f(s_sp_cloud_rotation,  (float)b->cloud_rotation);
         glUniform1f(s_sp_obliquity, (float)(b->obliquity * (PI / 180.0)));
         glUniform1i(s_sp_ptype,     get_planet_type(b->name));
         glUniform1f(s_sp_star_heat, collision_body_star_heat(i));

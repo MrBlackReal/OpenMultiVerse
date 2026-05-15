@@ -26,6 +26,7 @@ typedef struct {
     double obliquity;       /* axial tilt in degrees (from ecliptic north)  */
     double rotation_rate;   /* rad/s (positive = prograde)                  */
     double rotation_angle;  /* current rotation phase, rad (0..2π)          */
+    double cloud_rotation;  /* continuous cloud angle, rad (never wrapped)  */
 
     /* Atmosphere (set by universe loader; zero = no atmosphere) */
     float  atm_color[3];    /* RGB atmosphere rim colour                    */

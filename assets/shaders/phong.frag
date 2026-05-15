@@ -40,7 +40,8 @@ uniform float u_fov_tan;
 uniform float u_aspect;
 uniform vec2  u_screen;
 
-uniform float u_rotation;     /* body rotation angle, radians           */
+uniform float u_rotation;        /* body rotation angle, radians           */
+uniform float u_cloud_rotation;  /* continuous cloud angle, never wrapped  */
 uniform float u_obliquity;    /* axial tilt, radians (0 = upright)      */
 uniform int   u_planet_type;  /* 0-9, selects colour recipe             */
 uniform float u_star_heat;    /* 0..1 surface heating from star approach */
@@ -331,6 +332,39 @@ void main() {
     vec3 surface = base_surface;
     vec3 shade_N = N;
     vec3 lava_emit = vec3(0.0);
+
+    /* ---- Cloud layer (Earth only) --------------------------------------- */
+    if (u_planet_type == 1) {
+        /* Clouds rotate slightly faster than the surface. */
+        vec3 NL_cloud;
+        {
+            float co = cos(u_obliquity);
+            float so = sin(u_obliquity);
+            float tx =  co * N.x - so * N.y;
+            float ty =  so * N.x + co * N.y;
+            float tz =  N.z;
+            float cloud_rot = u_cloud_rotation;
+            float cr = cos(-cloud_rot);
+            float sr = sin(-cloud_rot);
+            NL_cloud = vec3(tx * cr - tz * sr, ty, tx * sr + tz * cr);
+        }
+
+        /* Domain warping: warp the sample position with a flow field
+         * before sampling cloud density — creates swirling spiral shapes. */
+        vec3 warp_q = NL_cloud * 3.2 + vec3(1.7, 9.2, 3.4);
+        vec3 warp = vec3(
+            fbm(warp_q),
+            fbm(warp_q + vec3(5.2, 1.3, 8.1)),
+            fbm(warp_q + vec3(2.8, 6.7, 0.5))
+        );
+        vec3 warped = NL_cloud * 4.2 + warp * 0.55 + vec3(4.1, 2.3, 6.8);
+        float cn1 = fbm(warped);
+        float cn2 = fbm(warped * 2.1 + vec3(3.3, 7.6, 1.9));
+        float cloud_val = cn1 * 0.70 + cn2 * 0.30;
+        float cloud_mask = smoothstep(0.48, 0.66, cloud_val);
+
+        surface = mix(surface, vec3(0.93, 0.95, 0.97), cloud_mask);
+    }
 
     /* Sun direction — computed once, reused for emission clamping inside the
      * impact loop (kind 4 dampens edge/fringe emission on the lit hemisphere

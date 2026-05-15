@@ -742,6 +742,7 @@ void physics_respa_end_system(int root, double dt_outer) {
             g_bodies[i].rotation_angle = fmod(
                 g_bodies[i].rotation_angle + g_bodies[i].rotation_rate * dt_outer,
                 2.0 * PI);
+            g_bodies[i].cloud_rotation += g_bodies[i].rotation_rate * 1.15 * dt_outer;
         }
     } else {
         for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
@@ -757,6 +758,7 @@ void physics_respa_end_system(int root, double dt_outer) {
             g_bodies[i].rotation_angle = fmod(
                 g_bodies[i].rotation_angle + g_bodies[i].rotation_rate * dt_outer,
                 2.0 * PI);
+            g_bodies[i].cloud_rotation += g_bodies[i].rotation_rate * 1.15 * dt_outer;
         }
     }
 }
@@ -814,6 +816,7 @@ void physics_step(double dt) {
         g_bodies[i].rotation_angle = fmod(
             g_bodies[i].rotation_angle + g_bodies[i].rotation_rate * dt,
             2.0 * PI);
+        g_bodies[i].cloud_rotation += g_bodies[i].rotation_rate * 1.15 * dt;
     }
     g_sim_time += dt;
 }
