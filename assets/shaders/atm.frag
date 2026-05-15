@@ -63,18 +63,25 @@ void main() {
 
     /* Front face of the outer atmosphere sphere */
     float t_atm = -b - sqrt(max(0.0, R_atm * R_atm - p2));
-    if (t_atm <= 0.0) discard;   /* camera inside atmosphere */
+    /* When t_atm <= 0 the camera is already inside the atmosphere — still
+     * render glow.  Clamp t_hit to 0 so the lit-side normal is evaluated at
+     * the camera position rather than a point behind it. */
+    float t_hit = max(t_atm, 0.0);
 
     /* Smooth power-law falloff.
      * norm = 0 at the planet surface (limb), 1 at the outer atmosphere edge.
      * (1−norm)^3 concentrates the glow at the limb and tapers continuously
-     * to zero — no visible hard cutoff at the boundary.                    */
-    float p    = sqrt(p2);
+     * to zero — no visible hard cutoff at the boundary.
+     *
+     * When the camera is inside the atmosphere and the ray points outward
+     * (b > 0), the geometric closest approach on the positive ray is at t=0
+     * (the camera itself), so use oc2 rather than the infinite-line p2. */
+    float p    = sqrt(b > 0.0 ? oc2 : p2);
     float norm = clamp((p - R) / (R_atm - R), 0.0, 1.0);
     float glow = pow(1.0 - norm, 3.0);
 
     /* Lit-side boost: outward normal at atmosphere hit point vs. sun dir */
-    vec3  hit_n   = normalize(u_oc + t_atm * ray_dir);
+    vec3  hit_n   = normalize(u_oc + t_hit * ray_dir);
     float sun_dot = dot(hit_n, normalize(u_sun_rel));
     float lit     = 0.15 + 0.85 * clamp(sun_dot, 0.0, 1.0);
 

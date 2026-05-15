@@ -565,12 +565,14 @@ static void handle_event(const SDL_Event *e, float dt, int *running) {
         case SDLK_PLUS:
             if (s_speed_idx < SPEED_TABLE_LEN - 1) s_speed_idx++;
             g_sim_speed = SPEED_TABLE[s_speed_idx] * DAY;
+            ui_notify_speed_change();
             fprintf(stdout, "[Sim] speed = %g days/s\n",
                     SPEED_TABLE[s_speed_idx]);
             break;
         case SDLK_MINUS:
             if (s_speed_idx > 0) s_speed_idx--;
             g_sim_speed = SPEED_TABLE[s_speed_idx] * DAY;
+            ui_notify_speed_change();
             fprintf(stdout, "[Sim] speed = %g days/s\n",
                     SPEED_TABLE[s_speed_idx]);
             break;

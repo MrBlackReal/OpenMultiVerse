@@ -111,6 +111,14 @@ static int s_pause_menu_visible = 0;
 static int s_pause_menu_selected = 0;
 static int s_pause_menu_vsync = 0;
 
+/* Flash timer: show sim speed briefly after +/- is pressed even while paused */
+#define SPEED_FLASH_MS 1500
+static Uint64 s_speed_flash_at = 0;  /* SDL tick (ms) when last speed change occurred; 0 = no flash */
+
+void ui_notify_speed_change(void) {
+    s_speed_flash_at = SDL_GetTicks64();
+}
+
 /* Layout structs computed fresh each frame so resizing is free. */
 typedef struct {
     int n;
@@ -664,7 +672,9 @@ void ui_render(void) {
 
     /* Format sim speed string */
     char ss_str[64];
-    if (g_paused)
+    int flashing = s_speed_flash_at != 0 &&
+                   (SDL_GetTicks64() - s_speed_flash_at) < SPEED_FLASH_MS;
+    if (g_paused && !flashing)
         snprintf(ss_str, sizeof(ss_str), "Paused");
     else {
         double days = g_sim_speed / DAY;

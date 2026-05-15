@@ -100,6 +100,7 @@ static GLint  s_sp_impact_heat  = -1;
 static GLint  s_sp_impact_prog  = -1;
 static GLint  s_sp_impact_seed  = -1;
 static GLint  s_sp_impact_kind  = -1;
+static GLint  s_sp_use_fullscreen = -1; /* 1 when billboard would degenerate (camera near body) */
 
 /*
  * get_planet_type — map body name to a procedural texture variant index.
@@ -690,6 +691,7 @@ void render_init(void) {
     s_sp_impact_prog  = glGetUniformLocation(s_sphere_shader, "u_impact_progress[0]");
     s_sp_impact_seed  = glGetUniformLocation(s_sphere_shader, "u_impact_seed[0]");
     s_sp_impact_kind  = glGetUniformLocation(s_sphere_shader, "u_impact_kind[0]");
+    s_sp_use_fullscreen = glGetUniformLocation(s_sphere_shader, "u_use_fullscreen");
 
     /* Frame-constant uniforms (fov_tan, aspect, screen do not change at runtime) */
     glUseProgram(s_sphere_shader);
@@ -1223,18 +1225,31 @@ void render_frame(const float view[16], const float proj[16],
         info[i].dr     = dr;
         info[i].dcam   = dcam;
 
-        /* eye_z: depth along the view axis (forward component of the relative vector).
-         * Use eye_z for the pixel-size threshold — dcam varies with view angle as
-         * dcam = eye_z/cos(θ), which makes the threshold oscillate when the camera
-         * rotates.  eye_z is invariant under pure rotation so the transition is stable. */
+        /* When the camera is close to the body (within 4 radii), the billboard
+         * degenerates at oblique view angles — the sphere centre projects near
+         * the camera plane (eye_z ≈ 0) and perspective division produces NaN/Inf.
+         * Switch to a fullscreen quad in that range; the fragment shader does
+         * the per-pixel ray-sphere intersection independently of vertex layout
+         * and produces the correct silhouette from any view direction. */
+        int use_fullscreen = (dcam < dr * 4.0f);
+
+        /* eye_z: forward-axis depth.  Used for the dot/sphere pixel-size test.
+         * Prefer eye_z over dcam because dcam = eye_z/cos(θ) oscillates with
+         * camera rotation; eye_z is invariant under pure rotation. */
         float eye_z = (float)(dxd*cam_fwd[0] + dyd*cam_fwd[1] + dzd*cam_fwd[2]);
-        float px = (eye_z > 0.0f)
-                   ? (WIN_H / 2.0f) * dr / (eye_z * half_fov_tan() + 1e-9f)
-                   : 0.0f;
+        float px;
+        if (use_fullscreen) {
+            /* Suppress the dot (large px) and force the sphere to render below. */
+            px = 1000.0f;
+        } else {
+            px = (eye_z > 0.0f)
+                 ? (WIN_H / 2.0f) * dr / (eye_z * half_fov_tan() + 1e-9f)
+                 : 0.0f;
+        }
         /* Threshold: sphere first appears when its diameter (2×px) equals the dot
          * diameter (2.5px), i.e. px = 1.25 = BODY_SPHERE_APPEAR_PX. */
         body_px[i]   = px;
-        info[i].show = (px < BODY_SPHERE_APPEAR_PX) ? 1 : 0;
+        info[i].show = (!use_fullscreen && px < BODY_SPHERE_APPEAR_PX) ? 1 : 0;
 
         if (!g_bodies[i].alive || info[i].show) continue;
         if (b->is_star) continue;   /* stars rendered as glare only, not Phong spheres */
@@ -1302,6 +1317,7 @@ void render_frame(const float view[16], const float proj[16],
             glUniform1iv(s_sp_impact_kind, nspots, kinds);
         }
 
+        glUniform1i(s_sp_use_fullscreen, use_fullscreen);
         glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
     }
     glBindVertexArray(0);
