@@ -7,7 +7,7 @@
 #include <stdio.h>
 
 #define SOUNDTRACK_PATH "assets/soundtrack.ogg"
-#define MUSIC_VOLUME 0.8f
+#define MUSIC_VOLUME 0.6f
 
 static Mix_Music *s_music = NULL;
 static int s_mixer_init = 0;

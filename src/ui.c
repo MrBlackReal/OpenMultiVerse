@@ -58,7 +58,8 @@
 #define MENU_TITLE_SIZE 24
 #define MENU_TEXT_SIZE  18
 #define PAUSE_MENU_PANEL_W 324.0f
-#define PAUSE_MENU_PANEL_H 198.0f
+#define SLIDER_BTN_W       38.0f
+#define PAUSE_MENU_PANEL_H 302.0f
 #define PAUSE_MENU_ITEM_W PAUSE_MENU_PANEL_W
 #define PAUSE_MENU_ITEM_H 42.0f
 #define PAUSE_MENU_ITEM_ACTIVE_H 42.0f
@@ -105,11 +106,22 @@ static TextCache s_tc_nearest = {0};
 static TextCache s_tc_build_title = {0};
 static TextCache s_tc_build_hint  = {0};
 static TextCache s_tc_build_items[8];
-static TextCache s_tc_pause_items[4];
+static TextCache s_tc_pause_items[6];
+static TextCache s_tc_arrow_l   = {0};  /* black < */
+static TextCache s_tc_arrow_r   = {0};  /* black > */
+static TextCache s_tc_arrow_l_w = {0};  /* white < (for hover) */
+static TextCache s_tc_arrow_r_w = {0};  /* white > (for hover) */
 
-static int s_pause_menu_visible = 0;
-static int s_pause_menu_selected = 0;
-static int s_pause_menu_vsync = 0;
+/* Accent colour #0064DE as float components. */
+#define ACCENT_R 0.000f
+#define ACCENT_G 0.392f
+#define ACCENT_B 0.871f
+
+static int   s_pause_menu_visible = 0;
+static int   s_pause_menu_selected = 0;
+static int   s_pause_menu_vsync = 0;
+static float s_pause_menu_music_vol = 0.6f;
+static float s_pause_menu_mouse_sens = 0.25f;
 
 /* Flash timer: show sim speed briefly after +/- is pressed even while paused */
 #define SPEED_FLASH_MS 1500
@@ -169,7 +181,7 @@ static float  s_fps_smooth = 0.0f;
 static PauseMenuLayout pause_menu_layout(float W, float H)
 {
     PauseMenuLayout layout;
-    layout.n = 4;
+    layout.n = 6;
     layout.item_w = PAUSE_MENU_ITEM_W;
     layout.item_h = PAUSE_MENU_ITEM_H;
     layout.item_active_h = PAUSE_MENU_ITEM_ACTIVE_H;
@@ -529,38 +541,151 @@ static void draw_pause_menu(float W, float H)
     if (!s_pause_menu_visible) return;
 
     PauseMenuLayout layout = pause_menu_layout(W, H);
-    const char *labels[4] = {
+    char vol_label[32], sens_label[32];
+    snprintf(vol_label, sizeof(vol_label), "Music Volume: %d%%",
+             (int)(s_pause_menu_music_vol * 100.0f + 0.5f));
+    snprintf(sens_label, sizeof(sens_label), "Mouse Sensitivity: %.2f",
+             s_pause_menu_mouse_sens);
+    const char *labels[6] = {
         "Continue",
         "Reset Universe",
         s_pause_menu_vsync ? "Deactivate V-Sync" : "Activate V-Sync",
+        vol_label,
+        sens_label,
         "Leave"
     };
 
-    SDL_Color item_col = {0, 0, 0, 255};
+    SDL_Color black = {0,   0,   0,   255};
+    SDL_Color white = {255, 255, 255, 255};
+    update_text_with_font(&s_tc_arrow_l,   s_menu_font, "<", black);
+    update_text_with_font(&s_tc_arrow_r,   s_menu_font, ">", black);
+    update_text_with_font(&s_tc_arrow_l_w, s_menu_font, "<", white);
+    update_text_with_font(&s_tc_arrow_r_w, s_menu_font, ">", white);
+    for (int i = 0; i < 6; i++)
+        update_text_with_font(&s_tc_pause_items[i], s_menu_font, labels[i], black);
 
-    for (int i = 0; i < 4; i++)
-        update_text_with_font(&s_tc_pause_items[i], s_menu_font, labels[i], item_col);
+    /* Get current mouse position for button hover highlight. */
+    int mx_i, my_i;
+    SDL_GetMouseState(&mx_i, &my_i);
+    float fmx = (float)mx_i;
+    float fmy = (float)my_i;
 
     draw_pause_blur(W, H);
     draw_rect(0.0f, 0.0f, W, H, 0.0f, 0.0f, 0.0f, 0.40f);
 
     for (int i = 0; i < layout.n; i++) {
         int active = (i == s_pause_menu_selected);
+        float base_alpha = active ? 1.0f : 0.72f;
         float item_h = active ? layout.item_active_h : layout.item_h;
-        float item_y = layout.first_item_y + i * (layout.item_h + layout.gap) + (layout.item_h - item_h);
+        float item_y = layout.first_item_y + (float)i * (layout.item_h + layout.gap)
+                     + (layout.item_h - item_h);
+        int is_slider = (i == 3 || i == 4);
 
-        draw_rect(layout.item_x, item_y, layout.item_w, item_h, 1.0f, 1.0f, 1.0f,
-                  active ? 1.0f : 0.72f);
+        if (!is_slider) {
+            draw_rect(layout.item_x, item_y, layout.item_w, item_h,
+                      1.0f, 1.0f, 1.0f, base_alpha);
+            if (s_tc_pause_items[i].tex) {
+                float tw = (float)MENU_TEXT_SIZE * (float)s_tc_pause_items[i].w
+                         / (float)s_tc_pause_items[i].h;
+                draw_tex(&s_tc_pause_items[i],
+                         layout.item_x + (layout.item_w - tw) * 0.5f,
+                         item_y + (item_h - (float)MENU_TEXT_SIZE) * 0.5f,
+                         (float)MENU_TEXT_SIZE);
+            }
+        } else {
+            /* Slider item — three zones: [<] [body] [>] */
+            float body_x = layout.item_x + SLIDER_BTN_W;
+            float body_w = layout.item_w - 2.0f * SLIDER_BTN_W;
+            float btn_r_x = layout.item_x + layout.item_w - SLIDER_BTN_W;
 
-        if (s_tc_pause_items[i].tex) {
-            float tw = (float)MENU_TEXT_SIZE * (float)s_tc_pause_items[i].w / (float)s_tc_pause_items[i].h;
-            float text_y = item_y + (item_h - (float)MENU_TEXT_SIZE) * 0.5f;
-            draw_tex(&s_tc_pause_items[i],
-                     layout.item_x + (layout.item_w - tw) * 0.5f,
-                     text_y,
-                     (float)MENU_TEXT_SIZE);
+            /* Detect which zone the mouse is over (for highlight). */
+            int mouse_in_item = (fmy >= item_y && fmy <= item_y + item_h);
+            int hover_l = mouse_in_item && (fmx >= layout.item_x)  && (fmx < body_x);
+            int hover_r = mouse_in_item && (fmx >= btn_r_x)        && (fmx <= layout.item_x + layout.item_w);
+
+            /* Button backgrounds: grey normally, #0064DE on hover. */
+            draw_rect(layout.item_x, item_y, SLIDER_BTN_W, item_h,
+                      hover_l ? ACCENT_R : 0.72f,
+                      hover_l ? ACCENT_G : 0.72f,
+                      hover_l ? ACCENT_B : 0.72f,
+                      base_alpha);
+            draw_rect(btn_r_x, item_y, SLIDER_BTN_W, item_h,
+                      hover_r ? ACCENT_R : 0.72f,
+                      hover_r ? ACCENT_G : 0.72f,
+                      hover_r ? ACCENT_B : 0.72f,
+                      base_alpha);
+
+            /* Slider body — white. */
+            draw_rect(body_x, item_y, body_w, item_h, 1.0f, 1.0f, 1.0f, base_alpha);
+
+            /* Fill bar at bottom of body area. */
+            float val;
+            if (i == 3) {
+                val = s_pause_menu_music_vol;
+            } else {
+                val = (s_pause_menu_mouse_sens - 0.05f) / (1.0f - 0.05f);
+                if (val < 0.0f) val = 0.0f;
+                if (val > 1.0f) val = 1.0f;
+            }
+            float bar_h = 5.0f;
+            draw_rect(body_x, item_y + item_h - bar_h,
+                      val * body_w, bar_h,
+                      ACCENT_R, ACCENT_G, ACCENT_B, active ? 0.9f : 0.65f);
+
+            /* Arrow glyphs: white on hovered (#0064DE) button, black otherwise. */
+            {
+                TextCache *tcl = hover_l ? &s_tc_arrow_l_w : &s_tc_arrow_l;
+                if (tcl->tex) {
+                    float tw = (float)MENU_TEXT_SIZE * (float)tcl->w / (float)tcl->h;
+                    draw_tex(tcl,
+                             layout.item_x + (SLIDER_BTN_W - tw) * 0.5f,
+                             item_y + (item_h - (float)MENU_TEXT_SIZE) * 0.5f,
+                             (float)MENU_TEXT_SIZE);
+                }
+            }
+            {
+                TextCache *tcr = hover_r ? &s_tc_arrow_r_w : &s_tc_arrow_r;
+                if (tcr->tex) {
+                    float tw = (float)MENU_TEXT_SIZE * (float)tcr->w / (float)tcr->h;
+                    draw_tex(tcr,
+                             btn_r_x + (SLIDER_BTN_W - tw) * 0.5f,
+                             item_y + (item_h - (float)MENU_TEXT_SIZE) * 0.5f,
+                             (float)MENU_TEXT_SIZE);
+                }
+            }
+
+            /* Label + value centred on body. */
+            if (s_tc_pause_items[i].tex) {
+                float tw = (float)MENU_TEXT_SIZE * (float)s_tc_pause_items[i].w
+                         / (float)s_tc_pause_items[i].h;
+                draw_tex(&s_tc_pause_items[i],
+                         body_x + (body_w - tw) * 0.5f,
+                         item_y + (item_h - (float)MENU_TEXT_SIZE) * 0.5f,
+                         (float)MENU_TEXT_SIZE);
+            }
         }
     }
+}
+
+/* Returns -1 (left arrow hit), +1 (right arrow hit), or 0 (body / not a slider). */
+int ui_pause_menu_slider_click_delta(int mouse_x, int mouse_y)
+{
+    PauseMenuLayout layout = pause_menu_layout((float)WIN_W, (float)WIN_H);
+    float mx = (float)mouse_x;
+    float my = (float)mouse_y;
+
+    for (int i = 3; i <= 4; i++) {
+        int active = (i == s_pause_menu_selected);
+        float item_h = active ? layout.item_active_h : layout.item_h;
+        float item_y = layout.first_item_y + (float)i * (layout.item_h + layout.gap)
+                     + (layout.item_h - item_h);
+        if (my < item_y || my > item_y + item_h) continue;
+        if (mx < layout.item_x || mx > layout.item_x + layout.item_w) continue;
+        if (mx < layout.item_x + SLIDER_BTN_W) return -1;
+        if (mx > layout.item_x + layout.item_w - SLIDER_BTN_W) return 1;
+        return 0;
+    }
+    return 0;
 }
 
 /* ── public API ───────────────────────────────────────────────────────────── */
@@ -605,11 +730,14 @@ void ui_init(void) {
         TTF_SetFontStyle(s_menu_title_font, TTF_STYLE_BOLD);
 }
 
-void ui_set_pause_menu(int visible, int selected, int vsync_enabled)
+void ui_set_pause_menu(int visible, int selected, int vsync_enabled,
+                       float music_vol, float mouse_sens)
 {
     s_pause_menu_visible = visible ? 1 : 0;
     s_pause_menu_selected = selected;
     s_pause_menu_vsync = vsync_enabled ? 1 : 0;
+    s_pause_menu_music_vol = music_vol;
+    s_pause_menu_mouse_sens = mouse_sens;
 }
 
 int ui_pause_menu_hit_test(int mouse_x, int mouse_y)
