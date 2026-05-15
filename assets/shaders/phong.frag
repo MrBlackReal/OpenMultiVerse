@@ -598,6 +598,40 @@ void main() {
         }
     }
 
+    /* ---- City lights (Earth, night side only) --------------------------- */
+    if (u_planet_type == 1) {
+        float night_mask  = smoothstep(0.08, -0.12, sun_dot);
+        float n_land      = fbm(NL * 3.5);
+        float land_mask   = smoothstep(0.40, 0.50, n_land);
+        float lat_mask    = 1.0 - smoothstep(0.72, 0.92, abs(NL.y));
+
+        /* Two-level clustering: broad region density + local subclusters.
+         * High thresholds → only isolated hotspot peaks survive.       */
+        float region_pop  = fbm(NL *  4.5 + vec3(3.3, 1.1, 7.7));
+        float local_pop   = vnoise(NL * 16.0 + vec3(1.7, 5.4, 2.9));
+        float pop_mask    = pow(smoothstep(0.46, 0.74, region_pop), 1.2)
+                          * smoothstep(0.38, 0.68, local_pop)
+                          * land_mask * lat_mask * night_mask;
+
+        /* Sharp fine dots — three interleaved layers for dense coverage. */
+        float city_sharp  = vnoise(NL * 85.0 + vec3(5.5, 2.8, 1.3));
+        float core_lights = smoothstep(0.70, 0.88, city_sharp);
+
+        float city_sharp2 = vnoise(NL * 85.0 + vec3(9.1, 4.6, 0.7));
+        float core_lights2 = smoothstep(0.70, 0.88, city_sharp2) * 0.85;
+
+        float city_sharp3 = vnoise(NL * 85.0 + vec3(2.3, 7.8, 5.1));
+        float core_lights3 = smoothstep(0.72, 0.90, city_sharp3) * 0.70;
+
+        /* Subtle glow: just enough to soften edges, not smear into blobs. */
+        float city_glow_n = vnoise(NL * 40.0 + vec3(5.5, 2.8, 1.3));
+        float glow_lights = smoothstep(0.76, 0.92, city_glow_n) * 0.12;
+
+        vec3 city_color   = mix(vec3(1.0, 0.92, 0.65), vec3(1.0, 0.75, 0.40),
+                                vnoise(NL * 22.0 + vec3(2.1, 6.3, 4.4)));
+        lava_emit += city_color * (core_lights + core_lights2 + core_lights3 + glow_lights) * pop_mask * 0.90;
+    }
+
     /* ---- Phong diffuse ------------------------------------------------ */
     diff = max(dot(shade_N, L), 0.0);
     float light = u_ambient + (1.0 - u_ambient) * diff;
