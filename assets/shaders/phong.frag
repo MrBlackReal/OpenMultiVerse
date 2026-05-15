@@ -163,9 +163,49 @@ vec3 surface_color(vec3 NL) {
 
     /* ---- Jupiter ------------------------------------------------------ */
     if (u_planet_type == 4) {
-        float band = sin(NL.y * 18.0 + (n - 0.5) * 3.2) * 0.5 + 0.5;
-        return mix(vec3(0.48, 0.32, 0.14), vec3(0.94, 0.80, 0.54),
-                   band * 0.65 + n * 0.35);
+        float n2 = fbm(NL * 3.6 + vec3(4.2, 1.6, 8.3));
+        float n3 = fbm(NL * 6.0 + vec3(1.1, 6.8, 2.4));
+        float y = NL.y + (n - 0.5) * 0.072 + (n2 - 0.5) * 0.050;
+        float broad = sin(y * 8.6 + n2 * 1.25) * 0.5 + 0.5;
+        float soft = sin(y * 13.0 + n3 * 1.35) * 0.5 + 0.5;
+        float pale_zone = smoothstep(0.34, 0.88, broad);
+        float rusty_belt = smoothstep(0.34, 0.88, 1.0 - broad)
+                         * smoothstep(0.22, 0.92, soft);
+        float white_band = smoothstep(0.58, 0.92,
+                                      sin(y * 5.2 - n * 1.0) * 0.5 + 0.5);
+        float turbulence = smoothstep(0.36, 0.92, n3)
+                         * (0.20 + 0.45 * smoothstep(0.18, 0.92, soft));
+        float band_edge = smoothstep(0.34, 0.50, broad)
+                        * (1.0 - smoothstep(0.50, 0.66, broad));
+        float eddy = sin(NL.x * 18.0 + NL.z * 7.0 + y * 32.0 + n3 * 4.0) * 0.5 + 0.5;
+        float edge_swirl = band_edge * smoothstep(0.38, 0.82, eddy);
+        vec3 col = mix(vec3(0.56, 0.40, 0.24), vec3(0.88, 0.70, 0.44),
+                       pale_zone * 0.62 + n * 0.18);
+        col = mix(col, vec3(0.95, 0.86, 0.66), white_band * 0.28);
+        col = mix(col, vec3(0.76, 0.42, 0.24), rusty_belt * 0.24);
+        col = mix(col, vec3(0.94, 0.76, 0.50), turbulence * 0.09);
+        col = mix(col, mix(vec3(0.86, 0.56, 0.34), vec3(0.96, 0.86, 0.66), eddy),
+                  edge_swirl * 0.16);
+
+        vec3 spot_c = normalize(vec3(0.62, -0.34, 0.70));
+        vec3 spot_e = normalize(vec3(-spot_c.z, 0.0, spot_c.x));
+        vec3 spot_n = normalize(cross(spot_e, spot_c));
+        vec2 spot_uv = vec2(dot(NL, spot_e) / 0.16,
+                            dot(NL, spot_n) / 0.14);
+        float spot_r = length(spot_uv);
+        float spot_cap = smoothstep(0.965, 0.992, dot(NL, spot_c));
+        float spot_mask = (1.0 - smoothstep(0.54, 1.30, spot_r)) * spot_cap;
+        float spot_ring = smoothstep(0.44, 0.82, spot_r)
+                        * (1.0 - smoothstep(0.82, 1.30, spot_r));
+        float spot_core = 1.0 - smoothstep(0.00, 0.76, spot_r);
+        float spot_noise = fbm(NL * 3.8 + spot_c * 3.0);
+        vec3 spot_col = mix(vec3(0.88, 0.42, 0.16), vec3(0.98, 0.62, 0.28),
+                            spot_noise * 0.26 + 0.44);
+        spot_col = mix(spot_col, vec3(0.62, 0.27, 0.12), spot_ring * 0.20);
+        spot_col = mix(spot_col, vec3(0.72, 0.34, 0.14), spot_core * 0.14);
+        spot_col = mix(col, spot_col, 0.78);
+        col = mix(col, spot_col, spot_mask * 0.60);
+        return col;
     }
 
     /* ---- Saturn ------------------------------------------------------- */
