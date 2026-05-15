@@ -1230,11 +1230,14 @@ void render_frame(const float view[16], const float proj[16],
          * dcam = eye_z/cos(θ), which makes the threshold oscillate when the camera
          * rotates.  eye_z is invariant under pure rotation so the transition is stable. */
         float eye_z = (float)(dxd*cam_fwd[0] + dyd*cam_fwd[1] + dzd*cam_fwd[2]);
-        int inside_body = (dcam < dr);
+        /* use_fullscreen: sphere center is behind the camera (eye_z < 0) but the
+         * sphere still extends in front (eye_z > -dr).  In this case the normal
+         * billboard quad would be clipped by the near plane, so replace it with a
+         * fullscreen NDC quad.  Covers both the inside-body case and the case where
+         * the camera is just outside the surface but looking away. */
+        int use_fullscreen = (eye_z < 0.0f) && (eye_z > -dr);
         float px;
-        if (inside_body) {
-            /* Camera is inside the sphere — always render as sphere (large px
-             * suppresses the dot, show=0 enables sphere rendering below). */
+        if (use_fullscreen) {
             px = 1000.0f;
         } else {
             px = (eye_z > 0.0f)
@@ -1244,7 +1247,7 @@ void render_frame(const float view[16], const float proj[16],
         /* Threshold: sphere first appears when its diameter (2×px) equals the dot
          * diameter (2.5px), i.e. px = 1.25 = BODY_SPHERE_APPEAR_PX. */
         body_px[i]   = px;
-        info[i].show = (!inside_body && px < BODY_SPHERE_APPEAR_PX) ? 1 : 0;
+        info[i].show = (!use_fullscreen && px < BODY_SPHERE_APPEAR_PX) ? 1 : 0;
 
         if (!g_bodies[i].alive || info[i].show) continue;
         if (b->is_star) continue;   /* stars rendered as glare only, not Phong spheres */
@@ -1312,7 +1315,7 @@ void render_frame(const float view[16], const float proj[16],
             glUniform1iv(s_sp_impact_kind, nspots, kinds);
         }
 
-        glUniform1i(s_sp_inside, inside_body);
+        glUniform1i(s_sp_inside, use_fullscreen);
         glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
     }
     glBindVertexArray(0);
