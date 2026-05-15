@@ -100,7 +100,7 @@ static GLint  s_sp_impact_heat  = -1;
 static GLint  s_sp_impact_prog  = -1;
 static GLint  s_sp_impact_seed  = -1;
 static GLint  s_sp_impact_kind  = -1;
-static GLint  s_sp_inside       = -1;   /* 1 when camera is inside the sphere */
+static GLint  s_sp_use_fullscreen = -1; /* 1 when billboard would degenerate (camera near body) */
 
 /*
  * get_planet_type — map body name to a procedural texture variant index.
@@ -691,7 +691,7 @@ void render_init(void) {
     s_sp_impact_prog  = glGetUniformLocation(s_sphere_shader, "u_impact_progress[0]");
     s_sp_impact_seed  = glGetUniformLocation(s_sphere_shader, "u_impact_seed[0]");
     s_sp_impact_kind  = glGetUniformLocation(s_sphere_shader, "u_impact_kind[0]");
-    s_sp_inside       = glGetUniformLocation(s_sphere_shader, "u_inside");
+    s_sp_use_fullscreen = glGetUniformLocation(s_sphere_shader, "u_use_fullscreen");
 
     /* Frame-constant uniforms (fov_tan, aspect, screen do not change at runtime) */
     glUseProgram(s_sphere_shader);
@@ -1225,19 +1225,21 @@ void render_frame(const float view[16], const float proj[16],
         info[i].dr     = dr;
         info[i].dcam   = dcam;
 
-        /* eye_z: depth along the view axis (forward component of the relative vector).
-         * Use eye_z for the pixel-size threshold — dcam varies with view angle as
-         * dcam = eye_z/cos(θ), which makes the threshold oscillate when the camera
-         * rotates.  eye_z is invariant under pure rotation so the transition is stable. */
+        /* When the camera is close to the body (within 4 radii), the billboard
+         * degenerates at oblique view angles — the sphere centre projects near
+         * the camera plane (eye_z ≈ 0) and perspective division produces NaN/Inf.
+         * Switch to a fullscreen quad in that range; the fragment shader does
+         * the per-pixel ray-sphere intersection independently of vertex layout
+         * and produces the correct silhouette from any view direction. */
+        int use_fullscreen = (dcam < dr * 4.0f);
+
+        /* eye_z: forward-axis depth.  Used for the dot/sphere pixel-size test.
+         * Prefer eye_z over dcam because dcam = eye_z/cos(θ) oscillates with
+         * camera rotation; eye_z is invariant under pure rotation. */
         float eye_z = (float)(dxd*cam_fwd[0] + dyd*cam_fwd[1] + dzd*cam_fwd[2]);
-        /* use_fullscreen: sphere center is behind the camera (eye_z < 0) but the
-         * sphere still extends in front (eye_z > -dr).  In this case the normal
-         * billboard quad would be clipped by the near plane, so replace it with a
-         * fullscreen NDC quad.  Covers both the inside-body case and the case where
-         * the camera is just outside the surface but looking away. */
-        int use_fullscreen = (eye_z < 0.0f) && (eye_z > -dr);
         float px;
         if (use_fullscreen) {
+            /* Suppress the dot (large px) and force the sphere to render below. */
             px = 1000.0f;
         } else {
             px = (eye_z > 0.0f)
@@ -1315,7 +1317,7 @@ void render_frame(const float view[16], const float proj[16],
             glUniform1iv(s_sp_impact_kind, nspots, kinds);
         }
 
-        glUniform1i(s_sp_inside, use_fullscreen);
+        glUniform1i(s_sp_use_fullscreen, use_fullscreen);
         glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
     }
     glBindVertexArray(0);
