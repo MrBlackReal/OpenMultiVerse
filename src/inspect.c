@@ -321,6 +321,37 @@ void inspect_pick_center(const float vp_camrel[16], const BodyRenderInfo *info)
         screen_d = sqrtf(dx*dx + dy*dy);
         body_px  = (WIN_H * 0.5f) * info[i].dr
                  / (info[i].dcam * tanf(FOV * 0.5f * (float)(PI / 180.0)) + 1e-9f);
+
+        /* Skip moons that visually merge with their parent: tiny on screen AND
+         * within the parent's screen disc.  Otherwise the cursor often lands
+         * fractionally closer to a moon than to the parent itself, and the user
+         * accidentally picks the moon when targeting the planet.  Once the
+         * camera is close enough that the moon's disc grows past MOON_MERGE_PX,
+         * the moon becomes pickable normally.
+         *
+         * Sandbox safety: only applies to bodies whose parent is a non-star
+         * (i.e., true moons).  Free-floating bodies (parent < 0) and planets
+         * (parent is a star) are unaffected, so user-placed standalone bodies
+         * remain pickable at any distance. */
+        {
+            const float MOON_MERGE_PX = 5.0f;       /* tune: max moon px to consider "merged" */
+            const float MERGE_MARGIN_PX = 8.0f;     /* parent disc + margin */
+            int parent_idx = g_bodies[i].parent;
+            if (parent_idx >= 0 && parent_idx < g_nbodies &&
+                !g_bodies[parent_idx].is_star && body_px < MOON_MERGE_PX) {
+                float prx, pry, prz, psx, psy;
+                prx = (float)(g_bodies[parent_idx].pos[0] * RS - g_cam.pos[0]);
+                pry = (float)(g_bodies[parent_idx].pos[1] * RS - g_cam.pos[1]);
+                prz = (float)(g_bodies[parent_idx].pos[2] * RS - g_cam.pos[2]);
+                if (mat4_project(vp_camrel, prx, pry, prz, WIN_W, WIN_H, &psx, &psy)) {
+                    float parent_px = (WIN_H * 0.5f) * info[parent_idx].dr
+                                    / (info[parent_idx].dcam * tanf(FOV * 0.5f * (float)(PI / 180.0)) + 1e-9f);
+                    float pdx = sx - psx, pdy = sy - psy;
+                    if (sqrtf(pdx*pdx + pdy*pdy) < parent_px + MERGE_MARGIN_PX) continue;
+                }
+            }
+        }
+
         tol = body_px * 1.35f + 56.0f;
         if (tol < 72.0f)  tol = 72.0f;
         if (tol > 190.0f) tol = 190.0f;
@@ -337,21 +368,32 @@ void inspect_pick_center(const float vp_camrel[16], const BodyRenderInfo *info)
     g_inspect_hovered = best_idx;
 }
 
+static int inspect_centering_active(void)
+{
+    return s_orbit_transition_t < 1.0 || s_look_transition_t < 1.0;
+}
+
 int inspect_begin_orbit(void)
 {
     int idx = g_inspect_hovered;
 
     if (!g_inspect_mode || idx < 0 || idx >= g_nbodies || !g_bodies[idx].alive)
         return 0;
+    /* Lock out re-targeting while a fly-in is mid-animation, but only after a
+     * body has already been selected (orbit mode active).  Pre-selection clicks
+     * must still go through, otherwise the user can never enter orbit mode. */
+    if (g_inspect_orbit_mode && inspect_centering_active()) return 0;
+    /* No-op when clicking the body we are already inspecting and the camera
+     * is already at its target orbit distance.  Otherwise the user pays a
+     * full travel-animation duration for a transition that produces no visible
+     * motion.  A 1% tolerance lets the check survive minor zoom drift. */
+    if (g_inspect_orbit_mode && idx == g_inspect_target &&
+        fabs(s_orbit_current_distance - s_orbit_distance) < s_orbit_distance * 0.01)
+        return 0;
 
     set_orbit_target_from_camera(idx, 1.45);
     g_inspect_orbit_mode = 1;
     return 1;
-}
-
-static int inspect_centering_active(void)
-{
-    return s_orbit_transition_t < 1.0 || s_look_transition_t < 1.0;
 }
 
 void inspect_orbit_mouse(int dx, int dy, float sens_deg_per_px)
