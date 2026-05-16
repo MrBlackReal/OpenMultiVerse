@@ -59,7 +59,24 @@
 #define MENU_TEXT_SIZE  18
 #define PAUSE_MENU_PANEL_W 324.0f
 #define SLIDER_BTN_W       38.0f
-#define PAUSE_MENU_PANEL_H 302.0f
+#define PAUSE_MENU_PANEL_H   354.0f   /* 7 items: 7×42 + 6×10 */
+
+/* ── controls page layout ──────────────────────────────────────────────────── */
+#define CONTROLS_PANEL_W    PAUSE_MENU_PANEL_W   /* same as main-menu buttons */
+#define CONTROLS_ITEM_H      18.0f
+#define CONTROLS_ITEM_GAP     3.0f
+#define CONTROLS_TITLE_AREA  52.0f
+#define CONTROLS_FONT_H      16.0f   /* native s_font size — renders sharply */
+#define CONTROLS_PAD         14.0f   /* horizontal padding from panel edges */
+#define CONTROLS_PAD_BOTTOM  10.0f   /* extra space below last row */
+#define CONTROLS_RETURN_H    42.0f
+#define CONTROLS_COUNT       14
+/* content height = title area + rows + bottom padding */
+#define CONTROLS_CONTENT_H  (CONTROLS_TITLE_AREA \
+                             + (float)CONTROLS_COUNT * CONTROLS_ITEM_H \
+                             + (float)(CONTROLS_COUNT - 1) * CONTROLS_ITEM_GAP \
+                             + CONTROLS_PAD_BOTTOM)
+#define CONTROLS_PANEL_H    (CONTROLS_CONTENT_H + 12.0f + CONTROLS_RETURN_H)
 #define PAUSE_MENU_ITEM_W PAUSE_MENU_PANEL_W
 #define PAUSE_MENU_ITEM_H 42.0f
 #define PAUSE_MENU_ITEM_ACTIVE_H 42.0f
@@ -106,11 +123,21 @@ static TextCache s_tc_nearest = {0};
 static TextCache s_tc_build_title = {0};
 static TextCache s_tc_build_hint  = {0};
 static TextCache s_tc_build_items[8];
-static TextCache s_tc_pause_items[6];
+static TextCache s_tc_pause_items[7];
 static TextCache s_tc_arrow_l   = {0};  /* black < */
 static TextCache s_tc_arrow_r   = {0};  /* black > */
 static TextCache s_tc_arrow_l_w = {0};  /* white < (for hover) */
 static TextCache s_tc_arrow_r_w = {0};  /* white > (for hover) */
+
+/* ── controls page text caches ─────────────────────────────────────────────── */
+static TextCache s_tc_ctrl_title  = {0};
+static TextCache s_tc_ctrl_return = {0};
+static TextCache s_tc_ctrl_key [CONTROLS_COUNT];
+static TextCache s_tc_ctrl_desc[CONTROLS_COUNT];
+
+/* Pause menu item indices for slider rows — must match the enum in main.c. */
+#define PAUSE_SLIDER_MUSIC  4
+#define PAUSE_SLIDER_SENS   5
 
 /* Accent colour #0064DE as float components. */
 #define ACCENT_R 0.000f
@@ -122,6 +149,7 @@ static int   s_pause_menu_selected = 0;
 static int   s_pause_menu_vsync = 0;
 static float s_pause_menu_music_vol = 0.6f;
 static float s_pause_menu_mouse_sens = 0.25f;
+static int   s_pause_page = 0;   /* 0 = main menu, 1 = controls */
 
 /* Flash timer: show sim speed briefly after +/- is pressed even while paused */
 #define SPEED_FLASH_MS 1500
@@ -181,7 +209,7 @@ static float  s_fps_smooth = 0.0f;
 static PauseMenuLayout pause_menu_layout(float W, float H)
 {
     PauseMenuLayout layout;
-    layout.n = 6;
+    layout.n = 7;
     layout.item_w = PAUSE_MENU_ITEM_W;
     layout.item_h = PAUSE_MENU_ITEM_H;
     layout.item_active_h = PAUSE_MENU_ITEM_ACTIVE_H;
@@ -546,10 +574,11 @@ static void draw_pause_menu(float W, float H)
              (int)(s_pause_menu_music_vol * 100.0f + 0.5f));
     snprintf(sens_label, sizeof(sens_label), "Mouse Sensitivity: %.2f",
              s_pause_menu_mouse_sens);
-    const char *labels[6] = {
+    const char *labels[7] = {
         "Continue",
         "Reset Universe",
         s_pause_menu_vsync ? "Deactivate V-Sync" : "Activate V-Sync",
+        "Controls",
         vol_label,
         sens_label,
         "Leave"
@@ -561,7 +590,7 @@ static void draw_pause_menu(float W, float H)
     update_text_with_font(&s_tc_arrow_r,   s_menu_font, ">", black);
     update_text_with_font(&s_tc_arrow_l_w, s_menu_font, "<", white);
     update_text_with_font(&s_tc_arrow_r_w, s_menu_font, ">", white);
-    for (int i = 0; i < 6; i++)
+    for (int i = 0; i < 7; i++)
         update_text_with_font(&s_tc_pause_items[i], s_menu_font, labels[i], black);
 
     /* Get current mouse position for button hover highlight. */
@@ -579,7 +608,7 @@ static void draw_pause_menu(float W, float H)
         float item_h = active ? layout.item_active_h : layout.item_h;
         float item_y = layout.first_item_y + (float)i * (layout.item_h + layout.gap)
                      + (layout.item_h - item_h);
-        int is_slider = (i == 3 || i == 4);
+        int is_slider = (i == PAUSE_SLIDER_MUSIC || i == PAUSE_SLIDER_SENS);
 
         if (!is_slider) {
             draw_rect(layout.item_x, item_y, layout.item_w, item_h,
@@ -620,7 +649,7 @@ static void draw_pause_menu(float W, float H)
 
             /* Fill bar at bottom of body area. */
             float val;
-            if (i == 3) {
+            if (i == PAUSE_SLIDER_MUSIC) {
                 val = s_pause_menu_music_vol;
             } else {
                 val = (s_pause_menu_mouse_sens - 0.05f) / (1.0f - 0.05f);
@@ -674,7 +703,7 @@ int ui_pause_menu_slider_click_delta(int mouse_x, int mouse_y)
     float mx = (float)mouse_x;
     float my = (float)mouse_y;
 
-    for (int i = 3; i <= 4; i++) {
+    for (int i = PAUSE_SLIDER_MUSIC; i <= PAUSE_SLIDER_SENS; i++) {
         int active = (i == s_pause_menu_selected);
         float item_h = active ? layout.item_active_h : layout.item_h;
         float item_y = layout.first_item_y + (float)i * (layout.item_h + layout.gap)
@@ -731,13 +760,114 @@ void ui_init(void) {
 }
 
 void ui_set_pause_menu(int visible, int selected, int vsync_enabled,
-                       float music_vol, float mouse_sens)
+                       float music_vol, float mouse_sens, int page)
 {
-    s_pause_menu_visible = visible ? 1 : 0;
+    s_pause_menu_visible  = visible ? 1 : 0;
     s_pause_menu_selected = selected;
-    s_pause_menu_vsync = vsync_enabled ? 1 : 0;
-    s_pause_menu_music_vol = music_vol;
+    s_pause_menu_vsync    = vsync_enabled ? 1 : 0;
+    s_pause_menu_music_vol  = music_vol;
     s_pause_menu_mouse_sens = mouse_sens;
+    s_pause_page = page;
+}
+
+/* ── controls page ───────────────────────────────────────────────────────────
+ * Read-only list of all controls. Only the Return button is interactive. */
+static void draw_controls_page(float W, float H)
+{
+    static const char *KEYS[CONTROLS_COUNT] = {
+        "W / S", "A / D", "Q / E", "Mouse", "Scroll",
+        "T", "+ / -", "Space",
+        "B", "Tab + Scroll", "I",
+        "R", "Escape", "F11 / Alt+Enter"
+    };
+    static const char *DESCS[CONTROLS_COUNT] = {
+        "Move forward / backward", "Strafe left / right", "Move down / up",
+        "Look around", "Adjust camera speed",
+        "Toggle warp mode", "Sim speed up / down", "Pause / resume",
+        "Toggle build mode", "Cycle build presets", "Toggle inspection mode",
+        "Reset camera", "Open menu / exit modes", "Fullscreen"
+    };
+
+    float panel_x    = (W - CONTROLS_PANEL_W) * 0.5f;
+    float panel_y    = (H - CONTROLS_PANEL_H) * 0.5f;
+    float content_h  = CONTROLS_CONTENT_H;
+    float btn_y      = panel_y + content_h + 12.0f;
+
+    SDL_Color black    = {0,   0,   0,   255};
+    SDL_Color darkgrey = {90,  90,  90,  255};
+
+    update_text_with_font(&s_tc_ctrl_title,  s_menu_title_font, "CONTROLS", black);
+    update_text_with_font(&s_tc_ctrl_return, s_menu_font,       "Return",   black);
+    for (int i = 0; i < CONTROLS_COUNT; i++) {
+        update_text_with_font(&s_tc_ctrl_key[i],  s_font, KEYS[i],  black);
+        update_text_with_font(&s_tc_ctrl_desc[i], s_font, DESCS[i], darkgrey);
+    }
+
+    draw_pause_blur(W, H);
+    draw_rect(0.0f, 0.0f, W, H, 0.0f, 0.0f, 0.0f, 0.40f);
+
+    /* Content background — same white as inactive menu buttons */
+    draw_rect(panel_x, panel_y, CONTROLS_PANEL_W, content_h,
+              1.0f, 1.0f, 1.0f, 0.72f);
+
+    /* Title centred in title area */
+    if (s_tc_ctrl_title.tex) {
+        float tw = (float)MENU_TITLE_SIZE * (float)s_tc_ctrl_title.w / (float)s_tc_ctrl_title.h;
+        draw_tex(&s_tc_ctrl_title,
+                 panel_x + (CONTROLS_PANEL_W - tw) * 0.5f,
+                 panel_y + (CONTROLS_TITLE_AREA - (float)MENU_TITLE_SIZE) * 0.5f,
+                 (float)MENU_TITLE_SIZE);
+    }
+
+    /* Column divider at 42% of the padded interior — dark subtle line */
+    float list_y    = panel_y + CONTROLS_TITLE_AREA;
+    float inner_w   = CONTROLS_PANEL_W - 2.0f * CONTROLS_PAD;
+    float div_x     = panel_x + CONTROLS_PAD + inner_w * 0.42f;
+    float key_right = div_x - 10.0f;
+    float desc_left = div_x + 10.0f;
+    float rows_h    = (float)CONTROLS_COUNT * CONTROLS_ITEM_H
+                    + (float)(CONTROLS_COUNT - 1) * CONTROLS_ITEM_GAP;
+    draw_rect(div_x - 0.5f, list_y, 1.0f, rows_h, 0.0f, 0.0f, 0.0f, 0.18f);
+
+    for (int i = 0; i < CONTROLS_COUNT; i++) {
+        float row_y  = list_y + (float)i * (CONTROLS_ITEM_H + CONTROLS_ITEM_GAP);
+        float text_y = row_y  + (CONTROLS_ITEM_H - CONTROLS_FONT_H) * 0.5f;
+
+        /* Alternating row tint for readability */
+        if (i % 2 == 0)
+            draw_rect(panel_x, row_y, CONTROLS_PANEL_W, CONTROLS_ITEM_H,
+                      0.0f, 0.0f, 0.0f, 0.05f);
+
+        if (s_tc_ctrl_key[i].tex) {
+            float tw = CONTROLS_FONT_H * (float)s_tc_ctrl_key[i].w / (float)s_tc_ctrl_key[i].h;
+            draw_tex(&s_tc_ctrl_key[i], key_right - tw, text_y, CONTROLS_FONT_H);
+        }
+        if (s_tc_ctrl_desc[i].tex)
+            draw_tex(&s_tc_ctrl_desc[i], desc_left, text_y, CONTROLS_FONT_H);
+    }
+
+    /* Return button — separate from content, 12 px gap below */
+    int active = (s_pause_menu_selected == 0);
+    draw_rect(panel_x, btn_y, CONTROLS_PANEL_W, CONTROLS_RETURN_H,
+              1.0f, 1.0f, 1.0f, active ? 1.0f : 0.72f);
+    if (s_tc_ctrl_return.tex) {
+        float tw = (float)MENU_TEXT_SIZE * (float)s_tc_ctrl_return.w / (float)s_tc_ctrl_return.h;
+        draw_tex(&s_tc_ctrl_return,
+                 panel_x + (CONTROLS_PANEL_W - tw) * 0.5f,
+                 btn_y + (CONTROLS_RETURN_H - (float)MENU_TEXT_SIZE) * 0.5f,
+                 (float)MENU_TEXT_SIZE);
+    }
+}
+
+int ui_controls_return_hit_test(int mouse_x, int mouse_y)
+{
+    float W = (float)WIN_W, H = (float)WIN_H;
+    float panel_x = (W - CONTROLS_PANEL_W) * 0.5f;
+    float panel_y = (H - CONTROLS_PANEL_H) * 0.5f;
+    float btn_y   = panel_y + CONTROLS_CONTENT_H + 12.0f;
+    float mx = (float)mouse_x, my = (float)mouse_y;
+    return (mx >= panel_x && mx <= panel_x + CONTROLS_PANEL_W &&
+            my >= btn_y   && my <= btn_y + CONTROLS_RETURN_H) ? 1 : 0;
 }
 
 int ui_pause_menu_hit_test(int mouse_x, int mouse_y)
@@ -856,7 +986,10 @@ void ui_render(void) {
     glBindBuffer(GL_ARRAY_BUFFER, s_vbo);
 
     if (s_pause_menu_visible) {
-        draw_pause_menu(W, (float)WIN_H);
+        if (s_pause_page == 1)
+            draw_controls_page(W, (float)WIN_H);
+        else
+            draw_pause_menu(W, (float)WIN_H);
         glBindVertexArray(0);
         glDisable(GL_BLEND);
         glDepthMask(GL_TRUE);
@@ -908,10 +1041,21 @@ void ui_shutdown(void) {
     if (s_tc_fps.tex)  glDeleteTextures(1, &s_tc_fps.tex);
     if (s_tc_nearest.tex) glDeleteTextures(1, &s_tc_nearest.tex);
     if (s_tc_build_title.tex) glDeleteTextures(1, &s_tc_build_title.tex);
+    if (s_tc_build_hint.tex)  glDeleteTextures(1, &s_tc_build_hint.tex);
     for (int i = 0; i < 8; i++)
         if (s_tc_build_items[i].tex) glDeleteTextures(1, &s_tc_build_items[i].tex);
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < 7; i++)
         if (s_tc_pause_items[i].tex) glDeleteTextures(1, &s_tc_pause_items[i].tex);
+    if (s_tc_arrow_l.tex)   glDeleteTextures(1, &s_tc_arrow_l.tex);
+    if (s_tc_arrow_r.tex)   glDeleteTextures(1, &s_tc_arrow_r.tex);
+    if (s_tc_arrow_l_w.tex) glDeleteTextures(1, &s_tc_arrow_l_w.tex);
+    if (s_tc_arrow_r_w.tex) glDeleteTextures(1, &s_tc_arrow_r_w.tex);
+    if (s_tc_ctrl_title.tex)  glDeleteTextures(1, &s_tc_ctrl_title.tex);
+    if (s_tc_ctrl_return.tex) glDeleteTextures(1, &s_tc_ctrl_return.tex);
+    for (int i = 0; i < CONTROLS_COUNT; i++) {
+        if (s_tc_ctrl_key[i].tex)  glDeleteTextures(1, &s_tc_ctrl_key[i].tex);
+        if (s_tc_ctrl_desc[i].tex) glDeleteTextures(1, &s_tc_ctrl_desc[i].tex);
+    }
     if (s_vbo)  glDeleteBuffers(1, &s_vbo);
     if (s_vao)  glDeleteVertexArrays(1, &s_vao);
     if (s_shader) glDeleteProgram(s_shader);

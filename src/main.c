@@ -67,14 +67,20 @@ static int   s_vsync_enabled = 1;
 static float s_music_vol  = 0.6f;
 
 /* ── pause menu ───────────────────────────────────────────────────────────── */
+#define SLIDER_STEP    0.05f
+#define MOUSE_SENS_MIN 0.05f
+#define MOUSE_SENS_MAX 1.0f
+
 static int s_pause_menu_open = 0;
 static int s_pause_menu_selected = 0;
 static int s_pause_menu_prev_paused = 0;
+static int s_pause_page = 0;   /* 0 = main menu, 1 = controls */
 
 enum {
     PAUSE_MENU_CONTINUE = 0,
     PAUSE_MENU_RESET_UNIVERSE,
     PAUSE_MENU_TOGGLE_VSYNC,
+    PAUSE_MENU_CONTROLS,
     PAUSE_MENU_MUSIC_VOL,
     PAUSE_MENU_MOUSE_SENS,
     PAUSE_MENU_LEAVE,
@@ -141,9 +147,27 @@ static void set_music_vol(float vol) {
     audio_set_music_volume(vol);
 }
 
+static void adjust_mouse_sensitivity(float delta) {
+    s_mouse_sens += delta;
+    if (s_mouse_sens < MOUSE_SENS_MIN) s_mouse_sens = MOUSE_SENS_MIN;
+    if (s_mouse_sens > MOUSE_SENS_MAX) s_mouse_sens = MOUSE_SENS_MAX;
+}
+
 static void sync_pause_menu_ui(void) {
     ui_set_pause_menu(s_pause_menu_open, s_pause_menu_selected, s_vsync_enabled,
-                      s_music_vol, s_mouse_sens);
+                      s_music_vol, s_mouse_sens, s_pause_page);
+}
+
+static void open_controls_page(void) {
+    s_pause_page = 1;
+    s_pause_menu_selected = -1;
+    sync_pause_menu_ui();
+}
+
+static void close_controls_page(void) {
+    s_pause_page = 0;
+    s_pause_menu_selected = PAUSE_MENU_CONTROLS;
+    sync_pause_menu_ui();
 }
 
 static void close_pause_menu(int resume_freelook) {
@@ -414,6 +438,9 @@ static void activate_pause_menu_action(int *running) {
         set_vsync(!s_vsync_enabled);
         sync_pause_menu_ui();
         break;
+    case PAUSE_MENU_CONTROLS:
+        open_controls_page();
+        break;
     case PAUSE_MENU_MUSIC_VOL:
     case PAUSE_MENU_MOUSE_SENS:
         /* adjusted via left/right arrows or scroll, not Enter */
@@ -425,6 +452,44 @@ static void activate_pause_menu_action(int *running) {
 }
 
 static void handle_event(const SDL_Event *e, float dt, int *running) {
+    if (s_pause_menu_open && s_pause_page == 1) {
+        /* ── controls page ── */
+        switch (e->type) {
+        case SDL_KEYDOWN:
+            switch (e->key.keysym.sym) {
+            case SDLK_ESCAPE:
+            case SDLK_RETURN:
+            case SDLK_KP_ENTER:
+            case SDLK_SPACE:
+                close_controls_page();
+                break;
+            default: break;
+            }
+            break;
+        case SDL_MOUSEMOTION: {
+            int hit = ui_controls_return_hit_test(e->motion.x, e->motion.y);
+            int sel = hit ? 0 : -1;
+            if (sel != s_pause_menu_selected) {
+                s_pause_menu_selected = sel;
+                sync_pause_menu_ui();
+            }
+        }   break;
+        case SDL_MOUSEBUTTONDOWN:
+            if (e->button.button == SDL_BUTTON_LEFT &&
+                ui_controls_return_hit_test(e->button.x, e->button.y))
+                close_controls_page();
+            break;
+        case SDL_WINDOWEVENT:
+            if (e->window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
+                e->window.event == SDL_WINDOWEVENT_RESIZED)
+                update_viewport_size();
+            break;
+        default: break;
+        }
+        (void)dt; (void)running;
+        return;
+    }
+
     if (s_pause_menu_open) {
         switch (e->type) {
         case SDL_QUIT:
@@ -445,20 +510,16 @@ static void handle_event(const SDL_Event *e, float dt, int *running) {
                 break;
             case SDLK_LEFT:
                 if (s_pause_menu_selected == PAUSE_MENU_MUSIC_VOL)
-                    set_music_vol(s_music_vol - 0.05f);
-                else if (s_pause_menu_selected == PAUSE_MENU_MOUSE_SENS) {
-                    s_mouse_sens -= 0.05f;
-                    if (s_mouse_sens < 0.05f) s_mouse_sens = 0.05f;
-                }
+                    set_music_vol(s_music_vol - SLIDER_STEP);
+                else if (s_pause_menu_selected == PAUSE_MENU_MOUSE_SENS)
+                    adjust_mouse_sensitivity(-SLIDER_STEP);
                 sync_pause_menu_ui();
                 break;
             case SDLK_RIGHT:
                 if (s_pause_menu_selected == PAUSE_MENU_MUSIC_VOL)
-                    set_music_vol(s_music_vol + 0.05f);
-                else if (s_pause_menu_selected == PAUSE_MENU_MOUSE_SENS) {
-                    s_mouse_sens += 0.05f;
-                    if (s_mouse_sens > 1.0f) s_mouse_sens = 1.0f;
-                }
+                    set_music_vol(s_music_vol + SLIDER_STEP);
+                else if (s_pause_menu_selected == PAUSE_MENU_MOUSE_SENS)
+                    adjust_mouse_sensitivity(SLIDER_STEP);
                 sync_pause_menu_ui();
                 break;
             case SDLK_RETURN:
@@ -473,12 +534,9 @@ static void handle_event(const SDL_Event *e, float dt, int *running) {
 
         case SDL_MOUSEWHEEL:
             if (s_pause_menu_selected == PAUSE_MENU_MUSIC_VOL)
-                set_music_vol(s_music_vol + e->wheel.y * 0.05f);
-            else if (s_pause_menu_selected == PAUSE_MENU_MOUSE_SENS) {
-                s_mouse_sens += e->wheel.y * 0.05f;
-                if (s_mouse_sens < 0.05f) s_mouse_sens = 0.05f;
-                if (s_mouse_sens > 1.0f)  s_mouse_sens = 1.0f;
-            }
+                set_music_vol(s_music_vol + e->wheel.y * SLIDER_STEP);
+            else if (s_pause_menu_selected == PAUSE_MENU_MOUSE_SENS)
+                adjust_mouse_sensitivity(e->wheel.y * SLIDER_STEP);
             sync_pause_menu_ui();
             break;
 
@@ -501,13 +559,15 @@ static void handle_event(const SDL_Event *e, float dt, int *running) {
                         int delta = ui_pause_menu_slider_click_delta(e->button.x, e->button.y);
                         if (delta == -1) {
                             if (hover == PAUSE_MENU_MUSIC_VOL)
-                                set_music_vol(s_music_vol - 0.05f);
-                            else { s_mouse_sens -= 0.05f; if (s_mouse_sens < 0.05f) s_mouse_sens = 0.05f; }
+                                set_music_vol(s_music_vol - SLIDER_STEP);
+                            else
+                                adjust_mouse_sensitivity(-SLIDER_STEP);
                             sync_pause_menu_ui();
                         } else if (delta == 1) {
                             if (hover == PAUSE_MENU_MUSIC_VOL)
-                                set_music_vol(s_music_vol + 0.05f);
-                            else { s_mouse_sens += 0.05f; if (s_mouse_sens > 1.0f) s_mouse_sens = 1.0f; }
+                                set_music_vol(s_music_vol + SLIDER_STEP);
+                            else
+                                adjust_mouse_sensitivity(SLIDER_STEP);
                             sync_pause_menu_ui();
                         }
                     } else {
