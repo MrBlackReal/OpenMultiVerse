@@ -34,7 +34,8 @@ void main() {
     v_color     = vec4(u_color * alpha, 1.0);
 
     /* Larger point when closer — bigger minimum reduces subpixel flicker */
-    gl_PointSize = clamp(0.8 / (dist + 0.001), 1.5, 4.0);
+    float t = smoothstep(0.02, 3.0, dist);
+    gl_PointSize = mix(3.0, 1.8, t);
 
     gl_Position = u_vp * vec4(a_pos, 1.0);
 }
