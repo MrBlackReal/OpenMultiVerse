@@ -28,6 +28,12 @@ Not a screensaver. Not a game. A sandbox for curiosity.
 
 > No build tools required — just download and run.
 
+### Download Links
+[Download latest Windows release](https://github.com/ortanaV2/OpenVerse/releases/download/v1.0.0/verse-windows-x64-v1.0.0.zip)
+
+[Download latest Linux release](https://github.com/ortanaV2/OpenVerse/releases/download/v1.0.0/verse-linux-x64-v1.0.0.tar.gz)
+
+### Alternative Installations
 <details>
 <summary><strong>Step 1 — Go to the Releases page</strong></summary>
 
@@ -126,7 +132,7 @@ Space is incomprehensibly large. Most simulations either abstract that away or c
 | Supernovae | ✓ |
 | Black holes | planned |
 | Enhanced rendering | planned |
-| Expand Universe | planned |
+| Expand universe | planned |
 
 ---
 
