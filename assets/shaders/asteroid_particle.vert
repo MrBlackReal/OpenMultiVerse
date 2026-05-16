@@ -33,8 +33,10 @@ void main() {
     float alpha = (0.28 + 0.28 * a_bright) * fade_near * fade_far;
     v_color     = vec4(u_color * alpha, 1.0);
 
-    /* Larger point when closer — stays crisp at distance */
-    gl_PointSize = clamp(0.6 / (dist + 0.001), 1.0, 3.0);
+    /* Larger point when closer. Minimum 1.5 px so sub-pixel particles always
+     * cover multiple samples, letting the soft edge in color.frag smooth
+     * the rasterisation rather than causing all-or-nothing pixel flicker. */
+    gl_PointSize = clamp(0.6 / (dist + 0.001), 1.5, 3.0);
 
     gl_Position = u_vp * vec4(a_pos, 1.0);
 }
