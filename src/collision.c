@@ -66,6 +66,8 @@ typedef struct {
     float angular_radius;
     float depth;
     float seed;
+    float fade;      /* 0→1 fade-in multiplier applied to depth at render time */
+    float fade_rate; /* per-sim-second increment; 0 = instant (already at 1) */
 } PersistentScar;
 
 typedef struct {
@@ -95,6 +97,7 @@ typedef struct {
     double target_obliquity;
     int scar_slot;          /* s_impacts index for the target intersection scar */
     int imp_scar_slot;      /* s_impacts index for the impactor intersection scar */
+    int crater_added;       /* 1 once permanent crater has been created */
 } MergeEvent;
 
 typedef struct {
@@ -676,7 +679,7 @@ static void build_local_scar_tangent(int body_idx, const double world_dir[3],
 
 static void add_permanent_crater(int body_idx, const double world_dir[3],
                                  const double rel_vel[3], double impactor_radius,
-                                 double strength);
+                                 double strength, double fade_duration);
 
 static double body_moment_of_inertia(const Body *b)
 {
@@ -1249,14 +1252,14 @@ static void add_impact(int body_idx, int kind, const double world_dir[3],
     build_local_scar_tangent(body_idx, world_dir, rel_vel, e->tangent1);
     if (kind == COLLISION_VIS_CRATER || kind == COLLISION_VIS_MAJOR)
         add_permanent_crater(body_idx, world_dir, rel_vel, impactor_radius,
-                             kind == COLLISION_VIS_MAJOR ? 1.0 : 0.65 + 0.25 * fmin(mass_ratio, 1.0));
+                             kind == COLLISION_VIS_MAJOR ? 1.0 : 0.65 + 0.25 * fmin(mass_ratio, 1.0), 0.0);
     spawn_impact_particles(body_idx, kind, world_dir, rel_vel,
                            impactor_radius, rel_speed, 1.0);
 }
 
 static void add_permanent_crater(int body_idx, const double world_dir[3],
                                  const double rel_vel[3], double impactor_radius,
-                                 double strength)
+                                 double strength, double fade_duration)
 {
     int slot = -1;
     int oldest = 0;
@@ -1296,6 +1299,13 @@ static void add_permanent_crater(int body_idx, const double world_dir[3],
     s->angular_radius = (float)radius_limit;
     s->depth = 0.45f + 0.35f * (float)fmin(fmax(strength, 0.0), 1.0);
     s->seed = rand01f() * 100.0f;
+    if (fade_duration > 0.0) {
+        s->fade = 0.0f;
+        s->fade_rate = (float)(1.0 / fade_duration);
+    } else {
+        s->fade = 1.0f;
+        s->fade_rate = 0.0f;
+    }
 }
 
 /* ── § MERGE — merge lifecycle: begin → update → finalize ────────────── */
@@ -1495,6 +1505,11 @@ static void update_merge_events(double dt)
                     fprintf(stderr, "[early-despawn] r0=%.4f r1_old=%.4f r1_new=%.4f\n",
                             r0, r1_old, s_impacts[m->scar_slot].radius1);
                 }
+                if (!m->crater_added) {
+                    add_permanent_crater(m->target, attach_world_dir, m->rel_vel,
+                                         g_bodies[m->impactor].radius, 1.0, 0.0);
+                    m->crater_added = 1;
+                }
                 m->active = 0;
                 finalize_absorb_body(m->target, m->impactor, m->rel_speed,
                                      COLLISION_VIS_MERGE, old_radius);
@@ -1593,6 +1608,15 @@ static void update_merge_events(double dt)
             scar->age = 0.0;
         }
 
+        /* Add permanent crater once the impactor is halfway merged so the
+         * INTERSECT scar is large enough to cover the fresh mark. */
+        if (t >= 0.5 && !m->crater_added) {
+            add_permanent_crater(m->target, attach_world_dir, m->rel_vel,
+                                 g_bodies[m->impactor].radius, 1.0,
+                                 m->duration * 0.5);
+            m->crater_added = 1;
+        }
+
         /* Keep the merge alive until the full animation duration finishes so
          * radius growth completes during the merge instead of after it. */
         {
@@ -1621,6 +1645,11 @@ static void update_merge_events(double dt)
                             s_impacts[m->scar_slot].duration / DAY);
                 }
 
+                if (!m->crater_added) {
+                    add_permanent_crater(m->target, attach_world_dir, m->rel_vel,
+                                         g_bodies[m->impactor].radius, 1.0, 0.0);
+                    m->crater_added = 1;
+                }
                 m->active = 0;
                 finalize_absorb_body(m->target, m->impactor, m->rel_speed,
                                      COLLISION_VIS_MERGE, old_radius);
@@ -1701,7 +1730,7 @@ static void begin_merge_event(int target, int impactor, double rel_speed,
     s_merges[slot].target_obliquity       = a->obliquity;
     s_merges[slot].scar_slot     = -1;
     s_merges[slot].imp_scar_slot = -1;
-    add_permanent_crater(target, dir, rel_vel, b->radius, 1.0);
+    s_merges[slot].crater_added  = 0;
 
     {
         double anim_dur = merge_duration_for_bodies(target, impactor, rel_speed);
@@ -2167,6 +2196,13 @@ void collision_step(double dt)
 
     update_merge_events(dt);
 
+    for (int i = 0; i < MAX_PERSISTENT_SCARS; i++) {
+        PersistentScar *s = &s_perm_scars[i];
+        if (!s->active || s->fade_rate == 0.0f) continue;
+        s->fade += s->fade_rate * (float)dt;
+        if (s->fade >= 1.0f) { s->fade = 1.0f; s->fade_rate = 0.0f; }
+    }
+
     for (int i = 0; i < MAX_COLLISION_PARTICLES; i++) {
         ImpactParticleState *p = &s_particles[i];
         double drag;
@@ -2381,7 +2417,7 @@ int collision_spots_for_body(int body_idx, CollisionSpot spots[COLLISION_MAX_SPO
         spots[n].tangent1[1] = s->tangent1[1];
         spots[n].tangent1[2] = s->tangent1[2];
         spots[n].angular_radius = s->angular_radius;
-        spots[n].heat = s->depth;
+        spots[n].heat = s->depth * s->fade;
         spots[n].progress = 0.0f;
         spots[n].seed = s->seed;
         spots[n].kind = COLLISION_VIS_PERM_CRATER;
