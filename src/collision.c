@@ -95,6 +95,7 @@ typedef struct {
     double target_rotation_rate;
     double impactor_rotation_rate;
     double target_obliquity;
+    double impactor_obliquity;
     int scar_slot;          /* s_impacts index for the target intersection scar */
     int imp_scar_slot;      /* s_impacts index for the impactor intersection scar */
     int crater_added;       /* 1 once permanent crater has been created */
@@ -1449,14 +1450,17 @@ static void update_merge_events(double dt)
         impactor->vel[1] = target->vel[1];
         impactor->vel[2] = target->vel[2];
 
-        /* Both rotations snap to nearly zero very early in the merge —
-         * the deceleration should feel simultaneous with the impact. */
+        /* Sync the impactor's spin to the target's at impact so both bodies
+         * appear to rotate as one shared mass from the start of the merge. */
         {
-            double spin_window = 0.07 - 0.02 * fmin(speed_boost, 1.0);
-            double slow = 1.0 - ease_out_cubic(fmin(1.0, t / spin_window));
-            target->obliquity = m->target_obliquity;
+            double sync_window = 0.08 - 0.02 * fmin(speed_boost, 1.0);
+            double blend = ease_out_cubic(fmin(1.0, t / sync_window));
+            target->obliquity     = m->target_obliquity;
             target->rotation_rate = m->target_rotation_rate;
-            impactor->rotation_rate = m->impactor_rotation_rate * slow;
+            impactor->rotation_rate = m->impactor_rotation_rate
+                                    + (m->target_rotation_rate - m->impactor_rotation_rate) * blend;
+            impactor->obliquity     = m->impactor_obliquity
+                                    + (m->target_obliquity - m->impactor_obliquity) * blend;
         }
 
         {
@@ -1728,6 +1732,7 @@ static void begin_merge_event(int target, int impactor, double rel_speed,
     s_merges[slot].target_rotation_rate   = a->rotation_rate;
     s_merges[slot].impactor_rotation_rate = b->rotation_rate;
     s_merges[slot].target_obliquity       = a->obliquity;
+    s_merges[slot].impactor_obliquity     = b->obliquity;
     s_merges[slot].scar_slot     = -1;
     s_merges[slot].imp_scar_slot = -1;
     s_merges[slot].crater_added  = 0;
