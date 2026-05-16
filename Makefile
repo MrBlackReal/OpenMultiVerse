@@ -37,7 +37,7 @@ else
                -lSDL2 -lSDL2_ttf -lSDL2_mixer \
                -lglew32 \
                -lopengl32 -lglu32 \
-               -lm -fopenmp
+               -lm -fopenmp -mwindows
     EXT      = .exe
 endif
 

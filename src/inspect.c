@@ -263,7 +263,7 @@ void inspect_init(void)
 void inspect_cancel(void)
 {
     if (g_inspect_mode)
-        g_paused = s_prev_paused;
+        g_paused = g_inspect_orbit_mode ? 1 : s_prev_paused;
     g_inspect_mode       = 0;
     g_inspect_orbit_mode = 0;
     g_inspect_hovered    = -1;
