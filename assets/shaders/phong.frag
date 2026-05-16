@@ -911,18 +911,7 @@ void main() {
 
         vec3 city_color   = mix(vec3(1.0, 0.92, 0.65), vec3(1.0, 0.75, 0.40),
                                 vnoise(NL * 22.0 + vec3(2.1, 6.3, 4.4)));
-
-        /* Distance-based LOD: high-frequency noise (85×) aliases badly once
-         * Earth subtends fewer pixels than the noise tile size.  Fade out the
-         * sharp layers first (dist_r > ~5), then the glow (dist_r > ~20).
-         * dist_r = camera distance in body-radii, derived from existing uniforms. */
-        float dist_r  = length(u_oc) / (u_radius + 1e-9);
-        float hf_lod  = 1.0 - smoothstep( 5.0, 20.0, dist_r);
-        float glo_lod = 1.0 - smoothstep(20.0, 60.0, dist_r);
-
-        lava_emit += city_color
-                   * ((core_lights + core_lights2 + core_lights3) * hf_lod
-                   +  glow_lights * glo_lod)
+        lava_emit += city_color * (core_lights + core_lights2 + core_lights3 + glow_lights)
                    * pop_mask * (1.0 - impact_light_block) * 0.90;
     }
 

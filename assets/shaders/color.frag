@@ -15,12 +15,9 @@ void main() {
     gl_FragDepth = log2(1.0 / gl_FragCoord.w + 1.0) / log2(FAR + 1.0);
 
     /* gl_PointCoord is (0,0)..(1,1) across the point sprite.
-     * Soft circular edge instead of hard discard — eliminates subpixel
-     * flickering on small point sprites by encoding partial coverage in
-     * the output RGB (works with both additive and alpha blending). */
+     * Discard anything further than 0.5 from the centre. */
     float d = length(gl_PointCoord - vec2(0.5));
-    float edge = 1.0 - smoothstep(0.38, 0.5, d);
-    if (edge < 0.001) discard;
+    if (d > 0.5) discard;
 
-    frag_color = vec4(v_color.rgb * edge, v_color.a);
+    frag_color = v_color;
 }
