@@ -29,9 +29,9 @@ Not a screensaver. Not a game. A sandbox for curiosity.
 > No build tools required — just download and run.
 
 ### Download Links
-[Download latest Windows release](https://github.com/ortanaV2/OpenVerse/releases/download/v1.0.0/verse-windows-x64-v1.0.0.zip)
+[Download latest Windows release](https://github.com/ortanaV2/OpenVerse/releases/download/v1.0.1/verse-windows-x64-v1.0.1.zip)
 
-[Download latest Linux release](https://github.com/ortanaV2/OpenVerse/releases/download/v1.0.0/verse-linux-x64-v1.0.0.tar.gz)
+[Download latest Linux release](https://github.com/ortanaV2/OpenVerse/releases/download/v1.0.1/verse-linux-x64-v1.0.1.tar.gz)
 
 ### Alternative Installations
 <details>
