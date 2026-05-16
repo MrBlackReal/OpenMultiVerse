@@ -21,6 +21,7 @@
  *   11 build gas giant (soft cloudy beige-brown giant)
  *   12 build ice       (icy blue giant)
  *   13 Uranus          (soft white-blue haze with faint bands)
+ *   14 airless moon    (grey cratered rock; also Mercury)
  */
 
 in vec2 v_uv;   /* unused for planets, kept for linker compatibility */
@@ -120,6 +121,49 @@ vec3 local_surface_dir_to_world(vec3 local_dir)
                           tz));
 }
 
+float moon_height(vec3 NL)
+{
+    float n = fbm(NL * 3.5);
+    float n2 = fbm(NL * 6.0 + vec3(2.7, 5.4, 1.8));
+    float n3 = fbm(NL * 12.0 + vec3(6.8, 1.7, 4.9));
+    float maria = smoothstep(0.34, 0.72, 1.0 - n2)
+                * smoothstep(0.22, 0.86, n3);
+    float highland = smoothstep(0.50, 0.88, n2);
+    float crater_noise = vnoise(NL * 22.0 + vec3(3.1, 7.4, 1.6));
+    float crater_soft = smoothstep(0.76, 0.94, crater_noise)
+                      * smoothstep(0.28, 0.90, n3);
+    float crater_cell = vnoise(NL * 34.0 + vec3(8.6, 2.2, 5.4));
+    float crater_rim = smoothstep(0.56, 0.72, crater_cell)
+                     * (1.0 - smoothstep(0.72, 0.88, crater_cell))
+                     * smoothstep(0.30, 0.86, n3);
+    float crater_floor = smoothstep(0.78, 0.96, crater_cell)
+                       * smoothstep(0.24, 0.80, 1.0 - n2);
+    float fine = smoothstep(0.92, 0.99,
+                            vnoise(NL * 28.0 + vec3(8.3, 2.1, 5.6)));
+
+    return n * 0.05
+         + highland * 0.10
+         - maria * 0.08
+         - crater_soft * 0.055
+         - crater_floor * 0.090
+         + crater_rim * 0.095
+         + fine * 0.010;
+}
+
+vec3 moon_normal(vec3 NL)
+{
+    vec3 up = abs(NL.y) < 0.98 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(up, NL));
+    vec3 bitangent = normalize(cross(NL, tangent));
+    float eps = 0.012;
+    float dh_t = moon_height(normalize(NL + tangent * eps))
+               - moon_height(normalize(NL - tangent * eps));
+    float dh_b = moon_height(normalize(NL + bitangent * eps))
+               - moon_height(normalize(NL - bitangent * eps));
+
+    return normalize(NL - tangent * dh_t * 3.2 - bitangent * dh_b * 3.2);
+}
+
 /* ======================================================================
  * Per-planet surface colour  (NL = normal in body-local frame)
  * ====================================================================== */
@@ -149,9 +193,74 @@ vec3 surface_color(vec3 NL) {
 
     /* ---- Mars --------------------------------------------------------- */
     if (u_planet_type == 2) {
-        vec3 col = mix(vec3(0.38, 0.16, 0.06), vec3(0.86, 0.34, 0.13), n);
-        col = mix(col, vec3(0.84, 0.81, 0.76),
-                  smoothstep(0.88, 0.97, abs(NL.y)));
+        float n2 = fbm(NL * 5.4 + vec3(3.8, 1.4, 7.2));
+        float n3 = fbm(NL * 9.0 + vec3(6.2, 4.8, 1.6));
+        float lat = abs(NL.y);
+        float dust = smoothstep(0.24, 0.88, n);
+        float south_bias = smoothstep(0.10, -0.72, NL.y);
+        float dark_flow = sin((NL.y + (n2 - 0.5) * 0.10) * 8.0
+                              + n3 * 1.7 + NL.x * 0.8) * 0.5 + 0.5;
+        float dark_detail = fbm(NL * 13.0 + vec3(8.4, 2.7, 5.9));
+        float dark_region = smoothstep(0.56, 0.88, dark_flow)
+                          * smoothstep(0.18, 0.82, 1.0 - n2)
+                          * (0.35 + 0.75 * south_bias)
+                          * (0.70 + 0.30 * smoothstep(0.34, 0.88, dark_detail));
+        float highland = smoothstep(0.58, 0.92, n2)
+                       * smoothstep(0.20, 0.78, 1.0 - lat);
+        float crater_noise = vnoise(NL * 18.0 + vec3(2.7, 5.1, 8.4));
+        float crater_pits = smoothstep(0.78, 0.93, crater_noise)
+                          * smoothstep(0.34, 0.88, n3)
+                          * (1.0 - smoothstep(0.78, 0.96, lat))
+                          * (0.45 + 0.80 * south_bias);
+        vec2 pole_uv = NL.xz / max(length(NL.xz), 1e-5);
+        vec2 pole_tangent = vec2(-pole_uv.y, pole_uv.x);
+        float pole_edge_noise = fbm(vec3(pole_uv * 2.4 + pole_tangent * (n3 - 0.5) * 0.75,
+                                         lat * 3.5 + n2));
+        float pole_curl = fbm(vec3(pole_uv * 4.2 + pole_tangent * (pole_edge_noise - 0.5) * 1.45,
+                                   lat * 5.5 + n3));
+        float pole_edge = 0.82 + (pole_edge_noise - 0.5) * 0.15 + (pole_curl - 0.5) * 0.07;
+        float pole_ice = smoothstep(pole_edge, 0.98, lat);
+        float pole_edge_wisp = smoothstep(pole_edge - 0.035, pole_edge + 0.035, lat)
+                             * (1.0 - smoothstep(pole_edge + 0.035, pole_edge + 0.13, lat))
+                             * smoothstep(0.34, 0.88, pole_curl);
+        float pole_frost = smoothstep(0.90, 0.99, lat)
+                         * smoothstep(0.42, 0.86, n3);
+        vec3 col = mix(vec3(0.58, 0.24, 0.10), vec3(0.96, 0.48, 0.24), dust);
+        col = mix(col, vec3(0.46, 0.25, 0.16), dark_region * 0.34);
+        col = mix(col, vec3(0.28, 0.15, 0.10), dark_region * smoothstep(0.66, 0.92, dark_detail) * 0.12);
+        col = mix(col, vec3(1.0, 0.62, 0.36), highland * 0.24);
+        col = mix(col, vec3(0.34, 0.18, 0.12), crater_pits * 0.10);
+        col = mix(col, vec3(0.82, 0.78, 0.70), pole_ice);
+        col = mix(col, vec3(0.92, 0.84, 0.68), pole_edge_wisp * 0.48);
+        col = mix(col, vec3(0.96, 0.86, 0.62), pole_frost * 0.38);
+        return col;
+    }
+
+    /* ---- Airless Moon / Mercury -------------------------------------- */
+    if (u_planet_type == 14) {
+        float n2 = fbm(NL * 6.0 + vec3(2.7, 5.4, 1.8));
+        float n3 = fbm(NL * 12.0 + vec3(6.8, 1.7, 4.9));
+        float maria = smoothstep(0.34, 0.72, 1.0 - n2)
+                    * smoothstep(0.22, 0.86, n3);
+        float highland = smoothstep(0.50, 0.88, n2);
+        float crater_noise = vnoise(NL * 22.0 + vec3(3.1, 7.4, 1.6));
+        float crater_soft = smoothstep(0.76, 0.94, crater_noise)
+                          * smoothstep(0.28, 0.90, n3);
+        float crater_cell = vnoise(NL * 34.0 + vec3(8.6, 2.2, 5.4));
+        float crater_rim = smoothstep(0.56, 0.72, crater_cell)
+                         * (1.0 - smoothstep(0.72, 0.88, crater_cell))
+                         * smoothstep(0.30, 0.86, n3);
+        float crater_floor = smoothstep(0.78, 0.96, crater_cell)
+                           * smoothstep(0.24, 0.80, 1.0 - n2);
+        vec3 col = mix(vec3(0.34, 0.33, 0.31), vec3(0.70, 0.68, 0.62),
+                       n * 0.52 + n2 * 0.28);
+        col = mix(col, vec3(0.22, 0.22, 0.21), maria * 0.42);
+        col = mix(col, vec3(0.78, 0.75, 0.68), highland * 0.22);
+        col = mix(col, vec3(0.18, 0.18, 0.17), crater_soft * 0.18);
+        col = mix(col, vec3(0.16, 0.16, 0.15), crater_floor * 0.22);
+        col = mix(col, vec3(0.74, 0.72, 0.66), crater_rim * 0.28);
+        col = mix(col, vec3(0.82, 0.80, 0.74),
+                  smoothstep(0.92, 0.99, vnoise(NL * 28.0 + vec3(8.3, 2.1, 5.6))) * 0.08);
         return col;
     }
 
@@ -465,6 +574,9 @@ void main() {
     vec3 base_surface = surface_color(NL);
     vec3 surface = base_surface;
     vec3 shade_N = N;
+    if (u_planet_type == 14) {
+        shade_N = local_surface_dir_to_world(moon_normal(NL));
+    }
     vec3 lava_emit = vec3(0.0);
     float cloud_mask = 0.0;
     float impact_light_block = 0.0;

@@ -1570,31 +1570,31 @@
     {
       // Uranus — obliquity 97.77°, rings nearly perpendicular to ecliptic
       "body":              "Uranus",
-      "n_full":            8000,
-      "n_lod":             1000,
+      "n_full":            3500,
+      "n_lod":             450,
       "seed_full":         43981,
       "seed_lod":          61185,
       "e_max":             0.003,
       "h_scale":           2e-7,
       "zones": [
-        { "r_min_km": 41800, "r_max_km": 45000, "density": 0.35, "color": [0.26, 0.26, 0.28] },
-        { "r_min_km": 45000, "r_max_km": 48000, "density": 0.25, "color": [0.22, 0.22, 0.24] },
-        { "r_min_km": 50500, "r_max_km": 51200, "density": 0.40, "color": [0.32, 0.32, 0.35] }
+        { "r_min_km": 41800, "r_max_km": 45000, "density": 0.22, "color": [0.20, 0.20, 0.22] },
+        { "r_min_km": 45000, "r_max_km": 48000, "density": 0.16, "color": [0.17, 0.17, 0.19] },
+        { "r_min_km": 50500, "r_max_km": 51200, "density": 0.24, "color": [0.24, 0.24, 0.27] }
       ]
     },
     {
       // Neptune — Galle, Le Verrier, Lassell, Arago, Adams rings
       "body":              "Neptune",
-      "n_full":            6000,
-      "n_lod":             800,
+      "n_full":            2500,
+      "n_lod":             350,
       "seed_full":         9029,
       "seed_lod":          26505,
       "e_max":             0.003,
       "h_scale":           2e-7,
       "zones": [
-        { "r_min_km": 41900, "r_max_km": 42900, "density": 0.20, "color": [0.28, 0.24, 0.22] },
-        { "r_min_km": 53000, "r_max_km": 57500, "density": 0.40, "color": [0.30, 0.26, 0.24] },
-        { "r_min_km": 62500, "r_max_km": 63200, "density": 0.40, "color": [0.32, 0.28, 0.26] }
+        { "r_min_km": 41900, "r_max_km": 42900, "density": 0.12, "color": [0.20, 0.18, 0.17] },
+        { "r_min_km": 53000, "r_max_km": 57500, "density": 0.24, "color": [0.22, 0.20, 0.19] },
+        { "r_min_km": 62500, "r_max_km": 63200, "density": 0.24, "color": [0.24, 0.22, 0.21] }
       ]
     }
   ],

@@ -112,11 +112,22 @@ static GLint  s_sp_use_fullscreen = -1; /* 1 when billboard would degenerate (ca
  *
  *   0=rocky(default)  1=Earth  2=Mars  3=Venus  4=Jupiter  5=Saturn
  *   6=ice-giant       7=Io     8=Titan 9=Europa 10=proc-rocky
- *   11=proc-gas       12=proc-ice 13=Uranus
+ *   11=proc-gas       12=proc-ice 13=Uranus 14=airless moon
  */
 static int get_planet_type(const char *name)
 {
     static const struct { const char *name; int ptype; } tbl[] = {
+        { "Mercury", 14 },
+        { "Ceres",   14 }, { "Pallas", 14 }, { "Vesta",  14 },
+        { "Hygiea",  14 }, { "Interamnia",14 },
+        { "Pluto",   14 }, { "Eris",   14 }, { "Makemake",14 },
+        { "Haumea",  14 },
+        { "Moon",    14 }, { "Phobos", 14 }, { "Deimos", 14 },
+        { "Ganymede",14 }, { "Callisto",14 },
+        { "Mimas",   14 }, { "Enceladus",14 }, { "Tethys",14 },
+        { "Dione",   14 }, { "Rhea",   14 },
+        { "Miranda", 14 }, { "Ariel",  14 }, { "Umbriel",14 },
+        { "Titania", 14 }, { "Oberon", 14 }, { "Triton", 14 },
         { "Earth",   1 }, { "Mars",    2 }, { "Venus",   3 },
         { "Jupiter", 4 }, { "Saturn",  5 }, { "Uranus", 13 },
         { "Neptune", 6 }, { "Io",      7 }, { "Titan",   8 },
