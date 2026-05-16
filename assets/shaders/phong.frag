@@ -13,13 +13,14 @@
  *   3  Venus           (swirly yellow-white clouds)
  *   4  Jupiter         (orange-brown horizontal bands)
  *   5  Saturn          (tan-cream horizontal bands)
- *   6  ice giant       (smooth pale tint with faint bands)
+ *   6  Neptune         (deep blue haze with a soft storm)
  *   7  Io              (yellow-orange with dark volcanic spots)
  *   8  Titan           (orange haze)
  *   9  Europa          (icy white with rust cracks)
  *   10 build rocky     (grey-brown terrestrial)
  *   11 build gas giant (soft cloudy beige-brown giant)
  *   12 build ice       (icy blue giant)
+ *   13 Uranus          (soft white-blue haze with faint bands)
  */
 
 in vec2 v_uv;   /* unused for planets, kept for linker compatibility */
@@ -236,10 +237,70 @@ vec3 surface_color(vec3 NL) {
         return col;
     }
 
-    /* ---- Ice giant (Uranus / Neptune) --------------------------------- */
+    /* ---- Uranus ------------------------------------------------------- */
+    if (u_planet_type == 13) {
+        float n2 = fbm(NL * 2.4 + vec3(2.2, 5.8, 1.4));
+        float n3 = fbm(NL * 4.0 + vec3(6.8, 1.2, 4.6));
+        float y = NL.y + (n - 0.5) * 0.040 + (n2 - 0.5) * 0.030;
+        float soft_band = sin(y * 5.4 + n2 * 0.95) * 0.5 + 0.5;
+        float fine_band = sin(y * 9.2 + n3 * 1.10 + NL.x * 0.25) * 0.5 + 0.5;
+        float faint_bands = smoothstep(0.28, 0.84, soft_band)
+                          * (0.50 + 0.50 * smoothstep(0.16, 0.82, fine_band));
+        float lower_pole = smoothstep(0.28, -0.64, NL.y);
+        float upper_cyan = smoothstep(0.12, 0.86, NL.y);
+        vec3 col = mix(vec3(0.46, 0.84, 0.92), vec3(0.76, 0.98, 1.0),
+                       0.44 + n * 0.20);
+        col = mix(col, vec3(0.94, 1.0, 1.0), lower_pole * 0.46);
+        col = mix(col, vec3(0.24, 0.74, 0.92), upper_cyan * 0.30);
+        col = mix(col, vec3(0.82, 0.98, 1.0), faint_bands * 0.24);
+        col = mix(col, vec3(0.96, 1.0, 1.0), smoothstep(0.70, 0.92, n3) * 0.12);
+        return col;
+    }
+
+    /* ---- Neptune ------------------------------------------------------ */
     if (u_planet_type == 6) {
-        float band = sin(NL.y * 5.0 + (n - 0.5)) * 0.07 + 0.93;
-        return u_color * (0.72 + 0.56 * n) * band;
+        float n2 = fbm(NL * 3.0 + vec3(2.4, 6.8, 1.7));
+        float n3 = fbm(NL * 5.2 + vec3(7.1, 1.9, 4.3));
+        float y = NL.y + (n - 0.5) * 0.050 + (n2 - 0.5) * 0.040;
+        float haze_band = sin(y * 6.2 + n2 * 1.2) * 0.5 + 0.5;
+        float soft_band = sin(y * 11.0 + n3 * 1.4 + NL.x * 0.5) * 0.5 + 0.5;
+        float blue_band = sin(y * 8.8 + n2 * 1.5 + NL.z * 0.55) * 0.5 + 0.5;
+        float deep_haze = smoothstep(0.20, 0.84, 1.0 - haze_band);
+        float bright_haze = smoothstep(0.48, 0.90, haze_band);
+        float blue_belt = smoothstep(0.28, 0.82, 1.0 - blue_band);
+        float wisp = smoothstep(0.70, 0.93, soft_band)
+                   * smoothstep(0.48, 0.92, n3);
+        vec3 col = u_color * (0.78 + 0.32 * n);
+        col = mix(col, u_color * vec3(0.54, 0.66, 1.18), blue_belt * 0.26);
+        col = mix(col, u_color * vec3(0.58, 0.66, 1.12), deep_haze * 0.28);
+        col = mix(col, u_color * vec3(1.08, 1.14, 1.24), bright_haze * 0.24);
+        col = mix(col, vec3(0.56, 0.78, 1.0), wisp * 0.22);
+
+        vec3 storm_c = normalize(vec3(0.70, 0.12, 0.58));
+        vec3 storm_e = normalize(vec3(-storm_c.z, 0.0, storm_c.x));
+        vec3 storm_n = normalize(cross(storm_e, storm_c));
+        vec2 storm_uv = vec2(dot(NL, storm_e) / 0.20,
+                             dot(NL, storm_n) / 0.10);
+        float storm_ang = atan(storm_uv.y, storm_uv.x);
+        float storm_noise = fbm(NL * 7.0 + storm_c * 3.5);
+        float storm_swirl = sin(storm_uv.x * 5.0 - storm_uv.y * 2.4
+                                + storm_noise * 2.2 + haze_band * 1.0) * 0.5 + 0.5;
+        float storm_fine = fbm(NL * 12.0 + vec3(storm_uv, storm_noise) * 2.0);
+        storm_uv += vec2(cos(storm_ang), sin(storm_ang))
+                  * ((storm_swirl - 0.5) * 0.060 + (storm_fine - 0.5) * 0.030);
+        float storm_r = length(storm_uv);
+        float storm_cap = smoothstep(0.970, 0.994, dot(NL, storm_c));
+        float storm_mask = (1.0 - smoothstep(0.42, 1.30, storm_r)) * storm_cap;
+        float storm_glow = smoothstep(0.46, 0.94, storm_r)
+                         * (1.0 - smoothstep(0.94, 1.38, storm_r));
+        float storm_ripple = smoothstep(0.56, 0.90, storm_fine + storm_swirl * 0.18)
+                           * smoothstep(0.48, 1.12, storm_r)
+                           * (1.0 - smoothstep(1.12, 1.42, storm_r));
+        col = mix(col, u_color * vec3(0.34, 0.44, 0.86), storm_mask * 0.32);
+        col = mix(col, vec3(0.62, 0.88, 1.0),
+                  storm_glow * storm_mask * (0.22 + storm_swirl * 0.18));
+        col = mix(col, vec3(0.78, 0.94, 1.0), storm_ripple * storm_mask * 0.28);
+        return col;
     }
 
     /* ---- Build Rocky Planet ------------------------------------------- */
