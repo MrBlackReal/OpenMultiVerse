@@ -65,3 +65,28 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.tar.gz
+
+  # ── Update README download links ───────────────────────────────────────────
+  update-readme:
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update download links
+        run: |
+          TAG="${{ github.ref_name }}"
+          sed -i "s|/releases/download/v[^/]*/verse-windows-x64-v[^)]*\.zip|/releases/download/${TAG}/verse-windows-x64-${TAG}.zip|g" README.md
+          sed -i "s|/releases/download/v[^/]*/verse-linux-x64-v[^)]*\.tar\.gz|/releases/download/${TAG}/verse-linux-x64-${TAG}.tar.gz|g" README.md
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git diff --cached --quiet || git commit -m "docs: update download links to ${{ github.ref_name }}"
+          git push origin main
