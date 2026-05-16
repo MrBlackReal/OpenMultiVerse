@@ -911,8 +911,13 @@ void main() {
 
         vec3 city_color   = mix(vec3(1.0, 0.92, 0.65), vec3(1.0, 0.75, 0.40),
                                 vnoise(NL * 22.0 + vec3(2.1, 6.3, 4.4)));
+        /* Fade city lights with distance — high-freq noise aliases once Earth
+         * is small on screen.  dist_r = camera distance in body-radii. */
+        float dist_r = length(u_oc) / (u_radius + 1e-9);
+        float city_fade = 1.0 - smoothstep(10.0, 40.0, dist_r);
+
         lava_emit += city_color * (core_lights + core_lights2 + core_lights3 + glow_lights)
-                   * pop_mask * (1.0 - impact_light_block) * 0.90;
+                   * pop_mask * (1.0 - impact_light_block) * 0.90 * city_fade;
     }
 
     if (cloud_mask > 0.0) {
