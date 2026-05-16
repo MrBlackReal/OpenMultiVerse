@@ -210,9 +210,30 @@ vec3 surface_color(vec3 NL) {
 
     /* ---- Saturn ------------------------------------------------------- */
     if (u_planet_type == 5) {
-        float band = sin(NL.y * 11.0 + (n - 0.5) * 2.2) * 0.5 + 0.5;
-        return mix(vec3(0.58, 0.48, 0.24), vec3(0.98, 0.92, 0.64),
-                   band * 0.65 + n * 0.35);
+        float n2 = fbm(NL * 3.2 + vec3(2.6, 7.1, 4.8));
+        float n3 = fbm(NL * 5.6 + vec3(6.2, 1.4, 8.5));
+        float y = NL.y + (n - 0.5) * 0.060 + (n2 - 0.5) * 0.044;
+        float broad = sin(y * 7.8 + n2 * 1.10) * 0.5 + 0.5;
+        float soft = sin(y * 12.5 + n3 * 1.25) * 0.5 + 0.5;
+        float pale_zone = smoothstep(0.32, 0.88, broad);
+        float warm_belt = smoothstep(0.36, 0.90, 1.0 - broad)
+                        * smoothstep(0.24, 0.90, soft);
+        float cream_band = smoothstep(0.58, 0.92,
+                                      sin(y * 4.8 - n * 0.95) * 0.5 + 0.5);
+        float haze = smoothstep(0.34, 0.92, n3)
+                   * (0.18 + 0.42 * smoothstep(0.18, 0.90, soft));
+        float band_edge = smoothstep(0.34, 0.50, broad)
+                        * (1.0 - smoothstep(0.50, 0.66, broad));
+        float eddy = sin(NL.x * 12.0 + NL.z * 5.5 + y * 24.0 + n3 * 3.0) * 0.5 + 0.5;
+        float edge_swirl = band_edge * smoothstep(0.40, 0.86, eddy);
+        vec3 col = mix(vec3(0.58, 0.47, 0.30), vec3(0.88, 0.73, 0.48),
+                       pale_zone * 0.62 + n * 0.14);
+        col = mix(col, vec3(0.98, 0.90, 0.68), cream_band * 0.30);
+        col = mix(col, vec3(0.70, 0.50, 0.32), warm_belt * 0.26);
+        col = mix(col, vec3(0.90, 0.76, 0.54), haze * 0.10);
+        col = mix(col, mix(vec3(0.78, 0.58, 0.38), vec3(0.96, 0.86, 0.66), eddy),
+                  edge_swirl * 0.10);
+        return col;
     }
 
     /* ---- Ice giant (Uranus / Neptune) --------------------------------- */
@@ -234,15 +255,27 @@ vec3 surface_color(vec3 NL) {
 
     /* ---- Build Gas Giant ---------------------------------------------- */
     if (u_planet_type == 11) {
-        float n2 = fbm(NL * 3.2 + vec3(4.4, 1.6, 7.2));
-        float n3 = fbm(NL * 6.8 + vec3(1.8, 6.2, 2.7));
-        float cloud = sin(NL.y * 11.5 + (n - 0.5) * 1.8 + (n2 - 0.5) * 1.0) * 0.5 + 0.5;
-        float haze  = sin(NL.y * 5.2 + (n3 - 0.5) * 1.4) * 0.5 + 0.5;
-        vec3 deep = u_color * vec3(0.78, 0.64, 0.48);
-        vec3 light = u_color * vec3(1.12, 1.04, 0.92);
-        vec3 warm = u_color * vec3(0.96, 0.80, 0.60);
-        vec3 col = mix(deep, light, cloud * 0.46 + haze * 0.22 + n * 0.18);
-        col = mix(col, warm, smoothstep(0.70, 0.90, n3) * 0.18);
+        float n2 = fbm(NL * 3.4 + vec3(4.4, 1.6, 7.2));
+        float n3 = fbm(NL * 5.8 + vec3(1.8, 6.2, 2.7));
+        float drift = NL.y + NL.x * 0.055 + (n - 0.5) * 0.080 + (n2 - 0.5) * 0.045;
+        float wide = sin(drift * 8.4 + n2 * 1.45) * 0.5 + 0.5;
+        float veil = sin(drift * 15.0 + n3 * 1.6 + NL.z * 0.8) * 0.5 + 0.5;
+        float bright_stream = smoothstep(0.58, 0.90, wide);
+        float deep_stream = smoothstep(0.38, 0.86, 1.0 - wide)
+                          * smoothstep(0.24, 0.90, veil);
+        float pearly_haze = smoothstep(0.46, 0.92, n3)
+                          * (0.20 + 0.45 * smoothstep(0.28, 0.88, veil));
+        float edge = smoothstep(0.34, 0.50, wide)
+                   * (1.0 - smoothstep(0.50, 0.68, wide));
+        float curl = sin(NL.x * 10.0 - NL.z * 13.0 + drift * 26.0 + n3 * 3.2) * 0.5 + 0.5;
+        vec3 deep = u_color * vec3(0.66, 0.58, 0.46);
+        vec3 mid = u_color * vec3(0.94, 0.88, 0.78);
+        vec3 light = u_color * vec3(1.16, 1.10, 1.08);
+        vec3 glow = u_color * vec3(1.05, 0.92, 0.78);
+        vec3 col = mix(deep, mid, bright_stream * 0.55 + n * 0.16);
+        col = mix(col, light, pearly_haze * 0.24);
+        col = mix(col, u_color * vec3(0.74, 0.64, 0.50), deep_stream * 0.28);
+        col = mix(col, glow, edge * smoothstep(0.40, 0.86, curl) * 0.16);
         return col;
     }
 
