@@ -1876,8 +1876,11 @@ void render_frame(const float view[16], const float proj[16],
 
 /* ------------------------------------------------------------------ shutdown */
 void render_shutdown(void) {
-    for (int i = 0; i < 3; i++)
+    for (int i = 0; i < 3; i++) {
         if (s_build_dist_text[i].tex) glDeleteTextures(1, &s_build_dist_text[i].tex);
+        s_build_dist_text[i].tex = 0;
+        s_build_dist_text[i].str[0] = '\0';
+    }
     if (s_build_font) TTF_CloseFont(s_build_font);
     TTF_Quit();
     glDeleteProgram(s_sphere_shader);

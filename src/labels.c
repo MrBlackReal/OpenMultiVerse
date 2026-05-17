@@ -150,7 +150,7 @@ static void build_label_texture(int i)
                    !g_bodies[g_bodies[i].parent].is_star);
     TTF_SetFontStyle(s_font, is_moon ? TTF_STYLE_ITALIC : TTF_STYLE_NORMAL);
     SDL_Surface *surf = TTF_RenderText_Blended(s_font, g_bodies[i].name, col);
-    if (!surf) return;
+    if (!surf) { TTF_SetFontStyle(s_font, TTF_STYLE_NORMAL); return; }
     s_tex[i] = surface_to_texture(surf, &s_tex_w[i], &s_tex_h[i]);
     TTF_SetFontStyle(s_font, TTF_STYLE_NORMAL);
 }
