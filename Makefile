@@ -39,18 +39,23 @@ else
                -lopengl32 -lglu32 \
                -lm -fopenmp -mwindows
     EXT      = .exe
+    RC       = windres
+    RC_OBJ   = resource.o
 endif
 
 # ---- Rules ---------------------------------------------------------
 all: $(TARGET)$(EXT)
 
-$(TARGET)$(EXT): $(OBJS)
+$(TARGET)$(EXT): $(OBJS) $(RC_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+resource.o: resource.rc
+	$(RC) resource.rc -O coff -o resource.o
 
 $(SRCDIR)/%.o: $(SRCDIR)/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(SRCDIR)/*.o $(TARGET) $(TARGET).exe
+	rm -f $(SRCDIR)/*.o $(TARGET) $(TARGET).exe resource.o
 
 .PHONY: all clean
