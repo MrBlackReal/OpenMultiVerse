@@ -1,0 +1,14 @@
+# Nearby bright stars — Gaia/Hipparcos-style sample (approx. real values).
+# Columns follow common Gaia DR3 names; a real export drops in unchanged.
+# parallax in mas, pmra/pmdec in mas/yr, radial_velocity in km/s, teff in K.
+name,ra,dec,parallax,pmra,pmdec,radial_velocity,teff
+Sirius,101.287155,-16.716116,374.49,-546.01,-1223.07,-5.50,9940
+Alpha Centauri A,219.902066,-60.833975,754.81,-3679.25,473.67,-22.40,5790
+Barnard's Star,269.452080,4.668361,546.98,-802.80,10362.54,-110.60,3134
+Vega,279.234735,38.783689,130.23,200.94,286.23,-13.90,9602
+Procyon,114.825498,5.224993,284.56,-714.59,-1036.80,-3.20,6530
+Wolf 359,164.120271,7.014658,415.18,-3866.34,-2699.22,19.30,2800
+Lalande 21185,165.834014,35.969871,392.75,-580.06,-4769.54,-85.00,3550
+Tau Ceti,26.017012,-15.937480,273.81,-1721.80,854.07,-16.40,5344
+Altair,297.695827,8.868321,194.95,536.23,385.29,-26.10,7550
+Epsilon Eridani,53.232688,-9.458264,310.58,-975.17,19.49,-15.50,5084

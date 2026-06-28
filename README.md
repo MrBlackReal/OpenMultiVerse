@@ -1,11 +1,36 @@
 ![image](https://github.com/user-attachments/assets/2878c365-11df-4f4a-af8e-3a141d69ae85)
 
-# OpenVerse - An open-source universe simulator
+# OpenMultiVerse - simulate universes with different laws of physics
 
-**OpenVerse** is an open-source, open-world universe simulator.  
-The goal is to simulate as much of the universe as possible - multiple star systems, planets, moons, asteroid belts, rings, and more - driven by real gravitational physics.
+**OpenMultiVerse** is a fork of [ortanaV2/OpenVerse](https://github.com/ortanaV2/OpenVerse)
+that turns the single open-world universe simulator into a **multiverse**: many
+universes, each with its own physical laws, plus tools to build them from real
+astronomical data.
+
+The original goal stands — simulate as much of the universe as possible (multiple
+star systems, planets, moons, asteroid belts, rings) under real N-body gravity.
+OpenMultiVerse adds the ability to change the gravity itself.
 
 Not a screensaver. Not a game. A sandbox for curiosity.
+
+### What's new vs. OpenVerse
+
+- **Data-driven physical laws.** Every universe has a `"laws"` block — gravitational
+  constant `G`, softening, and time scale are tunable per universe.
+- **Custom force laws.** Non-inverse-square gravity via a `force_exp` exponent
+  (inverse-cube and friends → precessing, plunging, escaping orbits).
+- **Exotic terms.** A cosmological repulsion term (`lambda`, a dark-energy analogue)
+  and post-Newtonian perihelion precession (`pn_factor`).
+- **Multiverse menu (Dear ImGui).** Press **U** to pick between universes and drag
+  live sliders for the active laws. Built on cimgui (optional `IMGUI=1` build).
+- **Real astronomical data import.** Build universes from the NASA Exoplanet
+  Archive, JPL Horizons state vectors, or Gaia/Hipparcos star catalogs — both via
+  the `catalogtool` CLI and in-app import buttons.
+- **Save / load.** Snapshot the live universe (laws + every body's exact state) to
+  a file and reload it precisely, from the same menu.
+
+See [Multiverse](#multiverse--different-laws-of-physics) and
+[Real astronomical data](#real-astronomical-data) below for details.
 
 ---
 
@@ -27,6 +52,11 @@ Not a screensaver. Not a game. A sandbox for curiosity.
 ## Installation
 
 > No build tools required — just download and run.
+
+> **Note:** the pre-built downloads below are upstream **OpenVerse** binaries and
+> do **not** include the OpenMultiVerse features (custom laws, multiverse menu,
+> real-data import, save/load). For those, [build from source](#building-from-source)
+> — the multiverse menu needs the `IMGUI=1` build.
 
 ### Download Links
 [Download latest Windows release](https://github.com/ortanaV2/OpenVerse/releases/download/v1.0.3/verse-windows-x64-v1.0.3.zip)
@@ -93,6 +123,7 @@ Extract the folder to any location on your machine.
 | B | Toggle build mode |
 | Tab + Scroll | Cycle build presets (in build mode) |
 | I | Toggle inspection mode |
+| U | Toggle the multiverse menu (requires the ImGui build — see below) |
 | F11 / Alt+Enter | Toggle fullscreen |
 | `+` / `-` | Simulation speed up / down |
 | Space | Pause / resume |
@@ -130,9 +161,67 @@ Space is incomprehensibly large. Most simulations either abstract that away or c
 | Catalog-backed skybox — Yale Bright Star Catalog J2000 stars | ✓ |
 | Background soundtrack | ✓ |
 | Supernovae | ✓ |
+| Data-driven physical laws — per-universe G, softening, time scale | ✓ |
+| Custom force laws — non-inverse-square gravity (configurable exponent) | ✓ |
+| Exotic terms — cosmological repulsion (Λ) & post-Newtonian precession | ✓ |
+| Multiverse — multiple selectable universes, each with its own laws | ✓ |
+| ImGui universe picker + live law sliders (optional `IMGUI=1` build) | ✓ |
 | Black holes | planned |
 | Enhanced rendering | planned |
-| Expand universe | planned |
+
+---
+
+## Multiverse — different laws of physics
+
+Every universe is a JSON file under `assets/` with an optional `"laws"` block.
+Omitted fields fall back to Newtonian defaults, so existing files keep working.
+
+```jsonc
+"laws": {
+  "G": 6.674e-11,    // gravitational constant (m^3 kg^-1 s^-2)
+  "softening": 1e5,  // Plummer softening length (m)
+  "time_scale": 1.0, // multiplier on simulated time
+  "force_exp": 2.0,  // radial falloff exponent (2 = inverse-square, 3 = inverse-cube, ...)
+  "lambda": 0.0,     // cosmological term: outward push ∝ distance (dark-energy analogue)
+  "pn_factor": 0.0   // post-Newtonian perihelion precession (1 = physical, higher = exaggerated)
+}
+```
+
+Bundled example universes live in `assets/universes/`: **Strong Gravity**,
+**Inverse-Cube Forces**, **Expanding Cosmos**, and **Relativistic Precession**.
+Build with `IMGUI=1` (below) and press **U** in-app to pick a universe or drag the
+live law sliders and watch the dynamics change.
+
+**Save / load.** The same menu can snapshot the running universe — current laws
+plus every body's exact position and velocity — to a JSON file, and load it back
+to that precise instant (snapshots skip warm-up so nothing drifts). Handy for
+capturing a collision setup or a tweaked law configuration to revisit later.
+
+---
+
+## Real astronomical data
+
+Universes can be built from real catalogs. The converter (`catalogtool`) turns a
+catalog into a universe JSON the simulator loads like any other; the same code
+also powers the in-app **Import real astronomical data** buttons in the `U` menu
+(ImGui build), which import a catalog and load it on the spot.
+
+```bash
+make catalogtool
+./catalogtool exoplanets assets/catalogs/exoplanets_sample.csv assets/universes/my_systems.json
+./catalogtool horizons   assets/catalogs/horizons_sample.csv   assets/universes/my_solar.json
+./catalogtool gaia       assets/catalogs/gaia_sample.csv        assets/universes/my_stars.json [max]
+```
+
+| Source | What it reads | Where to get it |
+|---|---|---|
+| **NASA Exoplanet Archive** | `hostname`, `pl_name`, `sy_dist`, `ra`, `dec`, `st_mass/rad/teff`, `pl_orbsmax`/`pl_orbper`, `pl_orbeccen`, `pl_orbincl`, `pl_bmasse`, `pl_rade` → one star + Keplerian planets per host | [Planetary Systems CSV](https://exoplanetarchive.ipac.caltech.edu/) |
+| **JPL Horizons** | heliocentric **Ecliptic of J2000.0** state vectors (`x/y/z_km`, `vx/vy/vz_kms`) → converted to orbital elements | [ssd.jpl.nasa.gov/horizons](https://ssd.jpl.nasa.gov/horizons/) (VECTORS, km & km/s) |
+| **Gaia / Hipparcos** | `ra`, `dec`, `parallax` (mas), `pmra`, `pmdec`, `radial_velocity`, `teff` → positioned, drifting stars | [Gaia Archive](https://gea.esac.esa.int/archive/) |
+
+Small real samples live in `assets/catalogs/`, and the bundled presets
+**TRAPPIST-1 (real)**, **Stellar Neighborhood (real)**, **Solar System
+(Horizons)**, and **Real Stars (Gaia)** are generated from them.
 
 ---
 
@@ -155,6 +244,22 @@ sudo apt install build-essential libsdl2-dev libsdl2-ttf-dev libsdl2-mixer-dev l
 make
 ./verse
 ```
+(On Arch/CachyOS: `sudo pacman -S sdl2 sdl2_ttf sdl2_mixer glew`.)
+
+**Optional — the ImGui multiverse menu**
+
+The universe picker and live law sliders are built on [cimgui](https://github.com/cimgui/cimgui)
+(a C binding for Dear ImGui) and are compiled only on request:
+
+```bash
+git submodule update --init --recursive   # fetch extern/cimgui + Dear ImGui
+make IMGUI=1                               # links libstdc++; needs g++
+./verse                                    # press U for the multiverse menu
+```
+
+Without `IMGUI=1` the menu code compiles to inert stubs and the simulator builds
+exactly as before (no C++ toolchain or cimgui required). Universes can still be
+selected by editing the path the app loads.
 
 For a full technical reference of the codebase, see [ARCHITECTURE.md](ARCHITECTURE.md).
 

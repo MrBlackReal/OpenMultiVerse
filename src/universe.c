@@ -221,7 +221,118 @@ static void read_atmosphere(const JsonNode *bn, Body *bo)
  */
 static int root_star_of(int i) { return body_root_star(i); }
 
+int g_universe_is_snapshot = 0;
+
+/*
+ * load_snapshot — load a "snapshot" universe: every body carries an absolute
+ * "state" (pos_m, vel_ms) and an "is_star" flag, so placement is direct and no
+ * Keplerian derivation, CoM correction, bulk velocity, or warm-up is applied.
+ * Parents are resolved by name in a second pass so body order does not matter.
+ */
+static void load_snapshot(const JsonNode *bodies_arr)
+{
+    int n = 0;
+    for (const JsonNode *bn = bodies_arr->first_child; bn; bn = bn->next) n++;
+
+    char (*parent_names)[32] = (char(*)[32])calloc((size_t)(n > 0 ? n : 1), 32);
+    if (!parent_names) { fprintf(stderr, "[universe] snapshot alloc failed\n"); exit(1); }
+
+    int idx = 0;
+    for (const JsonNode *bn = bodies_arr->first_child; bn; bn = bn->next, idx++) {
+        ensure_capacity(g_nbodies + 1);
+        Body *bo = &g_bodies[g_nbodies];
+        body_defaults(bo);
+
+        strncpy(bo->name, json_str(json_get(bn, "name"), "body"), 31);
+        bo->name[31] = '\0';
+        bo->is_star = (int)json_num(json_get(bn, "is_star"), 0.0);
+        bo->mass    = json_num(json_get(bn, "mass"), 0.0);
+        bo->radius  = json_num(json_get(bn, "radius_km"), 1.0) * 1000.0;
+        read_color(json_get(bn, "color"), bo->col);
+        read_rotation(bn, bo);
+        read_atmosphere(bn, bo);
+        bo->rotation_angle = json_num(json_get(bn, "rotation_angle_rad"), 0.0);
+
+        JsonNode *st = json_get(bn, "state");
+        JsonNode *p  = st ? json_get(st, "pos_m") : NULL;
+        JsonNode *v  = st ? json_get(st, "vel_ms") : NULL;
+        bo->pos[0] = json_num(json_idx(p, 0), 0.0);
+        bo->pos[1] = json_num(json_idx(p, 1), 0.0);
+        bo->pos[2] = json_num(json_idx(p, 2), 0.0);
+        bo->vel[0] = json_num(json_idx(v, 0), 0.0);
+        bo->vel[1] = json_num(json_idx(v, 1), 0.0);
+        bo->vel[2] = json_num(json_idx(v, 2), 0.0);
+
+        snprintf(parent_names[idx], 32, "%s", json_str(json_get(bn, "parent"), ""));
+
+        alloc_trail(bo);
+        g_nbodies++;
+    }
+
+    /* Resolve parent links by name now that every body exists. */
+    for (int k = 0; k < g_nbodies; k++)
+        g_bodies[k].parent = parent_names[k][0]
+            ? find_body_index(parent_names[k], g_nbodies) : -1;
+
+    free(parent_names);
+    g_universe_is_snapshot = 1;
+    fprintf(stdout, "[universe] snapshot: loaded %d bodies\n", g_nbodies);
+    fflush(stdout);
+}
+
 /* ------------------------------------------------------------------ public */
+
+int universe_save(const char *path)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) { fprintf(stderr, "[universe] cannot write snapshot '%s'\n", path); return -1; }
+
+    fprintf(f, "{\n  // OpenMultiVerse snapshot — absolute live state. Reloads as saved.\n");
+    fprintf(f, "  \"format\": \"snapshot\",\n\n");
+    fprintf(f,
+        "  \"laws\": {\n"
+        "    \"G\": %.10g, \"softening\": %.10g, \"time_scale\": %.10g,\n"
+        "    \"force_exp\": %.10g, \"lambda\": %.10g, \"pn_factor\": %.10g, \"c_light\": %.10g\n"
+        "  },\n\n",
+        g_laws.G, g_laws.softening, g_laws.time_scale,
+        g_laws.force_exp, g_laws.lambda, g_laws.pn_factor, g_laws.c_light);
+
+    fprintf(f, "  \"bodies\": [\n");
+    int first = 1, count = 0;
+    for (int i = 0; i < g_nbodies; i++) {
+        Body *b = &g_bodies[i];
+        if (!b->alive) continue;
+        double period = (b->rotation_rate != 0.0)
+                      ? (2.0 * PI) / (b->rotation_rate * DAY) : 0.0;
+        const char *parent = (b->parent >= 0 && b->parent < g_nbodies)
+                           ? g_bodies[b->parent].name : "";
+
+        if (!first) fprintf(f, ",\n");
+        first = 0;
+        fprintf(f, "    { \"name\": \"%s\", \"is_star\": %d, \"parent\": \"%s\",\n",
+                b->name, b->is_star ? 1 : 0, parent);
+        fprintf(f, "      \"mass\": %.10e, \"radius_km\": %.6f,\n",
+                b->mass, b->radius / 1000.0);
+        fprintf(f, "      \"color\": [%.4f, %.4f, %.4f],\n", b->col[0], b->col[1], b->col[2]);
+        fprintf(f, "      \"obliquity_deg\": %.6f, \"rotation_period_days\": %.8g, "
+                   "\"rotation_angle_rad\": %.8f,\n",
+                b->obliquity, period, b->rotation_angle);
+        if (b->atm_intensity > 0.0f)
+            fprintf(f, "      \"atmosphere\": { \"color\": [%.4f, %.4f, %.4f], "
+                       "\"intensity\": %.4f, \"scale\": %.4f },\n",
+                    b->atm_color[0], b->atm_color[1], b->atm_color[2],
+                    b->atm_intensity, b->atm_scale);
+        fprintf(f, "      \"state\": { \"pos_m\": [%.10e, %.10e, %.10e], "
+                   "\"vel_ms\": [%.10e, %.10e, %.10e] } }",
+                b->pos[0], b->pos[1], b->pos[2], b->vel[0], b->vel[1], b->vel[2]);
+        count++;
+    }
+    fprintf(f, "\n  ]\n}\n");
+    fclose(f);
+    fprintf(stdout, "[universe] saved snapshot: %d bodies -> %s\n", count, path);
+    fflush(stdout);
+    return 0;
+}
 
 void universe_load(const char *path)
 {
@@ -234,6 +345,26 @@ void universe_load(const char *path)
         exit(1);
     }
 
+    /* Per-universe physical laws: start from Newtonian defaults, then override
+     * with whatever the optional "laws" block specifies.  Missing fields keep
+     * their default so existing universe files load unchanged. */
+    laws_reset();
+    JsonNode *laws = json_get(root, "laws");
+    if (laws && laws->type == JSON_OBJECT) {
+        g_laws.G          = json_num(json_get(laws, "G"),          g_laws.G);
+        g_laws.softening  = json_num(json_get(laws, "softening"),  g_laws.softening);
+        g_laws.time_scale = json_num(json_get(laws, "time_scale"), g_laws.time_scale);
+        g_laws.force_exp  = json_num(json_get(laws, "force_exp"),  g_laws.force_exp);
+        g_laws.lambda     = json_num(json_get(laws, "lambda"),     g_laws.lambda);
+        g_laws.pn_factor  = json_num(json_get(laws, "pn_factor"),  g_laws.pn_factor);
+        g_laws.c_light    = json_num(json_get(laws, "c_light"),    g_laws.c_light);
+        fprintf(stdout, "[Boot] Universe laws: G=%.4g softening=%.4g force_exp=%.4g "
+                        "lambda=%.4g pn=%.4g\n",
+                g_laws.G, g_laws.softening, g_laws.force_exp,
+                g_laws.lambda, g_laws.pn_factor);
+        fflush(stdout);
+    }
+
     JsonNode *bodies_arr = json_get(root, "bodies");
     if (!bodies_arr || bodies_arr->type != JSON_ARRAY) {
         fprintf(stderr, "[universe] 'bodies' array not found in '%s'\n", path);
@@ -241,6 +372,15 @@ void universe_load(const char *path)
     }
 
     g_nbodies = 0;
+    g_universe_is_snapshot = 0;
+
+    /* Snapshot universes (saved live state) take a direct placement path that
+     * skips Keplerian derivation and all post-processing. */
+    if (strcmp(json_str(json_get(root, "format"), ""), "snapshot") == 0) {
+        load_snapshot(bodies_arr);
+        json_free(root);
+        return;
+    }
 
     /* Bulk velocity per body slot.  Set for star indices during Pass 1;
      * zero everywhere else.  Applied in post-processing after CoM correction. */

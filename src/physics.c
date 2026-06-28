@@ -401,6 +401,83 @@ static int is_ancestor_of(int ancestor, int child) {
 /* ── force kernels ──────────────────────────────────────────────────────── */
 
 /*
+ * add_cosmological_acc — apply the per-universe cosmological term to every
+ * in-system body's slow acceleration:
+ *
+ *     acc += g_laws.lambda * (pos - ref)
+ *
+ * This mimics a cosmological constant / dark-energy field: a push that grows
+ * linearly with distance from the system reference point (lambda > 0 expands
+ * the system outward, lambda < 0 contracts it).  The reference is the system's
+ * root star (or the world origin for the legacy all-bodies path), so the term
+ * acts on intra-system structure rather than bulk system position.
+ *
+ * Inert (early return) when lambda == 0, so Newtonian universes pay nothing.
+ */
+static void add_cosmological_acc(int root) {
+    if (g_laws.lambda == 0.0) return;
+    double ref[3] = { 0.0, 0.0, 0.0 };
+    if (root >= 0 && root < g_nbodies) {
+        ref[0] = g_bodies[root].pos[0];
+        ref[1] = g_bodies[root].pos[1];
+        ref[2] = g_bodies[root].pos[2];
+    }
+    for (int i = 0; i < g_nbodies; i++) {
+        if (!g_bodies[i].alive || !in_system(i, root)) continue;
+        g_bodies[i].acc[0] += g_laws.lambda * (g_bodies[i].pos[0] - ref[0]);
+        g_bodies[i].acc[1] += g_laws.lambda * (g_bodies[i].pos[1] - ref[1]);
+        g_bodies[i].acc[2] += g_laws.lambda * (g_bodies[i].pos[2] - ref[2]);
+    }
+}
+
+/*
+ * add_relativistic_acc — apply the per-universe post-Newtonian (1PN) precession
+ * term to each non-star body relative to its primary (planet→star, moon→planet):
+ *
+ *     a += -pn_factor * 3 G M L² / (c² r⁵) * r_vec
+ *
+ * This is the leading Schwarzschild perihelion-advance term (L = |r × v| is the
+ * specific angular momentum).  With pn_factor == 1 it is physically calibrated:
+ * Mercury precesses the famous ~43 arcsec/century.  Larger values exaggerate the
+ * effect so the rosette is visible on human timescales; 0 disables it.
+ *
+ * Inert (early return) when pn_factor == 0.
+ */
+static void add_relativistic_acc(int root) {
+    if (g_laws.pn_factor == 0.0) return;
+    const double c2 = g_laws.c_light * g_laws.c_light;
+    for (int i = 0; i < g_nbodies; i++) {
+        if (!g_bodies[i].alive || !in_system(i, root)) continue;
+        int p = g_bodies[i].parent;
+        if (p < 0 || !g_bodies[p].alive) continue;   /* stars have no primary */
+
+        double rx = g_bodies[i].pos[0] - g_bodies[p].pos[0];
+        double ry = g_bodies[i].pos[1] - g_bodies[p].pos[1];
+        double rz = g_bodies[i].pos[2] - g_bodies[p].pos[2];
+        double vx = g_bodies[i].vel[0] - g_bodies[p].vel[0];
+        double vy = g_bodies[i].vel[1] - g_bodies[p].vel[1];
+        double vz = g_bodies[i].vel[2] - g_bodies[p].vel[2];
+
+        double r2 = rx*rx + ry*ry + rz*rz;
+        if (r2 <= 0.0) continue;
+        double r = sqrt(r2);
+
+        /* specific angular momentum L = r × v, and |L|² */
+        double Lx = ry*vz - rz*vy;
+        double Ly = rz*vx - rx*vz;
+        double Lz = rx*vy - ry*vx;
+        double L2 = Lx*Lx + Ly*Ly + Lz*Lz;
+
+        double gm = g_laws.G * g_bodies[p].mass;
+        /* k = -3 G M L² / (c² r⁵);  r⁵ = r2*r2*r */
+        double k = -g_laws.pn_factor * 3.0 * gm * L2 / (c2 * r2 * r2 * r);
+        g_bodies[i].acc[0] += k * rx;
+        g_bodies[i].acc[1] += k * ry;
+        g_bodies[i].acc[2] += k * rz;
+    }
+}
+
+/*
  * compute_acc_slow_system — accumulate slow gravitational accelerations.
  *
  * Computes all-pairs force for the given star system, with two exclusions:
@@ -457,10 +534,11 @@ static void compute_acc_slow_system(int root) {
                 dy = g_bodies[j].pos[1] - g_bodies[i].pos[1];
                 dz = g_bodies[j].pos[2] - g_bodies[i].pos[2];
                 r2 = dx*dx + dy*dy + dz*dz + SOFTENING*SOFTENING;
-                if (G_CONST * g_bodies[j].mass / r2 < GRAV_EPSILON &&
+                if (g_laws.force_exp == 2.0 &&
+                    G_CONST * g_bodies[j].mass / r2 < GRAV_EPSILON &&
                     G_CONST * g_bodies[i].mass / r2 < GRAV_EPSILON) continue;
                 r  = sqrt(r2);
-                f  = G_CONST / (r2 * r);   /* f = G / r³; acceleration = f × M × r̂ */
+                f  = laws_pair_factor(r2, r);   /* f = G / r³; acceleration = f × M × r̂ */
 
                 g_bodies[i].acc[0] += f * g_bodies[j].mass * dx;
                 g_bodies[i].acc[1] += f * g_bodies[j].mass * dy;
@@ -473,6 +551,8 @@ static void compute_acc_slow_system(int root) {
                 }
             }
         }
+        add_cosmological_acc(root);
+        add_relativistic_acc(root);
         return;
     }
 
@@ -498,10 +578,11 @@ static void compute_acc_slow_system(int root) {
             dy = g_bodies[j].pos[1] - g_bodies[i].pos[1];
             dz = g_bodies[j].pos[2] - g_bodies[i].pos[2];
             r2 = dx*dx + dy*dy + dz*dz + SOFTENING*SOFTENING;
-            if (G_CONST * g_bodies[j].mass / r2 < GRAV_EPSILON &&
+            if (g_laws.force_exp == 2.0 &&
+                G_CONST * g_bodies[j].mass / r2 < GRAV_EPSILON &&
                 G_CONST * g_bodies[i].mass / r2 < GRAV_EPSILON) continue;
             r  = sqrt(r2);
-            f  = G_CONST / (r2 * r);
+            f  = laws_pair_factor(r2, r);
 
             g_bodies[i].acc[0] += f * g_bodies[j].mass * dx;
             g_bodies[i].acc[1] += f * g_bodies[j].mass * dy;
@@ -514,6 +595,8 @@ static void compute_acc_slow_system(int root) {
             }
         }
     }
+    add_cosmological_acc(root);
+    add_relativistic_acc(root);
 }
 
 /*
@@ -546,9 +629,10 @@ static void compute_acc_fast_system(int root) {
                 double dy = g_bodies[p].pos[1] - g_bodies[i].pos[1];
                 double dz = g_bodies[p].pos[2] - g_bodies[i].pos[2];
                 double r2 = dx*dx + dy*dy + dz*dz + SOFTENING*SOFTENING;
-                if (G_CONST * g_bodies[p].mass / r2 < GRAV_EPSILON) continue;
+                if (g_laws.force_exp == 2.0 &&
+                    G_CONST * g_bodies[p].mass / r2 < GRAV_EPSILON) continue;
                 double r  = sqrt(r2);
-                double f  = G_CONST / (r2 * r);
+                double f  = laws_pair_factor(r2, r);
 
                 /* satellite accelerated toward parent */
                 g_bodies[i].fast_acc[0] += f * g_bodies[p].mass * dx;
@@ -580,9 +664,10 @@ static void compute_acc_fast_system(int root) {
             double dy = g_bodies[p].pos[1] - g_bodies[i].pos[1];
             double dz = g_bodies[p].pos[2] - g_bodies[i].pos[2];
             double r2 = dx*dx + dy*dy + dz*dz + SOFTENING*SOFTENING;
-            if (G_CONST * g_bodies[p].mass / r2 < GRAV_EPSILON) continue;
+            if (g_laws.force_exp == 2.0 &&
+                G_CONST * g_bodies[p].mass / r2 < GRAV_EPSILON) continue;
             double r  = sqrt(r2);
-            double f  = G_CONST / (r2 * r);
+            double f  = laws_pair_factor(r2, r);
 
             /* satellite accelerated toward parent */
             g_bodies[i].fast_acc[0] += f * g_bodies[p].mass * dx;
@@ -779,7 +864,7 @@ static void compute_acc(void) {
             double dz = g_bodies[j].pos[2] - g_bodies[i].pos[2];
             double r2 = dx*dx + dy*dy + dz*dz + SOFTENING*SOFTENING;
             double r  = sqrt(r2);
-            double f  = G_CONST / (r2 * r);
+            double f  = laws_pair_factor(r2, r);
             double ai = f * g_bodies[j].mass;
             double aj = f * g_bodies[i].mass;
             g_bodies[i].acc[0] += ai * dx; g_bodies[i].acc[1] += ai * dy; g_bodies[i].acc[2] += ai * dz;

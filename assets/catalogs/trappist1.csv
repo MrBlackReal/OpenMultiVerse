@@ -1,0 +1,12 @@
+# NASA Exoplanet Archive "Planetary Systems" — small hand-picked sample.
+# Real values (rounded) for a few well-known systems. Column names match the
+# Archive's CSV export so a full download drops in unchanged.
+# Download full table: https://exoplanetarchive.ipac.caltech.edu/ (Planetary Systems)
+pl_name,hostname,sy_dist,ra,dec,st_mass,st_rad,st_teff,pl_orbsmax,pl_orbper,pl_orbeccen,pl_orbincl,pl_orblper,pl_bmasse,pl_rade
+TRAPPIST-1 b,TRAPPIST-1,12.4670,346.622366,-5.041477,0.0898,0.1192,2566,0.01154,1.510826,0.006,89.728,0,1.374,1.116
+TRAPPIST-1 c,TRAPPIST-1,12.4670,346.622366,-5.041477,0.0898,0.1192,2566,0.01580,2.421937,0.007,89.778,0,1.308,1.097
+TRAPPIST-1 d,TRAPPIST-1,12.4670,346.622366,-5.041477,0.0898,0.1192,2566,0.02227,4.049219,0.008,89.896,0,0.388,0.788
+TRAPPIST-1 e,TRAPPIST-1,12.4670,346.622366,-5.041477,0.0898,0.1192,2566,0.02925,6.101013,0.005,89.793,0,0.692,0.920
+TRAPPIST-1 f,TRAPPIST-1,12.4670,346.622366,-5.041477,0.0898,0.1192,2566,0.03849,9.207540,0.010,89.740,0,1.039,1.045
+TRAPPIST-1 g,TRAPPIST-1,12.4670,346.622366,-5.041477,0.0898,0.1192,2566,0.04683,12.352446,0.002,89.742,0,1.321,1.129
+TRAPPIST-1 h,TRAPPIST-1,12.4670,346.622366,-5.041477,0.0898,0.1192,2566,0.06189,18.772866,0.006,89.805,0,0.326,0.755

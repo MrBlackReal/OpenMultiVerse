@@ -34,12 +34,18 @@ extern int g_win_h;
 #define PI  3.14159265358979323846
 
 /* ------------------------------------------------------------------ physics */
+#include "laws.h"                    /* per-universe constants → g_laws  */
 #define AU         1.496e11          /* m per AU                         */
 #define DAY        86400.0           /* s per day                        */
-#define G_CONST    6.674e-11         /* m^3 kg^-1 s^-2                   */
 #define GM_SUN     2.9591220828559093e-4  /* AU^3/day^2                 */
-#define SOFTENING  1e5               /* collision softening radius (m)   */
 #define GRAV_EPSILON 1e-14           /* m/s² — skip pair if acceleration below this */
+/*
+ * G_CONST / SOFTENING are now per-universe state held in g_laws (see laws.h).
+ * The original compile-time names are kept as aliases so existing call sites
+ * read the live value; new code may use g_laws.G / g_laws.softening directly.
+ */
+#define G_CONST    (g_laws.G)
+#define SOFTENING  (g_laws.softening)
 
 /* ------------------------------------------------------------------ sim */
 #define MAX_BODIES         128

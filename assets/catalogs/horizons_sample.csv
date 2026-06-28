@@ -1,0 +1,9 @@
+# Illustrative JPL Horizons heliocentric state vectors (Ecliptic of J2000.0).
+# Generated from real orbital elements. Replace with a real Horizons VECTORS
+# export (km, km/s) for a true ephemeris epoch.
+name,mass_kg,radius_km,x_km,y_km,z_km,vx_kms,vy_kms,vz_kms
+Earth,5.972e+24,6371,-2.650302e+07,1.446933e+08,1.193216e+02,-29.786495474,-5.478570322,-0.000009765
+Mars,6.417e+23,3389,2.080342e+08,-1.959744e+06,-5.158245e+06,1.160273640,26.297713422,0.522404152
+Jupiter,1.898e+27,6.991e+04,5.981372e+08,4.407752e+08,-1.523827e+07,-7.913676904,11.136591388,0.130779394
+1P/Halley,2.2e+14,5.5,-2.085475e+09,1.716622e+09,-8.559553e+08,-3.661725659,5.198981871,-1.868949231
+433 Eros,6.69e+15,8.4,-3.164092e+07,-2.451686e+08,-3.142760e+07,20.152452372,-6.669946056,2.465511739

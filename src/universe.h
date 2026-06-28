@@ -33,6 +33,18 @@ typedef struct {
  */
 void universe_load(const char *path);
 
+/*
+ * universe_save — write the current live universe (g_laws + every alive body's
+ * absolute state) to `path` as a "snapshot" universe JSON. The result reloads
+ * exactly as saved (no warm-up, no re-derivation from Keplerian elements).
+ * Returns 0 on success, -1 on failure (diagnostic printed to stderr).
+ */
+int universe_save(const char *path);
+
+/* Set to 1 by universe_load() when it loaded a snapshot file, else 0. Snapshots
+ * already hold settled state, so main.c skips the warm-up pre-simulation. */
+extern int g_universe_is_snapshot;
+
 /* Add a fully specified runtime body. Returns the new body index, or -1. */
 int universe_add_body(const BodyCreateSpec *spec);
 

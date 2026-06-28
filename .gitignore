@@ -36,6 +36,13 @@
 *.x86_64
 *.hex
 
+# Build outputs (this project)
+/verse
+/catalogtool
+
+# Dear ImGui runtime layout file
+imgui.ini
+
 # Debug files
 *.dSYM/
 *.su
@@ -56,6 +63,9 @@ dkms.conf
 
 # Release packaging output
 dist/
+
+# Runtime cache written by the in-app "Import real data" feature
+assets/universes/_imported.json
 
 # Source audio/video exports; runtime uses compressed assets such as .ogg
 assets/*.mov

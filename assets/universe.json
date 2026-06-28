@@ -2,6 +2,18 @@
   // Solar system configuration for OpenVerse
   // Keplerian elements from JPL Table 1 (J2000.0 epoch, valid ~1800-2050 AD)
   // Moon elements from JPL/NASA fact sheets
+
+  // Per-universe physical laws. Any omitted field falls back to the Newtonian
+  // default shown below, so this block is optional. See src/laws.h.
+  "laws": {
+    "G": 6.674e-11,      // gravitational constant (m^3 kg^-1 s^-2)
+    "softening": 1e5,    // Plummer softening length (m)
+    "time_scale": 1.0,   // multiplier on simulated time
+    "force_exp": 2.0,    // radial falloff exponent (2 = inverse-square)
+    "lambda": 0.0,       // cosmological repulsion term (Phase 2)
+    "pn_factor": 0.0     // post-Newtonian precession (Phase 2)
+  },
+
   "bodies": [
 
     // ================================================================

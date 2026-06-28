@@ -49,9 +49,16 @@
 #include "collision.h"
 #include "supernova.h"
 #include "audio.h"
+#include "presets.h"
+#include "menu.h"
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+
+/* ── active universe ──────────────────────────────────────────────────────── */
+/* Path of the universe JSON currently loaded. Changed via switch_universe();
+ * init_runtime_world() reads this so a reset reloads the chosen multiverse. */
+static char s_universe_path[512] = "assets/universe.json";
 
 /* ── window / context ─────────────────────────────────────────────────────── */
 static SDL_Window   *s_win = NULL;
@@ -226,6 +233,12 @@ static void move_pause_menu_selection(int delta) {
  * consistent with all bodies' state.
  */
 static void warmup_universe(void) {
+    /* A loaded snapshot already holds settled state at a specific instant;
+     * pre-simulating would advance it away from what was saved. */
+    if (g_universe_is_snapshot) {
+        boot_log("Snapshot loaded — skipping warm-up");
+        return;
+    }
     const double WARMUP_DT = 365.0 * 2.0 * DAY;
     int sys_n = physics_system_count();
     int completed = 0;
@@ -268,7 +281,7 @@ static void warmup_universe(void) {
 /* ── world init / shutdown ────────────────────────────────────────────────── */
 static void init_runtime_world(void) {
     boot_log("Preparing runtime world");
-    universe_load("assets/universe.json");
+    universe_load(s_universe_path);
     boot_log("Resetting camera");
     cam_reset();
     boot_log("Initializing starfield");
@@ -278,9 +291,9 @@ static void init_runtime_world(void) {
     boot_log("Initializing renderer");
     render_init();
     boot_log("Initializing rings");
-    rings_init("assets/universe.json");
+    rings_init(s_universe_path);
     boot_log("Initializing asteroid belts");
-    asteroids_init("assets/universe.json");
+    asteroids_init(s_universe_path);
     boot_log("Initializing labels");
     labels_init();
     boot_log("Initializing build mode");
@@ -322,6 +335,16 @@ static void reset_universe_state(void) {
     SDL_SetRelativeMouseMode(SDL_FALSE);
     sync_pause_menu_ui();
     init_runtime_world();
+}
+
+/* Load a different universe (from the picker). Falls back to a no-op if the
+ * path is empty; otherwise records it and rebuilds the world from scratch. */
+static void switch_universe(const char *path) {
+    if (!path || !path[0]) return;
+    snprintf(s_universe_path, sizeof(s_universe_path), "%s", path);
+    fprintf(stdout, "[Sim] switching universe -> %s\n", s_universe_path);
+    fflush(stdout);
+    reset_universe_state();
 }
 
 /* ── init / quit ──────────────────────────────────────────────────────────── */
@@ -413,11 +436,15 @@ static int app_init(void) {
     boot_log("Initializing audio");
     audio_init();
 
+    boot_log("Initializing universe menu");
+    menu_init(s_win, s_ctx);
+
     return 1;
 }
 
 static void app_quit(void) {
     audio_shutdown();
+    menu_shutdown();
     ui_shutdown();
     shutdown_runtime_world();
     SDL_GL_DeleteContext(s_ctx);
@@ -645,6 +672,18 @@ static void handle_event(const SDL_Event *e, float dt, int *running) {
                 SDL_SetRelativeMouseMode(SDL_TRUE);
             }
             break;
+        case SDLK_u:
+            /* Toggle the multiverse picker. When it opens, release the mouse so
+             * the cursor can interact with the ImGui window. No-op without
+             * USE_IMGUI (menu_visible() stays 0). */
+            if (!e->key.repeat) {
+                menu_toggle();
+                if (menu_visible()) {
+                    s_freelook = 0;
+                    SDL_SetRelativeMouseMode(SDL_FALSE);
+                }
+            }
+            break;
         case SDLK_TAB:
             build_set_tab_held(1);
             break;
@@ -857,6 +896,7 @@ int main(int argc, char **argv) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) running = 0;
+            if (menu_process_event(&e)) continue;  /* ImGui consumed this event */
             handle_event(&e, dt, &running);
         }
 
@@ -869,7 +909,10 @@ int main(int argc, char **argv) {
             physics_refresh_timestep_model();
             {
                 int sys_n = physics_system_count();
-                double sim_dt = g_sim_speed * dt;
+                /* g_laws.time_scale lets a universe run its clock faster/slower
+                 * than real-world speed presets; the per-system caps below still
+                 * bound each outer step, preserving integrator stability. */
+                double sim_dt = g_sim_speed * dt * g_laws.time_scale;
                 double effective_sim_dt = sim_dt;
 
                 /* Find the most constrained system and cap all systems to it. */
@@ -956,7 +999,26 @@ int main(int argc, char **argv) {
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         render_frame(view, proj, view_rot, dt);
         ui_render();
+
+        /* Multiverse overlay (drawn last, on top). Returns a preset to switch
+         * to, or -1, and may set load_path (e.g. a freshly imported real-data
+         * catalog); law-slider edits set laws_changed. No-op without USE_IMGUI. */
+        int laws_changed = 0;
+        const char *load_path = NULL;
+        int menu_pick = menu_render(preset_index_of_path(s_universe_path),
+                                    &laws_changed, &load_path);
+
         SDL_GL_SwapWindow(s_win);
+
+        if (laws_changed)
+            physics_refresh_timestep_model();
+        if (load_path) {
+            switch_universe(load_path);
+        } else if (menu_pick >= 0) {
+            const UniversePreset *p = preset_at(menu_pick);
+            if (p && strcmp(p->path, s_universe_path) != 0)
+                switch_universe(p->path);
+        }
     }
 
     app_quit();
