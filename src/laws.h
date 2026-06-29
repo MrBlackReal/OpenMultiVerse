@@ -20,8 +20,10 @@
 /* Newtonian defaults — these reproduce the original hard-coded behaviour. */
 #define LAWS_DEFAULT_G          6.674e-11      /* m^3 kg^-1 s^-2            */
 #define LAWS_DEFAULT_SOFTENING  1e5            /* collision softening (m)   */
+#define LAWS_MIN_SOFTENING      1.0            /* floor: keep r^2 denom > 0 */
 #define LAWS_DEFAULT_FORCE_EXP  2.0            /* inverse-square            */
 #define LAWS_DEFAULT_C_LIGHT    2.99792458e8   /* m/s                       */
+#define LAWS_DEFAULT_GRAV_ISOLATION 1.0        /* stars gravitationally isolated */
 
 typedef struct {
     /* ---- tunable constants (Phase 1) ---------------------------------- */
@@ -39,6 +41,18 @@ typedef struct {
     double lambda;       /* cosmological term: a += lambda * r_vec (1/s^2) */
     double pn_factor;    /* post-Newtonian precession strength (0 = off)   */
     double c_light;      /* speed of light, used by the PN term            */
+
+    /* ---- scaling switch (galaxy-scale) -------------------------------- */
+    /* When non-zero, star systems are treated as gravitationally isolated:
+     * a body only feels the bodies in its own system, never cross-system
+     * pairs.  This is physically exact at interstellar distances (the force
+     * between stars light-years apart is negligible) and turns the force
+     * kernel from O(active x N) into O(sum Ni^2) ~ O(N), which is what makes
+     * thousand-system universes run in real time.  For a single-system
+     * universe every body is already in one system, so this changes nothing.
+     * Set to 0 in JSON for a deliberately-coupled scenario (star cluster,
+     * galaxy collision) where interstellar gravity is the point. */
+    double gravity_isolation;
 } UniverseLaws;
 
 /* The single active law set.  Read in the physics hot loop, so it is a plain

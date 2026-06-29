@@ -245,13 +245,18 @@ void labels_render(const float view[16], const float proj[16],
 
     float half_fov_tan = tanf(FOV * 0.5f * (float)(PI / 180.0));
 
+    /* Labels use fixed MAX_BODIES scratch and per-body texture slots, so only
+     * the first MAX_BODIES bodies are labelled.  The camera-driven active set
+     * (a later phase) will choose *which* bodies occupy those slots. */
+    const int nb = g_nbodies < MAX_BODIES ? g_nbodies : MAX_BODIES;
+
     /* ---- Step 1: project anchor to screen and build label AABB ---- */
     float lsx[MAX_BODIES], lsy[MAX_BODIES];
     float lsw[MAX_BODIES], lsh[MAX_BODIES];
     int   lvis[MAX_BODIES];
     int   order[MAX_BODIES];
 
-    for (int i = 0; i < g_nbodies; i++) {
+    for (int i = 0; i < nb; i++) {
         order[i]   = i;
         lvis[i]    = 0;
         if (!g_bodies[i].alive) continue;
@@ -295,7 +300,7 @@ void labels_render(const float view[16], const float proj[16],
     {
         int ns = 0, np = 0, nm = 0;
         int stars[MAX_BODIES], planets[MAX_BODIES], moons[MAX_BODIES];
-        for (int i = 0; i < g_nbodies; i++) {
+        for (int i = 0; i < nb; i++) {
             if (!g_bodies[i].alive) continue;
             if      (g_bodies[i].is_star) stars[ns++] = i;
             else if (g_bodies[i].parent < 0 ||
@@ -324,11 +329,11 @@ void labels_render(const float view[16], const float proj[16],
         for (int i = 0; i < ns; i++) order[i]          = stars[i];
         for (int i = 0; i < np; i++) order[ns + i]      = planets[i];
         for (int i = 0; i < nm; i++) order[ns + np + i] = moons[i];
-        for (int i = ns + np + nm; i < g_nbodies; i++) order[i] = -1;
+        for (int i = ns + np + nm; i < nb; i++) order[i] = -1;
     }
 
     /* ---- Step 3: greedy AABB overlap removal ---- */
-    for (int i = 0; i < g_nbodies; i++) {
+    for (int i = 0; i < nb; i++) {
         int idx = order[i];
         if (idx < 0) continue;
         if (!lvis[idx]) continue;
@@ -347,7 +352,7 @@ void labels_render(const float view[16], const float proj[16],
     }
 
     /* ---- Step 4: hysteresis debounce ---- */
-    for (int i = 0; i < g_nbodies; i++) {
+    for (int i = 0; i < nb; i++) {
         if (!g_bodies[i].alive) continue;
         if (lvis[i]) {
             s_show_accum[i] += dt;
@@ -375,7 +380,7 @@ void labels_render(const float view[16], const float proj[16],
 
     glBindVertexArray(s_vao);
 
-    for (int i = 0; i < g_nbodies; i++) {
+    for (int i = 0; i < nb; i++) {
         if (!g_bodies[i].alive) continue;
         if (!s_active[i]) continue;
         if (!s_tex[i])    continue;

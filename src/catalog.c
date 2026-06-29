@@ -12,6 +12,11 @@
 #include <math.h>
 #include <ctype.h>
 
+/* Maximum CSV columns parsed per row.  A full NASA Exoplanet Archive
+ * "Planetary Systems" export carries ~290+ columns and Gaia exports can be
+ * wider still, so keep this comfortably above any real catalog. */
+#define CATALOG_MAX_COLS 1024
+
 /* ------------------------------------------------------------------ units */
 #define CAT_PI        3.14159265358979323846
 #define PC_TO_LY      3.2615638        /* parsec -> light-year                */
@@ -207,9 +212,9 @@ static int convert_exoplanets(const char *in_path, const char *out_path, int max
     }
     if (!header) { fprintf(stderr, "[catalog] no header row in '%s'\n", in_path); fclose(in); return -1; }
 
-    char *hdr[256];
+    char *hdr[CATALOG_MAX_COLS];
     /* Work on a copy so split_csv can mutate it; keep it alive for the run. */
-    int nh = split_csv(header, hdr, 256);
+    int nh = split_csv(header, hdr, CATALOG_MAX_COLS);
     for (int i = 0; i < nh; i++) { hdr[i] = trim(hdr[i]); lower(hdr[i]); }
 
     int ci_host = col_index(hdr, nh, "hostname");
@@ -241,8 +246,8 @@ static int convert_exoplanets(const char *in_path, const char *out_path, int max
         if (!ln) break;
         char *t = trim(ln);
         if (t[0] == '\0' || t[0] == '#') { free(ln); continue; }
-        char *f[256];
-        int nf = split_csv(ln, f, 256);
+        char *f[CATALOG_MAX_COLS];
+        int nf = split_csv(ln, f, CATALOG_MAX_COLS);
 
         if (nrows == cap) {
             cap = cap ? cap * 2 : 64;
@@ -482,8 +487,8 @@ static int convert_horizons(const char *in_path, const char *out_path, int max_i
     }
     if (!header) { fprintf(stderr, "[catalog] no header in '%s'\n", in_path); fclose(in); return -1; }
 
-    char *hdr[64];
-    int nh = split_csv(header, hdr, 64);
+    char *hdr[CATALOG_MAX_COLS];
+    int nh = split_csv(header, hdr, CATALOG_MAX_COLS);
     for (int i = 0; i < nh; i++) { hdr[i] = trim(hdr[i]); lower(hdr[i]); }
 
     int ci_name = col_index(hdr, nh, "name");
@@ -520,8 +525,8 @@ static int convert_horizons(const char *in_path, const char *out_path, int max_i
         if (t[0] == '\0' || t[0] == '#') { free(ln); continue; }
         if (max_items > 0 && count >= max_items) { free(ln); break; }
 
-        char *f[64];
-        int nf = split_csv(ln, f, 64);
+        char *f[CATALOG_MAX_COLS];
+        int nf = split_csv(ln, f, CATALOG_MAX_COLS);
         double r[3] = { field_num(f,nf,ci_x), field_num(f,nf,ci_y), field_num(f,nf,ci_z) };
         double v[3] = { field_num(f,nf,ci_vx), field_num(f,nf,ci_vy), field_num(f,nf,ci_vz) };
         if (isnan(r[0])||isnan(r[1])||isnan(r[2])||isnan(v[0])||isnan(v[1])||isnan(v[2])) { free(ln); continue; }
@@ -615,8 +620,8 @@ static int convert_gaia(const char *in_path, const char *out_path, int max_items
     }
     if (!header) { fprintf(stderr, "[catalog] no header in '%s'\n", in_path); fclose(in); return -1; }
 
-    char *hdr[128];
-    int nh = split_csv(header, hdr, 128);
+    char *hdr[CATALOG_MAX_COLS];
+    int nh = split_csv(header, hdr, CATALOG_MAX_COLS);
     for (int i = 0; i < nh; i++) { hdr[i] = trim(hdr[i]); lower(hdr[i]); }
 
     int ci_name = col_index(hdr, nh, "name");
@@ -649,8 +654,8 @@ static int convert_gaia(const char *in_path, const char *out_path, int max_items
         if (t[0] == '\0' || t[0] == '#') { free(ln); continue; }
         if (max_items > 0 && count >= max_items) { free(ln); break; }
 
-        char *f[128];
-        int nf = split_csv(ln, f, 128);
+        char *f[CATALOG_MAX_COLS];
+        int nf = split_csv(ln, f, CATALOG_MAX_COLS);
         double ra = field_num(f,nf,ci_ra), dec = field_num(f,nf,ci_dec);
         double dist_pc = field_num(f,nf,ci_dpc);
         if (isnan(dist_pc)) {

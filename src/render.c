@@ -504,6 +504,12 @@ static double smoothstepd(double edge0, double edge1, double x) {
     return t * t * (3.0 - 2.0 * t);
 }
 
+/* Sphere-rendered non-star occluder indices, rebuilt each frame in
+ * render_frame() and consumed by body_point_occluded_by_body().  Backing store
+ * is grown by render_scratch_ensure() alongside the other per-frame scratch. */
+static int *s_rs_occluders = NULL;
+static int  s_rs_nocc      = 0;
+
 /*
  * body_point_star_glare_visibility — compute how much the dot for body_idx
  * is occluded/dimmed by other stars' glare coronae.
@@ -627,6 +633,12 @@ static float system_dot_fade_for_body(int body_idx)
  * Returns 1 if a nearer, visible-as-sphere (info[i].show == 0) body's disc
  * falls between the camera and body_idx along the look ray.  Stars are never
  * considered occluders (they are always shown as dots or glare).
+ *
+ * Only the (typically tiny) set of sphere-rendered non-star bodies can occlude,
+ * so it iterates the precomputed s_rs_occluders list instead of scanning all
+ * g_nbodies — at galaxy scale that turns this O(dots x N) hot path into
+ * O(dots x occluders).  The per-occluder test is identical to the old all-body
+ * scan; only the candidates iterated change.
  */
 static int body_point_occluded_by_body(int body_idx, const BodyRenderInfo info[]) {
     double bx = g_bodies[body_idx].pos[0] * RS - g_cam.pos[0];
@@ -640,10 +652,9 @@ static int body_point_occluded_by_body(int body_idx, const BodyRenderInfo info[]
     double uy = by / bd;
     double uz = bz / bd;
 
-    for (int i = 0; i < g_nbodies; i++) {
+    for (int oi = 0; oi < s_rs_nocc; oi++) {
+        int i = s_rs_occluders[oi];
         if (i == body_idx) continue;
-        /* Only bodies rendered as spheres (not dots) can occlude */
-        if (!g_bodies[i].alive || g_bodies[i].is_star || info[i].show) continue;
 
         double sx = g_bodies[i].pos[0] * RS - g_cam.pos[0];
         double sy = g_bodies[i].pos[1] * RS - g_cam.pos[1];
@@ -1150,6 +1161,51 @@ static void render_build_preview(const float vp_camrel[16])
 }
 
 /* ------------------------------------------------------------------ frame */
+/* ── per-frame render scratch ──────────────────────────────────────────────
+ * These were fixed [MAX_BODIES] stack arrays, which capped the engine at 128
+ * bodies and would overflow a galaxy-scale universe.  They are now heap buffers
+ * grown once to g_nbodies, so render_frame() can address every body.  (The
+ * expensive per-body work is still gated by screen-size LOD; the camera-driven
+ * active set in a later phase will bound it further.) */
+static int             s_rs_cap = 0;
+static BodyRenderInfo *s_rs_info = NULL;
+static float          *s_rs_body_px = NULL;
+static int            *s_rs_dot_order = NULL, *s_rs_dot_stars = NULL,
+                      *s_rs_dot_planets = NULL, *s_rs_dot_moons = NULL;
+static float          *s_rs_dot_sx = NULL, *s_rs_dot_sy = NULL,
+                      *s_rs_dot_overlap_alpha = NULL;
+static int            *s_rs_dot_candidate = NULL, *s_rs_dot_vis = NULL;
+static float          *s_rs_dot_data = NULL;
+static int             s_dot_vbo_cap = 0;   /* # dots the VBO can hold */
+
+static void render_scratch_ensure(int n)
+{
+    if (n <= s_rs_cap) return;
+    int c = s_rs_cap ? s_rs_cap : MAX_BODIES;
+    while (c < n) c *= 2;
+    s_rs_info              = realloc(s_rs_info,              (size_t)c * sizeof(*s_rs_info));
+    s_rs_body_px           = realloc(s_rs_body_px,           (size_t)c * sizeof(float));
+    s_rs_dot_order         = realloc(s_rs_dot_order,         (size_t)c * sizeof(int));
+    s_rs_dot_stars         = realloc(s_rs_dot_stars,         (size_t)c * sizeof(int));
+    s_rs_dot_planets       = realloc(s_rs_dot_planets,       (size_t)c * sizeof(int));
+    s_rs_dot_moons         = realloc(s_rs_dot_moons,         (size_t)c * sizeof(int));
+    s_rs_dot_sx            = realloc(s_rs_dot_sx,            (size_t)c * sizeof(float));
+    s_rs_dot_sy            = realloc(s_rs_dot_sy,            (size_t)c * sizeof(float));
+    s_rs_dot_overlap_alpha = realloc(s_rs_dot_overlap_alpha, (size_t)c * sizeof(float));
+    s_rs_dot_candidate     = realloc(s_rs_dot_candidate,     (size_t)c * sizeof(int));
+    s_rs_dot_vis           = realloc(s_rs_dot_vis,           (size_t)c * sizeof(int));
+    s_rs_dot_data          = realloc(s_rs_dot_data,     (size_t)c * 7 * sizeof(float));
+    s_rs_occluders         = realloc(s_rs_occluders,        (size_t)c * sizeof(int));
+    if (!s_rs_info || !s_rs_body_px || !s_rs_dot_order || !s_rs_dot_stars ||
+        !s_rs_dot_planets || !s_rs_dot_moons || !s_rs_dot_sx || !s_rs_dot_sy ||
+        !s_rs_dot_overlap_alpha || !s_rs_dot_candidate || !s_rs_dot_vis ||
+        !s_rs_dot_data || !s_rs_occluders) {
+        fprintf(stderr, "[render] scratch alloc failed\n");
+        exit(1);
+    }
+    s_rs_cap = c;
+}
+
 void render_frame(const float view[16], const float proj[16],
                   const float view_rot[16], float dt) {
     float aspect = (float)WIN_W / (float)WIN_H;
@@ -1206,10 +1262,13 @@ void render_frame(const float view[16], const float proj[16],
 
     glBindVertexArray(s_sphere_vao);
 
-    /* BodyRenderInfo[] is also consumed by labels_render() at the end of the frame */
-    BodyRenderInfo info[MAX_BODIES];
-    float body_px[MAX_BODIES];   /* projected radius in pixels; used for fade thresholds */
-    memset(body_px, 0, sizeof(body_px));
+    /* BodyRenderInfo[] is also consumed by labels_render() at the end of the frame.
+     * Heap-backed scratch grown to g_nbodies (see render_scratch_ensure). */
+    render_scratch_ensure(g_nbodies > 0 ? g_nbodies : 1);
+    BodyRenderInfo *info = s_rs_info;
+    float *body_px = s_rs_body_px;   /* projected radius in pixels; used for fade thresholds */
+    memset(body_px, 0, (size_t)g_nbodies * sizeof(float));
+    s_rs_nocc = 0;   /* rebuilt below: sphere-rendered non-star occluders */
 
     for (int i = 0; i < g_nbodies; i++) {
         Body *b = &g_bodies[i];
@@ -1267,6 +1326,10 @@ void render_frame(const float view[16], const float proj[16],
 
         if (!g_bodies[i].alive || info[i].show) continue;
         if (b->is_star) continue;   /* stars rendered as glare only, not Phong spheres */
+
+        /* This body renders as a Phong sphere, so it can occlude dots behind
+         * it.  Record it for body_point_occluded_by_body()'s fast path. */
+        s_rs_occluders[s_rs_nocc++] = i;
 
         /* u_oc: camera − body, computed in double then cast to float.
          * u_center = −u_oc so the phong.vert billboard is camera-relative. */
@@ -1602,11 +1665,24 @@ void render_frame(const float view[16], const float proj[16],
 #define DOT_EXCL_PX 6.0f   /* fully separated below this screen distance */
 #define DOT_HIDE_PX 2.5f   /* fully hidden when centers are this close */
 
-    int dot_order[MAX_BODIES];
+    /* Near/far split (Phase 3 — galaxy-scale far field).
+     * Only bodies within NEAR_DOT_DIST of the camera get the full per-dot
+     * treatment that follows: priority sort, greedy overlap dedup, glare-corona
+     * occlusion and the dot<->sphere transition fade.  That work is
+     * O(near^2) + O(near x stars), which only the system the camera is actually
+     * in benefits from.  Everything beyond NEAR_DOT_DIST — the 16k-body bulk —
+     * is drawn afterwards in one cheap O(N) far pass, so a galaxy no longer pays
+     * O(N^2) per frame just to place star points that are a static backdrop.
+     * NEAR_DOT_DIST is a few light-years (world units are AU, RS = 1/AU) so it
+     * comfortably spans the active system and its nearest neighbours. */
+    const float NEAR_DOT_DIST = (float)(3.0 * LY * RS);
+
+    int *dot_order = s_rs_dot_order;
     int dot_ns = 0, dot_np = 0, dot_nm = 0;
-    int dot_stars[MAX_BODIES], dot_planets[MAX_BODIES], dot_moons[MAX_BODIES];
+    int *dot_stars = s_rs_dot_stars, *dot_planets = s_rs_dot_planets, *dot_moons = s_rs_dot_moons;
     for (int i = 0; i < g_nbodies; i++) {
         if (!g_bodies[i].alive) continue;
+        if (info[i].dcam >= NEAR_DOT_DIST) continue;   /* far → cheap pass below */
         if      (g_bodies[i].is_star)       dot_stars  [dot_ns++] = i;
         else if (g_bodies[i].parent < 0 ||
                  g_bodies[g_bodies[i].parent].is_star) dot_planets[dot_np++] = i;
@@ -1638,13 +1714,13 @@ void render_frame(const float view[16], const float proj[16],
     int dot_total = dot_ns + dot_np + dot_nm;
 
     /* Greedy overlap pass — project each candidate dot and test against confirmed dots */
-    float dot_sx[MAX_BODIES], dot_sy[MAX_BODIES];
-    float dot_overlap_alpha[MAX_BODIES];
-    int   dot_candidate[MAX_BODIES];
-    int   dot_vis[MAX_BODIES];
-    memset(dot_overlap_alpha, 0, sizeof(dot_overlap_alpha));
-    memset(dot_candidate, 0, sizeof(dot_candidate));
-    memset(dot_vis, 0, sizeof(dot_vis));
+    float *dot_sx = s_rs_dot_sx, *dot_sy = s_rs_dot_sy;
+    float *dot_overlap_alpha = s_rs_dot_overlap_alpha;
+    int   *dot_candidate = s_rs_dot_candidate;
+    int   *dot_vis = s_rs_dot_vis;
+    memset(dot_overlap_alpha, 0, (size_t)g_nbodies * sizeof(float));
+    memset(dot_candidate, 0, (size_t)g_nbodies * sizeof(int));
+    memset(dot_vis, 0, (size_t)g_nbodies * sizeof(int));
 
     {
         const float DOT_CLAMP_DIST_OV = 1500.0f;
@@ -1711,7 +1787,7 @@ void render_frame(const float view[16], const float proj[16],
     /* Build the GPU upload buffer for surviving dots.
      * Stars beyond DOT_CLAMP_DIST are clamped to remain renderable at warp speed.
      * Alpha = system_dot_fade × overlap_fade × glare_visibility × sphere-approach fade. */
-    float dot_data[MAX_BODIES * 7];
+    float *dot_data = s_rs_dot_data;
     int   dot_count = 0;
     {
         double cx = g_cam.pos[0];
@@ -1773,11 +1849,62 @@ void render_frame(const float view[16], const float proj[16],
         }
     }
 
+    /* ---- Far pass: cheap bulk dots for everything beyond NEAR_DOT_DIST.
+     * No sort, no overlap dedup, no glare-occlusion scan — just the
+     * camera-relative projection (done in double to keep light-year precision)
+     * with the same distance fade and far-plane clamp the near path uses.  This
+     * is the O(N) replacement for the old O(N^2) per-frame dot work, and it is
+     * what makes a 16k-body universe render in real time.  Far planets/moons
+     * fade out through system_dot_fade_for_body() and are skipped once
+     * invisible, so only star points remain in deep space (Space-Engine style). */
+    {
+        double cx = g_cam.pos[0];
+        double cy = g_cam.pos[1];
+        double cz = g_cam.pos[2];
+        const float DOT_CLAMP_DIST = 1500.0f;
+
+        for (int i = 0; i < g_nbodies; i++) {
+            Body *b = &g_bodies[i];
+            if (!b->alive || !info[i].show) continue;     /* spheres drawn elsewhere */
+            if (info[i].dcam < NEAR_DOT_DIST) continue;    /* near → handled above */
+
+            float f = b->is_star ? 1.0f : system_dot_fade_for_body(i);
+            if (f <= 0.0f) continue;
+
+            float bx = (float)(b->pos[0] * RS - cx);
+            float by = (float)(b->pos[1] * RS - cy);
+            float bz = (float)(b->pos[2] * RS - cz);
+            if (b->is_star) {
+                float d = sqrtf(bx*bx + by*by + bz*bz);
+                if (d > DOT_CLAMP_DIST && d > 1e-6f) {
+                    float s = DOT_CLAMP_DIST / d;
+                    bx *= s; by *= s; bz *= s;
+                }
+            }
+            dot_data[dot_count*7+0] = bx;
+            dot_data[dot_count*7+1] = by;
+            dot_data[dot_count*7+2] = bz;
+            dot_data[dot_count*7+3] = b->col[0];
+            dot_data[dot_count*7+4] = b->col[1];
+            dot_data[dot_count*7+5] = b->col[2];
+            dot_data[dot_count*7+6] = f;
+            dot_count++;
+        }
+    }
+
     if (dot_count > 0) {
         glUseProgram(s_dot_shader);
         glUniformMatrix4fv(s_dot_vp, 1, GL_FALSE, vp_camrel);
         glBindVertexArray(s_dot_vao);
         glBindBuffer(GL_ARRAY_BUFFER, s_dot_vbo);
+        /* Grow the GPU buffer past its initial MAX_BODIES sizing if needed. */
+        if (dot_count > s_dot_vbo_cap) {
+            int c = s_dot_vbo_cap ? s_dot_vbo_cap : MAX_BODIES;
+            while (c < dot_count) c *= 2;
+            glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)c * 7 * sizeof(float),
+                         NULL, GL_DYNAMIC_DRAW);
+            s_dot_vbo_cap = c;
+        }
         glBufferSubData(GL_ARRAY_BUFFER, 0,
                         dot_count * 7 * sizeof(float), dot_data);
         glDisable(GL_DEPTH_TEST);
@@ -1824,6 +1951,14 @@ void render_frame(const float view[16], const float proj[16],
         for (int i = 0; i < g_nbodies; i++) {
             if (!g_bodies[i].alive) continue;
             if (!g_bodies[i].is_star) continue;
+            /* Phase 3: skip the glare billboard for stars whose corona is
+             * sub-pixel — at galaxy scale that is the overwhelming majority, and
+             * each one is a full draw call + 4 uniform updates.  Below
+             * STAR_DOT_FULL_GLARE_PX the dot point already represents the star
+             * (the dot/glare handoff in the dot pass uses the same threshold),
+             * so dropping the billboard here is visually consistent and turns a
+             * per-star draw-call storm into just the few nearby stars. */
+            if (body_px[i] * STAR_GLARE_BILL_SCALE < STAR_DOT_FULL_GLARE_PX) continue;
 
             float rx = (float)(g_bodies[i].pos[0] * RS - g_cam.pos[0]);
             float ry = (float)(g_bodies[i].pos[1] * RS - g_cam.pos[1]);

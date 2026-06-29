@@ -52,6 +52,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <limits.h>
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -148,6 +149,80 @@ static int find_body_index(const char *name, int n)
     return -1;
 }
 
+/* True if some alive body in [0, limit) is named exactly `name`. */
+static int name_taken(const char *name, int limit)
+{
+    for (int i = 0; i < limit; i++)
+        if (g_bodies[i].alive && strcmp(g_bodies[i].name, name) == 0)
+            return 1;
+    return 0;
+}
+
+/*
+ * dedupe_body_names — guarantee every alive body has a unique name.
+ *
+ * Names are the lookup key for parent links, rings, asteroid belts, build-mode
+ * rebinding and labels, so collisions silently attach things to the wrong body.
+ * The first occurrence of a name keeps it; each later duplicate gets the next
+ * free " (2)", " (3)", ... suffix.  No-op when names are already unique, so the
+ * common case is untouched.  Call once after a universe is fully loaded.
+ */
+static void dedupe_body_names(void)
+{
+    int renamed = 0;
+    for (int i = 0; i < g_nbodies; i++) {
+        if (!g_bodies[i].alive) continue;
+        if (!name_taken(g_bodies[i].name, i)) continue;   /* unique so far */
+
+        char base[32];
+        snprintf(base, sizeof base, "%s", g_bodies[i].name);
+        for (int suffix = 2; ; suffix++) {
+            char cand[32];
+            /* Truncate the base so "<base> (NN)" always fits the 31-char field
+             * (18 + " (" + up to 10 digits + ")" = 31). */
+            snprintf(cand, sizeof cand, "%.18s (%d)", base, suffix);
+            if (!name_taken(cand, g_nbodies)) {           /* unique vs everyone */
+                snprintf(g_bodies[i].name, sizeof g_bodies[i].name, "%s", cand);
+                renamed++;
+                break;
+            }
+        }
+    }
+    if (renamed)
+        fprintf(stdout, "[universe] de-duplicated %d body name%s for safe lookup\n",
+                renamed, renamed == 1 ? "" : "s");
+}
+
+/* True if any alive body other than `except` is named exactly `name`. */
+static int name_taken_by_other(const char *name, int except)
+{
+    for (int i = 0; i < g_nbodies; i++)
+        if (i != except && g_bodies[i].alive
+            && strcmp(g_bodies[i].name, name) == 0)
+            return 1;
+    return 0;
+}
+
+/* Suffix g_bodies[idx].name until it is unique among all other alive bodies.
+ * Used when a body is created at runtime (build mode) so a user-typed name that
+ * collides with an existing body cannot confuse name-keyed lookups. */
+static void ensure_unique_name(int idx)
+{
+    if (idx < 0 || idx >= g_nbodies) return;
+    if (!name_taken_by_other(g_bodies[idx].name, idx)) return;
+
+    char base[32];
+    snprintf(base, sizeof base, "%s", g_bodies[idx].name);
+    for (int suffix = 2; ; suffix++) {
+        char cand[32];
+        snprintf(cand, sizeof cand, "%.18s (%d)", base, suffix);
+        if (!name_taken_by_other(cand, idx)) {
+            snprintf(g_bodies[idx].name, sizeof g_bodies[idx].name, "%s", cand);
+            return;
+        }
+    }
+}
+
 int universe_live_body_count(void)
 {
     int n = 0;
@@ -223,11 +298,21 @@ static int root_star_of(int i) { return body_root_star(i); }
 
 int g_universe_is_snapshot = 0;
 
+/* Path of the source universe JSON most recently passed to universe_load().
+ * universe_save() re-reads it to carry the procedural "rings"/"asteroid_belts"
+ * definitions into the snapshot (those are regenerated from seeds on reload,
+ * so copying the definition blocks is sufficient to preserve them). */
+static char s_loaded_path[1024] = "";
+
 /*
  * load_snapshot — load a "snapshot" universe: every body carries an absolute
  * "state" (pos_m, vel_ms) and an "is_star" flag, so placement is direct and no
  * Keplerian derivation, CoM correction, bulk velocity, or warm-up is applied.
- * Parents are resolved by name in a second pass so body order does not matter.
+ *
+ * Parent links are resolved in a second pass.  The authoritative form is the
+ * "parent_index" field (the parent's position in this same array), which is
+ * immune to duplicate names; the legacy "parent" name is used only as a
+ * fallback for snapshots written before parent_index existed.
  */
 static void load_snapshot(const JsonNode *bodies_arr)
 {
@@ -235,7 +320,10 @@ static void load_snapshot(const JsonNode *bodies_arr)
     for (const JsonNode *bn = bodies_arr->first_child; bn; bn = bn->next) n++;
 
     char (*parent_names)[32] = (char(*)[32])calloc((size_t)(n > 0 ? n : 1), 32);
-    if (!parent_names) { fprintf(stderr, "[universe] snapshot alloc failed\n"); exit(1); }
+    int  *parent_idx = (int *)malloc((size_t)(n > 0 ? n : 1) * sizeof(int));
+    if (!parent_names || !parent_idx) {
+        fprintf(stderr, "[universe] snapshot alloc failed\n"); exit(1);
+    }
 
     int idx = 0;
     for (const JsonNode *bn = bodies_arr->first_child; bn; bn = bn->next, idx++) {
@@ -264,17 +352,33 @@ static void load_snapshot(const JsonNode *bodies_arr)
         bo->vel[2] = json_num(json_idx(v, 2), 0.0);
 
         snprintf(parent_names[idx], 32, "%s", json_str(json_get(bn, "parent"), ""));
+        JsonNode *pi = json_get(bn, "parent_index");
+        parent_idx[idx] = pi ? (int)json_num(pi, -1) : INT_MIN;  /* INT_MIN = absent */
 
         alloc_trail(bo);
         g_nbodies++;
     }
 
-    /* Resolve parent links by name now that every body exists. */
-    for (int k = 0; k < g_nbodies; k++)
-        g_bodies[k].parent = parent_names[k][0]
-            ? find_body_index(parent_names[k], g_nbodies) : -1;
+    /* Resolve parent links now that every body exists.  Prefer parent_index
+     * (array position, unambiguous even with duplicate names); fall back to the
+     * name for older snapshots.  Out-of-range or self-referential parents become
+     * "no parent" so body_root_star()'s chain walk can never recurse forever. */
+    for (int k = 0; k < g_nbodies; k++) {
+        int p;
+        if (parent_idx[k] != INT_MIN)
+            p = parent_idx[k];
+        else
+            p = parent_names[k][0] ? find_body_index(parent_names[k], g_nbodies) : -1;
+        g_bodies[k].parent = (p < 0 || p >= g_nbodies || p == k) ? -1 : p;
+    }
 
     free(parent_names);
+    free(parent_idx);
+
+    /* Names are still the key for rings/asteroid belts/build, so disambiguate
+     * any duplicates after parent links (which no longer depend on names). */
+    dedupe_body_names();
+
     g_universe_is_snapshot = 1;
     fprintf(stdout, "[universe] snapshot: loaded %d bodies\n", g_nbodies);
     fflush(stdout);
@@ -282,20 +386,102 @@ static void load_snapshot(const JsonNode *bodies_arr)
 
 /* ------------------------------------------------------------------ public */
 
+/* Write s as a JSON string literal with the mandatory escapes, so names
+ * containing a quote or backslash still produce valid, reloadable JSON. */
+static void fput_json_str(FILE *f, const char *s)
+{
+    fputc('"', f);
+    for (; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        switch (c) {
+            case '"':  fputs("\\\"", f); break;
+            case '\\': fputs("\\\\", f); break;
+            case '\n': fputs("\\n", f);  break;
+            case '\r': fputs("\\r", f);  break;
+            case '\t': fputs("\\t", f);  break;
+            default:
+                if (c < 0x20) fprintf(f, "\\u%04x", c);
+                else          fputc(c, f);
+        }
+    }
+    fputc('"', f);
+}
+
+/* Replace non-finite (NaN/Inf) values with 0 so a diverged simulation still
+ * saves to parseable JSON (the loader's number parser rejects inf/nan tokens). */
+static double fin(double x) { return isfinite(x) ? x : 0.0; }
+
+/* Re-serialize a parsed JSON subtree (used to copy the source universe's
+ * "rings"/"asteroid_belts" blocks verbatim into a saved snapshot). */
+static void json_emit(FILE *f, const JsonNode *n, int indent)
+{
+    switch (n->type) {
+        case JSON_NULL:   fputs("null", f); break;
+        case JSON_BOOL:   fputs(n->boolean ? "true" : "false", f); break;
+        case JSON_NUMBER: fprintf(f, "%.10g", fin(n->number)); break;
+        case JSON_STRING: fput_json_str(f, n->string ? n->string : ""); break;
+        case JSON_ARRAY:
+        case JSON_OBJECT: {
+            int obj = (n->type == JSON_OBJECT);
+            int first = 1;
+            fputc(obj ? '{' : '[', f);
+            for (const JsonNode *c = n->first_child; c; c = c->next) {
+                if (!first) fputc(',', f);
+                first = 0;
+                fputc('\n', f);
+                for (int k = 0; k <= indent; k++) fputs("  ", f);
+                if (obj && c->key) { fput_json_str(f, c->key); fputs(": ", f); }
+                json_emit(f, c, indent + 1);
+            }
+            if (!first) {
+                fputc('\n', f);
+                for (int k = 0; k < indent; k++) fputs("  ", f);
+            }
+            fputc(obj ? '}' : ']', f);
+            break;
+        }
+    }
+}
+
 int universe_save(const char *path)
 {
+    /* Carry the source universe's procedural rings/asteroid-belt definitions
+     * into the snapshot.  Parse the source BEFORE opening the output (fopen
+     * "wb" truncates), in case the user saves over the file being loaded. */
+    JsonNode *src   = s_loaded_path[0] ? json_parse_file(s_loaded_path) : NULL;
+    JsonNode *rings = src ? json_get(src, "rings") : NULL;
+    JsonNode *belts = src ? json_get(src, "asteroid_belts") : NULL;
+
     FILE *f = fopen(path, "wb");
-    if (!f) { fprintf(stderr, "[universe] cannot write snapshot '%s'\n", path); return -1; }
+    if (!f) {
+        fprintf(stderr, "[universe] cannot write snapshot '%s'\n", path);
+        json_free(src);
+        return -1;
+    }
 
     fprintf(f, "{\n  // OpenMultiVerse snapshot — absolute live state. Reloads as saved.\n");
     fprintf(f, "  \"format\": \"snapshot\",\n\n");
     fprintf(f,
         "  \"laws\": {\n"
         "    \"G\": %.10g, \"softening\": %.10g, \"time_scale\": %.10g,\n"
-        "    \"force_exp\": %.10g, \"lambda\": %.10g, \"pn_factor\": %.10g, \"c_light\": %.10g\n"
+        "    \"force_exp\": %.10g, \"lambda\": %.10g, \"pn_factor\": %.10g, \"c_light\": %.10g,\n"
+        "    \"gravity_isolation\": %.10g\n"
         "  },\n\n",
-        g_laws.G, g_laws.softening, g_laws.time_scale,
-        g_laws.force_exp, g_laws.lambda, g_laws.pn_factor, g_laws.c_light);
+        fin(g_laws.G), fin(g_laws.softening), fin(g_laws.time_scale),
+        fin(g_laws.force_exp), fin(g_laws.lambda), fin(g_laws.pn_factor),
+        fin(g_laws.c_light), fin(g_laws.gravity_isolation));
+
+    /* Map each g_bodies index to its position in the saved (alive-only) array,
+     * so parent links can be written as an index and reload unambiguously even
+     * when two bodies share a name. */
+    int *slot = (int *)malloc((size_t)(g_nbodies > 0 ? g_nbodies : 1) * sizeof(int));
+    if (!slot) {
+        fprintf(stderr, "[universe] snapshot slot alloc failed\n");
+        fclose(f); json_free(src); return -1;
+    }
+    int next_slot = 0;
+    for (int i = 0; i < g_nbodies; i++)
+        slot[i] = g_bodies[i].alive ? next_slot++ : -1;
 
     fprintf(f, "  \"bodies\": [\n");
     int first = 1, count = 0;
@@ -304,19 +490,25 @@ int universe_save(const char *path)
         if (!b->alive) continue;
         double period = (b->rotation_rate != 0.0)
                       ? (2.0 * PI) / (b->rotation_rate * DAY) : 0.0;
-        const char *parent = (b->parent >= 0 && b->parent < g_nbodies)
-                           ? g_bodies[b->parent].name : "";
+        int parent_alive = (b->parent >= 0 && b->parent < g_nbodies
+                            && g_bodies[b->parent].alive);
+        const char *parent = parent_alive ? g_bodies[b->parent].name : "";
+        int parent_slot    = parent_alive ? slot[b->parent] : -1;
 
         if (!first) fprintf(f, ",\n");
         first = 0;
-        fprintf(f, "    { \"name\": \"%s\", \"is_star\": %d, \"parent\": \"%s\",\n",
-                b->name, b->is_star ? 1 : 0, parent);
+        fprintf(f, "    { \"name\": ");
+        fput_json_str(f, b->name);
+        fprintf(f, ", \"is_star\": %d, \"parent_index\": %d, \"parent\": ",
+                b->is_star ? 1 : 0, parent_slot);
+        fput_json_str(f, parent);
+        fprintf(f, ",\n");
         fprintf(f, "      \"mass\": %.10e, \"radius_km\": %.6f,\n",
-                b->mass, b->radius / 1000.0);
+                fin(b->mass), fin(b->radius / 1000.0));
         fprintf(f, "      \"color\": [%.4f, %.4f, %.4f],\n", b->col[0], b->col[1], b->col[2]);
         fprintf(f, "      \"obliquity_deg\": %.6f, \"rotation_period_days\": %.8g, "
                    "\"rotation_angle_rad\": %.8f,\n",
-                b->obliquity, period, b->rotation_angle);
+                fin(b->obliquity), fin(period), fin(b->rotation_angle));
         if (b->atm_intensity > 0.0f)
             fprintf(f, "      \"atmosphere\": { \"color\": [%.4f, %.4f, %.4f], "
                        "\"intensity\": %.4f, \"scale\": %.4f },\n",
@@ -324,14 +516,36 @@ int universe_save(const char *path)
                     b->atm_intensity, b->atm_scale);
         fprintf(f, "      \"state\": { \"pos_m\": [%.10e, %.10e, %.10e], "
                    "\"vel_ms\": [%.10e, %.10e, %.10e] } }",
-                b->pos[0], b->pos[1], b->pos[2], b->vel[0], b->vel[1], b->vel[2]);
+                fin(b->pos[0]), fin(b->pos[1]), fin(b->pos[2]),
+                fin(b->vel[0]), fin(b->vel[1]), fin(b->vel[2]));
         count++;
     }
-    fprintf(f, "\n  ]\n}\n");
+    fprintf(f, "\n  ]");
+    if (rings && rings->type == JSON_ARRAY && rings->first_child) {
+        fprintf(f, ",\n\n  \"rings\": ");
+        json_emit(f, rings, 1);
+    }
+    if (belts && belts->type == JSON_ARRAY && belts->first_child) {
+        fprintf(f, ",\n\n  \"asteroid_belts\": ");
+        json_emit(f, belts, 1);
+    }
+    fprintf(f, "\n}\n");
     fclose(f);
+    free(slot);
+    json_free(src);
     fprintf(stdout, "[universe] saved snapshot: %d bodies -> %s\n", count, path);
     fflush(stdout);
     return 0;
+}
+
+int universe_validate(const char *path)
+{
+    JsonNode *root = json_parse_file(path);
+    if (!root) return -1;
+    JsonNode *bodies = json_get(root, "bodies");
+    int ok = (bodies && bodies->type == JSON_ARRAY);
+    json_free(root);
+    return ok ? 0 : -1;
 }
 
 void universe_load(const char *path)
@@ -339,6 +553,7 @@ void universe_load(const char *path)
     int i, s;
     fprintf(stdout, "[Boot] Loading universe data from %s\n", path);
     fflush(stdout);
+    snprintf(s_loaded_path, sizeof(s_loaded_path), "%s", path ? path : "");
     JsonNode *root = json_parse_file(path);
     if (!root) {
         fprintf(stderr, "[universe] failed to open or parse '%s'\n", path);
@@ -358,12 +573,20 @@ void universe_load(const char *path)
         g_laws.lambda     = json_num(json_get(laws, "lambda"),     g_laws.lambda);
         g_laws.pn_factor  = json_num(json_get(laws, "pn_factor"),  g_laws.pn_factor);
         g_laws.c_light    = json_num(json_get(laws, "c_light"),    g_laws.c_light);
+        g_laws.gravity_isolation = json_num(json_get(laws, "gravity_isolation"),
+                                            g_laws.gravity_isolation);
         fprintf(stdout, "[Boot] Universe laws: G=%.4g softening=%.4g force_exp=%.4g "
                         "lambda=%.4g pn=%.4g\n",
                 g_laws.G, g_laws.softening, g_laws.force_exp,
                 g_laws.lambda, g_laws.pn_factor);
         fflush(stdout);
     }
+
+    /* Softening is the only thing keeping the 1/r^2 force denominator non-zero
+     * when two bodies coincide; a JSON file asking for 0 would divide by zero.
+     * Clamp to a small positive floor. */
+    if (!(g_laws.softening >= LAWS_MIN_SOFTENING))
+        g_laws.softening = LAWS_MIN_SOFTENING;
 
     JsonNode *bodies_arr = json_get(root, "bodies");
     if (!bodies_arr || bodies_arr->type != JSON_ARRAY) {
@@ -383,9 +606,20 @@ void universe_load(const char *path)
     }
 
     /* Bulk velocity per body slot.  Set for star indices during Pass 1;
-     * zero everywhere else.  Applied in post-processing after CoM correction. */
-    double bv[MAX_BODIES][3];
-    for (i = 0; i < MAX_BODIES; i++) bv[i][0] = bv[i][1] = bv[i][2] = 0.0;
+     * zero everywhere else.  Applied in post-processing after CoM correction.
+     *
+     * Heap-allocated to the JSON body count rather than a fixed MAX_BODIES
+     * array: ensure_capacity() grows g_bodies past MAX_BODIES, so an import
+     * with >= MAX_BODIES stars would write bv[g_nbodies] off the end of a
+     * fixed stack array.  Star slot indices are always < g_nbodies <= n_total. */
+    int n_total = 0;
+    for (JsonNode *bc = bodies_arr->first_child; bc; bc = bc->next) n_total++;
+    double (*bv)[3] = (double(*)[3])calloc((size_t)(n_total > 0 ? n_total : 1),
+                                           sizeof(*bv));
+    if (!bv) {
+        fprintf(stderr, "[universe] bulk-velocity alloc failed\n");
+        json_free(root); exit(1);
+    }
 
     /* ================================================================
      * Pass 1 — Stars
@@ -655,6 +889,12 @@ void universe_load(const char *path)
             g_nbodies, n_stars, n_stars == 1 ? "" : "s");
     fflush(stdout);
 
+    /* Parent links are already resolved; make names unique so the downstream
+     * name-keyed subsystems (rings, asteroid belts, build-mode rebind, labels)
+     * can never bind to the wrong body. */
+    dedupe_body_names();
+
+    free(bv);
     json_free(root);
 }
 
@@ -725,6 +965,10 @@ int universe_add_body(const BodyCreateSpec *spec)
     bo->atm_intensity = spec->atm_intensity;
     bo->atm_scale = spec->atm_scale > 0.0f ? spec->atm_scale : 1.0f;
     alloc_trail(bo);
+
+    /* Keep names unique so labels and name-keyed lookups stay unambiguous even
+     * if the user names a new body the same as an existing one. */
+    ensure_unique_name(idx);
 
     return idx;
 }
