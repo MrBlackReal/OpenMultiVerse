@@ -232,6 +232,27 @@ static void move_pause_menu_selection(int delta) {
  * are done. It must be called once, not once per system, to keep g_sim_time
  * consistent with all bodies' state.
  */
+/* Camera position in world metres (g_cam.pos is in AU). */
+static void camera_world_m(double out[3]) {
+    out[0] = g_cam.pos[0] * AU;
+    out[1] = g_cam.pos[1] * AU;
+    out[2] = g_cam.pos[2] * AU;
+}
+
+/* Squared distance (m²) from `root`'s star to the camera. */
+static double system_cam_dist2(int root, const double cam_m[3]) {
+    double dx = g_bodies[root].pos[0] - cam_m[0];
+    double dy = g_bodies[root].pos[1] - cam_m[1];
+    double dz = g_bodies[root].pos[2] - cam_m[2];
+    return dx*dx + dy*dy + dz*dz;
+}
+
+/* Radius (light-years) of the live simulation region around the camera: only
+ * systems this close are integrated each frame.  Everything farther is frozen
+ * (a far-field dot) — this is what keeps a galaxy-scale universe real-time, and
+ * also stops one distant tight exoplanet from capping everyone's timestep. */
+#define ACTIVE_RADIUS_LY 2.0
+
 static void warmup_universe(void) {
     /* A loaded snapshot already holds settled state at a specific instant;
      * pre-simulating would advance it away from what was saved. */
@@ -242,18 +263,48 @@ static void warmup_universe(void) {
     const double WARMUP_DT = 365.0 * 2.0 * DAY;
     int sys_n = physics_system_count();
     int completed = 0;
-    fprintf(stdout, "[Boot] Warm-up: pre-simulating %.0f days across %d system%s\n",
-            WARMUP_DT / DAY, sys_n, sys_n == 1 ? "" : "s");
+
+    /* Only pre-settle systems the camera starts near.  Distant systems are
+     * far-field dots — warming them is wasted work (and a single tight close-in
+     * exoplanet can need millions of substeps for 730 days).  They warm up
+     * lazily if/when you fly to them.  The nearest system is always included so
+     * single-system universes still settle. */
+    const double WARMUP_RADIUS_LY = 1.5;
+    double cam_m[3] = { g_cam.pos[0] * AU, g_cam.pos[1] * AU, g_cam.pos[2] * AU };
+    int nearest = -1;
+    double nearest_d2 = 1e300, radius_m2 = (WARMUP_RADIUS_LY * LY) * (WARMUP_RADIUS_LY * LY);
+    int n_warm = 0;
+    for (int s = 0; s < sys_n; s++) {
+        int root = physics_system_root(s);
+        double dx = g_bodies[root].pos[0] - cam_m[0];
+        double dy = g_bodies[root].pos[1] - cam_m[1];
+        double dz = g_bodies[root].pos[2] - cam_m[2];
+        double d2 = dx*dx + dy*dy + dz*dz;
+        if (d2 < nearest_d2) { nearest_d2 = d2; nearest = s; }
+        if (d2 <= radius_m2) n_warm++;
+    }
+    if (n_warm == 0) n_warm = 1;   /* the nearest system is always warmed */
+
+    fprintf(stdout, "[Boot] Warm-up: pre-simulating %.0f days across %d of %d "
+                    "nearby system%s\n",
+            WARMUP_DT / DAY, n_warm, sys_n, sys_n == 1 ? "" : "s");
     fflush(stdout);
 #ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic)
 #endif
     for (int s = 0; s < sys_n; s++) {
+        int root = physics_system_root(s);
+        /* Skip far systems (but never the nearest). */
+        {
+            double dx = g_bodies[root].pos[0] - cam_m[0];
+            double dy = g_bodies[root].pos[1] - cam_m[1];
+            double dz = g_bodies[root].pos[2] - cam_m[2];
+            if (s != nearest && dx*dx + dy*dy + dz*dz > radius_m2) continue;
+        }
         double step_outer = physics_system_outer_dt_limit(s);
         double step_inner = physics_system_inner_dt_limit(s);
         int n_inner = (int)(step_outer / step_inner) + 1;
         int outer_total = (int)(WARMUP_DT / step_outer);
-        int root = physics_system_root(s);
         for (int o = 0; o < outer_total; o++) {
             double dt_outer = WARMUP_DT / outer_total;
             double dt_inner = dt_outer / n_inner;
@@ -341,6 +392,16 @@ static void reset_universe_state(void) {
  * path is empty; otherwise records it and rebuilds the world from scratch. */
 static void switch_universe(const char *path) {
     if (!path || !path[0]) return;
+    /* Pre-flight the file before tearing down the live world: a missing or
+     * malformed user-supplied path (typed into the menu's load box, or a failed
+     * catalog import) must be a no-op, not abort the process via the exit(1)
+     * inside universe_load(). */
+    if (universe_validate(path) != 0) {
+        fprintf(stderr, "[Sim] cannot load universe '%s' (missing, unparseable, "
+                        "or no bodies) - keeping current universe\n", path);
+        fflush(stderr);
+        return;
+    }
     snprintf(s_universe_path, sizeof(s_universe_path), "%s", path);
     fprintf(stdout, "[Sim] switching universe -> %s\n", s_universe_path);
     fflush(stdout);
@@ -915,8 +976,16 @@ int main(int argc, char **argv) {
                 double sim_dt = g_sim_speed * dt * g_laws.time_scale;
                 double effective_sim_dt = sim_dt;
 
-                /* Find the most constrained system and cap all systems to it. */
+                double cam_m[3]; camera_world_m(cam_m);
+                const double active_r2 =
+                    (ACTIVE_RADIUS_LY * LY) * (ACTIVE_RADIUS_LY * LY);
+
+                /* Find the most constrained ACTIVE system and cap to it.  A
+                 * frozen distant system must not drag down the timestep (and
+                 * thus the frame rate) of the system you are actually in. */
                 for (int s = 0; s < sys_n; s++) {
+                    if (system_cam_dist2(physics_system_root(s), cam_m) > active_r2)
+                        continue;
                     double dt_outer_max = physics_system_outer_dt_limit(s);
                     double sys_cap = dt_outer_max * MAX_OUTER_STEPS;
                     if (effective_sim_dt > sys_cap)
@@ -926,9 +995,12 @@ int main(int argc, char **argv) {
                 trails_begin_frame_snapshot();
                 collision_snapshot_positions();
                 for (int s = 0; s < sys_n; s++) {
+                    int root = physics_system_root(s);
+                    /* Freeze systems outside the active region — they are
+                     * far-field dots, so integrating them is wasted work. */
+                    if (system_cam_dist2(root, cam_m) > active_r2) continue;
                     double dt_outer_max = physics_system_outer_dt_limit(s);
                     double dt_inner_max = physics_system_inner_dt_limit(s);
-                    int root = physics_system_root(s);
                     double sys_dt = effective_sim_dt;
 
                     int outer_steps = (int)(sys_dt / dt_outer_max) + 1;

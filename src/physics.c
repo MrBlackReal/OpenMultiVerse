@@ -86,20 +86,59 @@ int    g_paused    = 0;
 static double s_outer_dt_limit = OUTER_DT_DEFAULT;
 static double s_inner_dt_limit = INNER_DT_MAX;
 
-/* s_system_roots[slot]        — body index of the root star for this slot
- * s_system_outer/inner_dt[slot] — tightest timestep across all members
- * s_root_to_slot[body_idx]    — inverse map: root star index → slot
- * s_body_system_slot[body_idx]  — which slot does this body belong to
- * s_system_members[slot][k]   — precomputed list of body indices in slot
- * s_system_member_count[slot] — length of the above list */
-static int    s_system_roots[MAX_BODIES];
-static double s_system_outer_dt[MAX_BODIES];
-static double s_system_inner_dt[MAX_BODIES];
-static int    s_root_to_slot[MAX_BODIES];
-static int    s_body_system_slot[MAX_BODIES];
-static int    s_system_members[MAX_BODIES][MAX_BODIES];
-static int    s_system_member_count[MAX_BODIES];
-static int    s_nsystems = 0;
+/* Per-system / per-body tables.  Heap-allocated and grown to g_nbodies so the
+ * engine is no longer hard-capped at MAX_BODIES bodies (which a galaxy-scale
+ * universe far exceeds).  Capacities: all sized to s_cap >= g_nbodies; the
+ * member lists use a CSR layout (offsets + one flat pool) instead of an
+ * O(N^2) [N][N] matrix.
+ *
+ * s_system_roots[slot]         — body index of the root star for this slot
+ * s_system_outer/inner_dt[slot]— tightest timestep across all members
+ * s_root_to_slot[body_idx]     — inverse map: root star index → slot
+ * s_body_system_slot[body_idx] — which slot does this body belong to
+ * s_member_off[slot]           — start of slot's members in s_member_pool (CSR)
+ * s_member_pool[...]           — flat list of member body indices, by slot
+ * s_system_member_count[slot]  — number of members in the slot */
+static int    *s_system_roots        = NULL;   /* [s_cap]   */
+static double *s_system_outer_dt     = NULL;   /* [s_cap]   */
+static double *s_system_inner_dt     = NULL;   /* [s_cap]   */
+static int    *s_root_to_slot        = NULL;   /* [s_cap]   */
+static int    *s_body_system_slot    = NULL;   /* [s_cap]   */
+static int    *s_member_off          = NULL;   /* [s_cap+1] */
+static int    *s_member_pool         = NULL;   /* [s_cap]   */
+static int    *s_system_member_count = NULL;   /* [s_cap]   */
+static int     s_nsystems = 0;
+static int     s_cap = 0;
+
+/* k-th member body index of slot (CSR access). */
+static inline int sys_member(int slot, int k)
+{
+    return s_member_pool[s_member_off[slot] + k];
+}
+
+/* Grow all system/body tables to hold at least `nbodies` bodies (and that many
+ * systems, since #systems <= #bodies).  Called from the timestep rebuild. */
+static void physics_ensure_capacity(int nbodies)
+{
+    if (nbodies <= s_cap) return;
+    int cap = s_cap ? s_cap : MAX_BODIES;
+    while (cap < nbodies) cap *= 2;
+    s_system_roots        = realloc(s_system_roots,        (size_t)cap * sizeof(int));
+    s_system_outer_dt     = realloc(s_system_outer_dt,     (size_t)cap * sizeof(double));
+    s_system_inner_dt     = realloc(s_system_inner_dt,     (size_t)cap * sizeof(double));
+    s_root_to_slot        = realloc(s_root_to_slot,        (size_t)cap * sizeof(int));
+    s_body_system_slot    = realloc(s_body_system_slot,    (size_t)cap * sizeof(int));
+    s_member_off          = realloc(s_member_off,    (size_t)(cap + 1) * sizeof(int));
+    s_member_pool         = realloc(s_member_pool,         (size_t)cap * sizeof(int));
+    s_system_member_count = realloc(s_system_member_count, (size_t)cap * sizeof(int));
+    if (!s_system_roots || !s_system_outer_dt || !s_system_inner_dt ||
+        !s_root_to_slot || !s_body_system_slot || !s_member_off ||
+        !s_member_pool || !s_system_member_count) {
+        fprintf(stderr, "[physics] system-table alloc failed\n");
+        exit(1);
+    }
+    s_cap = cap;
+}
 
 /* Forward declarations for helpers used before their definition */
 static int is_satellite(int i);
@@ -114,8 +153,8 @@ static int in_system(int i, int root)
     int slot;
 
     if (root < 0) return 1;
-    if (i < 0 || i >= g_nbodies || i >= MAX_BODIES) return 0;
-    if (root >= MAX_BODIES) return 0;
+    if (i < 0 || i >= g_nbodies) return 0;
+    if (root < 0 || root >= s_cap) return 0;   /* s_cap == 0 until first build */
     slot = s_root_to_slot[root];
     return slot >= 0 && s_body_system_slot[i] == slot;
 }
@@ -124,11 +163,11 @@ static int in_system(int i, int root)
  * Returns the slot index (≥0), or -1 if root is out of range or all slots used. */
 static int ensure_system_slot(int root)
 {
-    if (root < 0 || root >= MAX_BODIES) return -1;
+    if (root < 0 || root >= s_cap) return -1;
     if (s_root_to_slot[root] >= 0) return s_root_to_slot[root];
     for (int i = 0; i < s_nsystems; i++)
         if (s_system_roots[i] == root) return i;
-    if (s_nsystems >= MAX_BODIES) return -1;
+    if (s_nsystems >= s_cap) return -1;
     s_system_roots[s_nsystems] = root;
     s_system_outer_dt[s_nsystems] = OUTER_DT_DEFAULT;
     s_system_inner_dt[s_nsystems] = INNER_DT_MAX;
@@ -172,8 +211,14 @@ static int timestep_anchor(int i)
     return best;
 }
 
-/* Estimate Keplerian orbital period of body i around `anchor` using the
- * vis-viva / circular approximation: T = 2π√(r³ / GM_total). */
+/* Estimate the circular orbital period of body i around `anchor`.
+ *
+ * For a radial acceleration of magnitude a = G*M / r^p (p = force_exp), a
+ * circular orbit has v² = a·r = G*M·r^(1-p), so
+ *     T = 2π·r / v = 2π·√( r^(1+p) / GM ).
+ * For the Newtonian p = 2 this reduces to the familiar 2π·√(r³/GM); using the
+ * live force_exp keeps the integrator timestep sized correctly for custom-law
+ * universes too. */
 static double estimate_period_about(int i, int anchor)
 {
     if (i < 0 || anchor < 0 || i >= g_nbodies || anchor >= g_nbodies) return 0.0;
@@ -184,7 +229,7 @@ static double estimate_period_about(int i, int anchor)
     double r = sqrt(dx*dx + dy*dy + dz*dz);
     double gm = G_CONST * (g_bodies[i].mass + g_bodies[anchor].mass);
     if (r <= 0.0 || gm <= 0.0) return 0.0;
-    return 2.0 * PI * sqrt(r * r * r / gm);
+    return 2.0 * PI * sqrt(pow(r, 1.0 + g_laws.force_exp) / gm);
 }
 
 /*
@@ -272,31 +317,43 @@ void physics_refresh_timestep_model(void)
     double best_inner = INNER_DT_MAX;
     s_nsystems = 0;
 
-    for (int i = 0; i < MAX_BODIES; i++) {
+    physics_ensure_capacity(g_nbodies > 0 ? g_nbodies : 1);
+
+    for (int i = 0; i < g_nbodies; i++) {
         s_root_to_slot[i] = -1;
         s_body_system_slot[i] = -1;
-        s_system_member_count[i] = 0;
     }
 
     /* Pre-create a slot for every live star so s_root_to_slot is populated
-     * before the member assignment loop below. */
+     * before the member assignment loop below.  ensure_system_slot() zeroes
+     * each new slot's member count. */
     for (int i = 0; i < g_nbodies; i++) {
         if (g_bodies[i].alive && g_bodies[i].is_star)
             ensure_system_slot(i);
     }
 
-    /* Assign every live body to its root star's slot */
-    for (int i = 0; i < g_nbodies && i < MAX_BODIES; i++) {
-        int root, slot;
-
+    /* Pass 1 — assign every live body to its root star's slot and count
+     * members per slot. */
+    for (int i = 0; i < g_nbodies; i++) {
         if (!g_bodies[i].alive) continue;
-        root = body_root_star(i);
-        slot = ensure_system_slot(root);
+        int slot = ensure_system_slot(body_root_star(i));
         if (slot < 0) continue;
-
         s_body_system_slot[i] = slot;
-        if (s_system_member_count[slot] < MAX_BODIES)
-            s_system_members[slot][s_system_member_count[slot]++] = i;
+        s_system_member_count[slot]++;
+    }
+
+    /* CSR offsets from the per-slot counts. */
+    s_member_off[0] = 0;
+    for (int s = 0; s < s_nsystems; s++)
+        s_member_off[s + 1] = s_member_off[s] + s_system_member_count[s];
+
+    /* Pass 2 — fill the flat member pool, reusing member_count as a write
+     * cursor (it ends back at the true per-slot count). */
+    for (int s = 0; s < s_nsystems; s++) s_system_member_count[s] = 0;
+    for (int i = 0; i < g_nbodies; i++) {
+        int slot = s_body_system_slot[i];
+        if (slot < 0) continue;
+        s_member_pool[s_member_off[slot] + s_system_member_count[slot]++] = i;
     }
 
     /* Compute per-body timesteps */
@@ -347,7 +404,7 @@ void physics_refresh_timestep_model(void)
         else if (dt_inner <= 6.0 * 60.0 * 60.0) b->dyn_bucket = 1;
 
         /* Accumulate per-system and global limits */
-        if (i < MAX_BODIES) {
+        {
             int slot = s_body_system_slot[i];
             if (slot >= 0) {
                 if (dt_outer < s_system_outer_dt[slot]) s_system_outer_dt[slot] = dt_outer;
@@ -458,8 +515,10 @@ static void add_relativistic_acc(int root) {
         double vy = g_bodies[i].vel[1] - g_bodies[p].vel[1];
         double vz = g_bodies[i].vel[2] - g_bodies[p].vel[2];
 
-        double r2 = rx*rx + ry*ry + rz*rz;
-        if (r2 <= 0.0) continue;
+        /* Softened separation, matching the gravity kernels: without this the
+         * 1/r^5 term diverges to Inf/NaN on a close approach (e.g. the
+         * Relativistic preset's large pn_factor). */
+        double r2 = rx*rx + ry*ry + rz*rz + SOFTENING*SOFTENING;
         double r = sqrt(r2);
 
         /* specific angular momentum L = r × v, and |L|² */
@@ -499,7 +558,7 @@ static void add_relativistic_acc(int root) {
  */
 static void compute_acc_slow_system(int root) {
     int i, j;
-    int slot = (root >= 0 && root < MAX_BODIES) ? s_root_to_slot[root] : -1;
+    int slot = (root >= 0 && root < s_cap) ? s_root_to_slot[root] : -1;
 
     /* Zero accumulators */
     if (root < 0 || slot < 0) {
@@ -508,7 +567,7 @@ static void compute_acc_slow_system(int root) {
                 g_bodies[i].acc[0] = g_bodies[i].acc[1] = g_bodies[i].acc[2] = 0.0;
     } else {
         for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
-            i = s_system_members[slot][mi];
+            i = sys_member(slot, mi);
             g_bodies[i].acc[0] = g_bodies[i].acc[1] = g_bodies[i].acc[2] = 0.0;
         }
     }
@@ -556,17 +615,29 @@ static void compute_acc_slow_system(int root) {
         return;
     }
 
-    /* System-aware path: iterate member list instead of all bodies */
-    for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
-        i = s_system_members[slot][mi];
+    /* System-aware path: iterate member list instead of all bodies.
+     *
+     * When gravity_isolation is on (the default), the inner loop walks only
+     * this system's own members — interstellar gravity between systems is
+     * negligible, so cross-system pairs are skipped entirely.  This is the
+     * O(active x N) -> O(Ni^2) win that lets thousand-system universes run in
+     * real time.  When isolation is off, fall back to scanning all bodies so a
+     * deliberately-coupled scenario still feels every cross-system pair. */
+    int isolated = (g_laws.gravity_isolation != 0.0);
+    int member_count = s_system_member_count[slot];
+    int j_count = isolated ? member_count : g_nbodies;
+    for (int mi = 0; mi < member_count; mi++) {
+        i = sys_member(slot, mi);
         if (!g_bodies[i].alive) continue;
-        for (j = 0; j < g_nbodies; j++) {
+        for (int jk = 0; jk < j_count; jk++) {
             int same_system;
             double dx, dy, dz, r2, r, f;
 
+            j = isolated ? sys_member(slot, jk) : jk;
             if (j == i || !g_bodies[j].alive) continue;
 
-            same_system = (j >= 0 && j < MAX_BODIES && s_body_system_slot[j] == slot);
+            same_system = isolated ||
+                          (j >= 0 && j < g_nbodies && s_body_system_slot[j] == slot);
             if (same_system && j < i) continue;
 
             if (is_satellite(i) && is_satellite(j)) continue;
@@ -612,7 +683,7 @@ static void compute_acc_slow_system(int root) {
  */
 static void compute_acc_fast_system(int root) {
     int i;
-    int slot = (root >= 0 && root < MAX_BODIES) ? s_root_to_slot[root] : -1;
+    int slot = (root >= 0 && root < s_cap) ? s_root_to_slot[root] : -1;
 
     if (root < 0 || slot < 0) {
         for (i = 0; i < g_nbodies; i++)
@@ -649,13 +720,13 @@ static void compute_acc_fast_system(int root) {
     }
 
     for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
-        i = s_system_members[slot][mi];
+        i = sys_member(slot, mi);
         g_bodies[i].fast_acc[0] = g_bodies[i].fast_acc[1] =
         g_bodies[i].fast_acc[2] = 0.0;
     }
 
     for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
-        i = s_system_members[slot][mi];
+        i = sys_member(slot, mi);
         if (!g_bodies[i].alive) continue;
         if (!has_fast_parent(i)) continue;
         for (int p = g_bodies[i].parent; p >= 0; p = g_bodies[p].parent) {
@@ -702,7 +773,7 @@ void physics_respa_begin(double dt_outer) {
 
 void physics_respa_begin_system(int root, double dt_outer) {
     int i;
-    int slot = (root >= 0 && root < MAX_BODIES) ? s_root_to_slot[root] : -1;
+    int slot = (root >= 0 && root < s_cap) ? s_root_to_slot[root] : -1;
     compute_acc_slow_system(root);
     if (root < 0 || slot < 0) {
         for (i = 0; i < g_nbodies; i++) {
@@ -713,7 +784,7 @@ void physics_respa_begin_system(int root, double dt_outer) {
         }
     } else {
         for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
-            i = s_system_members[slot][mi];
+            i = sys_member(slot, mi);
             if (!g_bodies[i].alive) continue;
             g_bodies[i].vel[0] += 0.5 * g_bodies[i].acc[0] * dt_outer;
             g_bodies[i].vel[1] += 0.5 * g_bodies[i].acc[1] * dt_outer;
@@ -742,7 +813,7 @@ void physics_respa_inner(double dt_inner) {
 
 void physics_respa_inner_system(int root, double dt_inner) {
     int i;
-    int slot = (root >= 0 && root < MAX_BODIES) ? s_root_to_slot[root] : -1;
+    int slot = (root >= 0 && root < s_cap) ? s_root_to_slot[root] : -1;
 
     /* Fast half-kick (uses fast_acc from previous evaluation) */
     if (root < 0 || slot < 0) {
@@ -761,14 +832,14 @@ void physics_respa_inner_system(int root, double dt_inner) {
         }
     } else {
         for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
-            i = s_system_members[slot][mi];
+            i = sys_member(slot, mi);
             if (!g_bodies[i].alive) continue;
             g_bodies[i].vel[0] += 0.5 * g_bodies[i].fast_acc[0] * dt_inner;
             g_bodies[i].vel[1] += 0.5 * g_bodies[i].fast_acc[1] * dt_inner;
             g_bodies[i].vel[2] += 0.5 * g_bodies[i].fast_acc[2] * dt_inner;
         }
         for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
-            i = s_system_members[slot][mi];
+            i = sys_member(slot, mi);
             if (!g_bodies[i].alive) continue;
             g_bodies[i].pos[0] += g_bodies[i].vel[0] * dt_inner;
             g_bodies[i].pos[1] += g_bodies[i].vel[1] * dt_inner;
@@ -787,7 +858,7 @@ void physics_respa_inner_system(int root, double dt_inner) {
         }
     } else {
         for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
-            i = s_system_members[slot][mi];
+            i = sys_member(slot, mi);
             if (!g_bodies[i].alive) continue;
             g_bodies[i].vel[0] += 0.5 * g_bodies[i].fast_acc[0] * dt_inner;
             g_bodies[i].vel[1] += 0.5 * g_bodies[i].fast_acc[1] * dt_inner;
@@ -813,7 +884,7 @@ void physics_respa_end(double dt_outer) {
 
 void physics_respa_end_system(int root, double dt_outer) {
     int i;
-    int slot = (root >= 0 && root < MAX_BODIES) ? s_root_to_slot[root] : -1;
+    int slot = (root >= 0 && root < s_cap) ? s_root_to_slot[root] : -1;
     compute_acc_slow_system(root);
     if (root < 0 || slot < 0) {
         for (i = 0; i < g_nbodies; i++) {
@@ -831,14 +902,14 @@ void physics_respa_end_system(int root, double dt_outer) {
         }
     } else {
         for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
-            i = s_system_members[slot][mi];
+            i = sys_member(slot, mi);
             if (!g_bodies[i].alive) continue;
             g_bodies[i].vel[0] += 0.5 * g_bodies[i].acc[0] * dt_outer;
             g_bodies[i].vel[1] += 0.5 * g_bodies[i].acc[1] * dt_outer;
             g_bodies[i].vel[2] += 0.5 * g_bodies[i].acc[2] * dt_outer;
         }
         for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
-            i = s_system_members[slot][mi];
+            i = sys_member(slot, mi);
             if (!g_bodies[i].alive) continue;
             g_bodies[i].rotation_angle = fmod(
                 g_bodies[i].rotation_angle + g_bodies[i].rotation_rate * dt_outer,
@@ -1348,7 +1419,7 @@ void trails_tick(double dt) {
 
 void trails_tick_system(int root, double dt) {
     int i;
-    int slot = (root >= 0 && root < MAX_BODIES) ? s_root_to_slot[root] : -1;
+    int slot = (root >= 0 && root < s_cap) ? s_root_to_slot[root] : -1;
     if (dt <= 0.0) return;
 
     if (root < 0 || slot < 0) {
@@ -1389,7 +1460,7 @@ void trails_tick_system(int root, double dt) {
     }
 
     for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
-        i = s_system_members[slot][mi];
+        i = sys_member(slot, mi);
         Body *b = &g_bodies[i];
         double segment_len, max_err, start[3], start_vel[3], end[3], end_vel[3];
 

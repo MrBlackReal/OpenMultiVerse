@@ -10,6 +10,11 @@
 static const UniversePreset s_presets[] = {
     { "Solar System (Newtonian)", "assets/universe.json",
       "Our real Solar System under standard inverse-square gravity." },
+    { "Known Universe (everything)", "assets/universes/known_universe.json",
+      "The full catalog: the Solar System plus ~9,700 real stars and ~6,300 "
+      "exoplanets at their true light-year positions (~16,000 bodies), running "
+      "in real time. Rebuild a smaller slice with "
+      "tools/build_known_universe.py --max-systems N." },
     { "Strong Gravity", "assets/universes/strong_gravity.json",
       "G is ~4x stronger — orbits are much faster and tighter." },
     { "Inverse-Cube Forces", "assets/universes/inverse_cube.json",

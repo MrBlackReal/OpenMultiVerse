@@ -73,3 +73,11 @@ assets/*.mov
 # AI assistant worktrees
 .claude/worktrees/
 .codex/worktrees/
+
+# Full catalog downloads (regenerate via tools/build_known_universe.py / catalogtool)
+assets/catalogs/*_full.csv
+tools/_known_tmp/
+
+# Python bytecode cache
+__pycache__/
+*.pyc

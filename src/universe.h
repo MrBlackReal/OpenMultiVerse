@@ -34,6 +34,15 @@ typedef struct {
 void universe_load(const char *path);
 
 /*
+ * universe_validate — cheap pre-flight check that `path` can be loaded: the
+ * file exists, parses as JSON, and contains a "bodies" array. Returns 0 if
+ * loadable, -1 otherwise (no global state is touched). Callers use this before
+ * tearing down the live world so a bad user-supplied path is a no-op instead
+ * of aborting the process via universe_load()'s exit(1).
+ */
+int universe_validate(const char *path);
+
+/*
  * universe_save — write the current live universe (g_laws + every alive body's
  * absolute state) to `path` as a "snapshot" universe JSON. The result reloads
  * exactly as saved (no warm-up, no re-derivation from Keplerian elements).

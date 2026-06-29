@@ -127,6 +127,17 @@ static double s_pos_before[MAX_BODIES][3];
 static double s_vel_before[MAX_BODIES][3];
 static int s_pos_before_valid = 0;
 
+/* Collision tables (s_pair_next, s_pos_before, ...) are fixed [MAX_BODIES], so
+ * collision is processed for at most the first MAX_BODIES bodies.  cnb() is the
+ * effective body count used as the bound for every loop and index guard; for a
+ * universe of <= MAX_BODIES bodies it equals g_nbodies (no behaviour change).
+ * The camera-driven active set (a later phase) selects which bodies these slots
+ * represent so collisions follow the viewer in a galaxy-scale universe. */
+static inline int cnb(void)
+{
+    return g_nbodies < MAX_BODIES ? g_nbodies : MAX_BODIES;
+}
+
 static int body_is_merge_target(int idx);
 static int body_is_merge_impactor(int idx);
 static int body_is_in_merge(int idx);
@@ -163,7 +174,7 @@ void collision_reset(void)
 
 void collision_snapshot_positions(void)
 {
-    int n = g_nbodies < MAX_BODIES ? g_nbodies : MAX_BODIES;
+    int n = cnb() < MAX_BODIES ? cnb() : MAX_BODIES;
     for (int i = 0; i < n; i++) {
         s_pos_before[i][0] = g_bodies[i].pos[0];
         s_pos_before[i][1] = g_bodies[i].pos[1];
@@ -185,7 +196,7 @@ void collision_on_body_added(int body_idx)
         }
         s_system_dirty[body_idx] = 0;
         s_system_hot[body_idx] = 0.0;
-        if (body_idx < g_nbodies) {
+        if (body_idx < cnb()) {
             s_pos_before[body_idx][0] = g_bodies[body_idx].pos[0];
             s_pos_before[body_idx][1] = g_bodies[body_idx].pos[1];
             s_pos_before[body_idx][2] = g_bodies[body_idx].pos[2];
@@ -212,13 +223,13 @@ void collision_on_body_added(int body_idx)
 
 int collision_system_maybe_has_encounter(int root, double dt)
 {
-    if (root < 0 || root >= g_nbodies || !g_bodies[root].alive) return 0;
+    if (root < 0 || root >= cnb() || !g_bodies[root].alive) return 0;
     if (dt <= 0.0) return 0;
 
-    for (int i = 0; i < g_nbodies; i++) {
+    for (int i = 0; i < cnb(); i++) {
         if (!body_is_primary(i)) continue;
         if (body_root_star(i) != root) continue;
-        for (int j = i + 1; j < g_nbodies; j++) {
+        for (int j = i + 1; j < cnb(); j++) {
             double rx, ry, rz, dist, vx, vy, vz, vr, rsum, gap;
             if (!body_is_primary(j)) continue;
             if (body_root_star(j) != root) continue;
@@ -246,7 +257,7 @@ int collision_system_maybe_has_encounter(int root, double dt)
     }
 
     if (g_bodies[root].is_star) {
-        for (int i = 0; i < g_nbodies; i++) {
+        for (int i = 0; i < cnb(); i++) {
             double rx, ry, rz, dist, glow_dist;
             if (i == root) continue;
             if (!g_bodies[i].alive || g_bodies[i].is_star) continue;
@@ -279,16 +290,16 @@ int collision_system_maybe_has_encounter(int root, double dt)
  */
 int collision_system_close_approach_subdivide(int root, double dt_outer)
 {
-    if (root < 0 || root >= g_nbodies || !g_bodies[root].alive) return 1;
+    if (root < 0 || root >= cnb() || !g_bodies[root].alive) return 1;
     if (dt_outer <= 0.0) return 1;
 
     double min_tau = 1e30;
 
     /* Primary–primary pairs */
-    for (int i = 0; i < g_nbodies; i++) {
+    for (int i = 0; i < cnb(); i++) {
         if (!body_is_primary(i)) continue;
         if (body_root_star(i) != root) continue;
-        for (int j = i + 1; j < g_nbodies; j++) {
+        for (int j = i + 1; j < cnb(); j++) {
             if (!body_is_primary(j)) continue;
             if (body_root_star(j) != root) continue;
             if (body_is_merge_impactor(i) || body_is_merge_impactor(j)) continue;
@@ -316,7 +327,7 @@ int collision_system_close_approach_subdivide(int root, double dt_outer)
 
     /* Body approaching the star */
     if (g_bodies[root].is_star) {
-        for (int i = 0; i < g_nbodies; i++) {
+        for (int i = 0; i < cnb(); i++) {
             if (i == root) continue;
             if (!g_bodies[i].alive || g_bodies[i].is_star) continue;
             if (body_root_star(i) != root) continue;
@@ -360,13 +371,13 @@ static int body_is_descendant_of(int body_idx, int ancestor_idx)
 
 static int body_is_satellite(int idx)
 {
-    if (idx < 0 || idx >= g_nbodies || !g_bodies[idx].alive) return 0;
+    if (idx < 0 || idx >= cnb() || !g_bodies[idx].alive) return 0;
     return g_bodies[idx].parent >= 0 && !g_bodies[g_bodies[idx].parent].is_star;
 }
 
 static int body_is_primary(int idx)
 {
-    if (idx < 0 || idx >= g_nbodies || !g_bodies[idx].alive) return 0;
+    if (idx < 0 || idx >= cnb() || !g_bodies[idx].alive) return 0;
     if (g_bodies[idx].is_star) return 0;
     return !body_is_satellite(idx);
 }
@@ -612,7 +623,7 @@ static void body_local_surface_dir_to_world(int body_idx, const double local_dir
     double tx, ty, tz;
     double len;
 
-    if (!out || body_idx < 0 || body_idx >= g_nbodies) return;
+    if (!out || body_idx < 0 || body_idx >= cnb()) return;
     b = &g_bodies[body_idx];
 
     cr = cos(b->rotation_angle);
@@ -868,7 +879,7 @@ static double current_visual_radius(int body_idx, double physical_radius)
 
 static double current_contact_radius(int body_idx)
 {
-    if (body_idx < 0 || body_idx >= g_nbodies) return 0.0;
+    if (body_idx < 0 || body_idx >= cnb()) return 0.0;
     return current_visual_radius(body_idx, g_bodies[body_idx].radius);
 }
 
@@ -877,8 +888,8 @@ static int nearest_star_to_body(int body_idx)
     int best = -1;
     double best_d2 = 1e300;
 
-    if (body_idx < 0 || body_idx >= g_nbodies) return -1;
-    for (int i = 0; i < g_nbodies; i++) {
+    if (body_idx < 0 || body_idx >= cnb()) return -1;
+    for (int i = 0; i < cnb(); i++) {
         double dx, dy, dz, d2;
         if (i == body_idx) continue;
         if (!g_bodies[i].alive || !g_bodies[i].is_star) continue;
@@ -903,7 +914,7 @@ static double star_heat_factor_for_body(int body_idx, int *out_star_idx)
     double crash_dist, heat_start, t;
 
     if (out_star_idx) *out_star_idx = -1;
-    if (body_idx < 0 || body_idx >= g_nbodies) return 0.0;
+    if (body_idx < 0 || body_idx >= cnb()) return 0.0;
     if (!g_bodies[body_idx].alive || g_bodies[body_idx].is_star) return 0.0;
 
     star_idx = nearest_star_to_body(body_idx);
@@ -938,7 +949,7 @@ static int current_merge_intersection_ring(int body_idx, const double fallback_d
     double fallback_n[3] = {1.0, 0.0, 0.0};
     double fallback_len = sqrt(dot3d(fallback_dir, fallback_dir));
 
-    if (body_idx < 0 || body_idx >= g_nbodies) return 0;
+    if (body_idx < 0 || body_idx >= cnb()) return 0;
     if (fallback_len > 1e-12) {
         fallback_n[0] = fallback_dir[0] / fallback_len;
         fallback_n[1] = fallback_dir[1] / fallback_len;
@@ -954,7 +965,7 @@ static int current_merge_intersection_ring(int body_idx, const double fallback_d
         if (m->target != body_idx && m->impactor != body_idx) continue;
 
         other_idx = (m->target == body_idx) ? m->impactor : m->target;
-        if (other_idx < 0 || other_idx >= g_nbodies) continue;
+        if (other_idx < 0 || other_idx >= cnb()) continue;
         if (!g_bodies[body_idx].alive || !g_bodies[other_idx].alive) continue;
 
         c0[0] = g_bodies[body_idx].pos[0];
@@ -1011,7 +1022,7 @@ static void spawn_impact_particles(int body_idx, int kind, const double world_di
     int count;
     float base_r, base_g, base_b;
 
-    if (body_idx < 0 || body_idx >= g_nbodies) return;
+    if (body_idx < 0 || body_idx >= cnb()) return;
     if (!g_bodies[body_idx].alive || len <= 1e-12) return;
 
     n[0] /= len; n[1] /= len; n[2] /= len;
@@ -1268,7 +1279,7 @@ static void add_permanent_crater(int body_idx, const double world_dir[3],
     float local_dir[3];
     PersistentScar *s;
 
-    if (body_idx < 0 || body_idx >= g_nbodies) return;
+    if (body_idx < 0 || body_idx >= cnb()) return;
     if (!g_bodies[body_idx].alive) return;
     if (impactor_radius <= 0.0) return;
 
@@ -1349,7 +1360,7 @@ static void finalize_absorb_body(int target, int impactor, double rel_speed,
     Body *b = &g_bodies[impactor];
     const char *outcome_name = "absorb";
 
-    for (int i = 0; i < g_nbodies; i++) {
+    for (int i = 0; i < cnb(); i++) {
         if (!g_bodies[i].alive || g_bodies[i].parent != impactor) continue;
         if (target == i || body_is_descendant_of(target, i))
             g_bodies[i].parent = body_root_star(target);
@@ -1422,8 +1433,8 @@ static void update_merge_events(double dt)
         double attach_world_t1[3];
 
         if (!m->active) continue;
-        if (m->target < 0 || m->target >= g_nbodies ||
-            m->impactor < 0 || m->impactor >= g_nbodies) {
+        if (m->target < 0 || m->target >= cnb() ||
+            m->impactor < 0 || m->impactor >= cnb()) {
             m->active = 0;
             continue;
         }
@@ -2131,15 +2142,15 @@ void collision_step_system(int root, double dt)
     int resolved[MAX_BODIES] = {0};
 
     if (dt <= 0.0) return;
-    if (root < 0 || root >= g_nbodies || !g_bodies[root].alive) return;
+    if (root < 0 || root >= cnb() || !g_bodies[root].alive) return;
 
-    for (int ai = 0; ai < g_nbodies; ai++) {
+    for (int ai = 0; ai < cnb(); ai++) {
         int a = ai;
         if (!body_is_primary(a) || resolved[a] ||
             body_is_merge_impactor(a) || body_root_star(a) != root)
             continue;
 
-        for (int bi = ai + 1; bi < g_nbodies; bi++) {
+        for (int bi = ai + 1; bi < cnb(); bi++) {
             int b = bi;
             double speed = 0.0;
             double hit_t = 0.0;
@@ -2172,7 +2183,7 @@ void collision_step_system(int root, double dt)
     }
 
     if (g_bodies[root].is_star) {
-        for (int i = 0; i < g_nbodies; i++) {
+        for (int i = 0; i < cnb(); i++) {
             double speed = 0.0;
             double hit_t = 0.0;
 
@@ -2232,13 +2243,13 @@ void collision_step(double dt)
         if (!s_impacts[i].active) continue;
         s_impacts[i].age += dt;
         if (s_impacts[i].age >= s_impacts[i].duration ||
-            s_impacts[i].body < 0 || s_impacts[i].body >= g_nbodies ||
+            s_impacts[i].body < 0 || s_impacts[i].body >= cnb() ||
             !g_bodies[s_impacts[i].body].alive)
             s_impacts[i].active = 0;
     }
     for (int i = 0; i < MAX_BODIES; i++) {
         if (!s_radius_fx[i].active) continue;
-        if (i >= g_nbodies || !g_bodies[i].alive) {
+        if (i >= cnb() || !g_bodies[i].alive) {
             s_radius_fx[i].active = 0;
             continue;
         }
@@ -2251,7 +2262,7 @@ void collision_step(double dt)
 
     if (dt <= 0.0) return;
 
-    for (int i = 0; i < g_nbodies; i++) {
+    for (int i = 0; i < cnb(); i++) {
         Body *b = &g_bodies[i];
         if (b->alive || !b->trail || b->trail_count < 1 || b->trail_fade <= 0.0) continue;
         b->trail_fade -= dt / TRAIL_FADE_DURATION;
@@ -2269,10 +2280,10 @@ void collision_step(double dt)
     for (int i = 0; i < MAX_BODIES; i++) {
         system_radius[i] = SYSTEM_MARGIN_AU * AU;
     }
-    for (int i = 0; i < g_nbodies; i++) {
+    for (int i = 0; i < cnb(); i++) {
         if (!g_bodies[i].alive) continue;
         int root = body_root_star(i);
-        if (root < 0 || root >= g_nbodies) continue;
+        if (root < 0 || root >= cnb()) continue;
         if (member_count[root] == 0 && active_root_count < MAX_BODIES)
             active_roots[active_root_count++] = root;
         if (member_count[root] < MAX_BODIES)
@@ -2284,7 +2295,7 @@ void collision_step(double dt)
         if (d > system_radius[root]) system_radius[root] = d;
     }
 
-    for (int root = 0; root < g_nbodies; root++) {
+    for (int root = 0; root < cnb(); root++) {
         if (!s_system_dirty[root]) continue;
         if (!g_bodies[root].alive) {
             s_system_dirty[root] = 0;
@@ -2298,7 +2309,7 @@ void collision_step(double dt)
             int same_root = (other_root == root);
             int na, nb;
 
-            if (other_root < 0 || other_root >= g_nbodies) continue;
+            if (other_root < 0 || other_root >= cnb()) continue;
             if (!g_bodies[other_root].alive) continue;
             if (other_root < root && s_system_dirty[other_root]) continue;
             if (!systems_may_interact(root, other_root, system_radius)) continue;
@@ -2379,7 +2390,7 @@ void collision_step(double dt)
 
     for (int ai = 0; ai < active_root_count; ai++) {
         int root_a = active_roots[ai];
-        if (root_a < 0 || root_a >= g_nbodies) continue;
+        if (root_a < 0 || root_a >= cnb()) continue;
         if (!g_bodies[root_a].alive || !g_bodies[root_a].is_star) continue;
 
         for (int bi = ai + 1; bi < active_root_count; bi++) {
@@ -2387,7 +2398,7 @@ void collision_step(double dt)
             double speed = 0.0;
             double hit_t = 0.0;
 
-            if (root_b < 0 || root_b >= g_nbodies) continue;
+            if (root_b < 0 || root_b >= cnb()) continue;
             if (!g_bodies[root_b].alive || !g_bodies[root_b].is_star) continue;
             if (!systems_may_interact(root_a, root_b, system_radius)) continue;
             if (!swept_spheres_collide(root_a, root_b, dt, &speed, &hit_t))
@@ -2410,7 +2421,7 @@ void collision_step(double dt)
 int collision_spots_for_body(int body_idx, CollisionSpot spots[COLLISION_MAX_SPOTS])
 {
     int n = 0;
-    if (!spots || body_idx < 0 || body_idx >= g_nbodies) return 0;
+    if (!spots || body_idx < 0 || body_idx >= cnb()) return 0;
 
     for (int i = 0; i < MAX_PERSISTENT_SCARS && n < COLLISION_MAX_SPOTS; i++) {
         PersistentScar *s = &s_perm_scars[i];
@@ -2496,7 +2507,7 @@ void collision_body_heat_glow(int body_idx, float out_color[3],
     }
     if (out_intensity) *out_intensity = 0.0f;
     if (out_scale) *out_scale = 1.0f;
-    if (body_idx < 0 || body_idx >= g_nbodies) return;
+    if (body_idx < 0 || body_idx >= cnb()) return;
 
     for (int i = 0; i < MAX_IMPACTS; i++) {
         ImpactEvent *e = &s_impacts[i];
@@ -2564,7 +2575,7 @@ float collision_body_star_heat(int body_idx)
 
 int collision_body_has_active_merge(int body_idx)
 {
-    if (body_idx < 0 || body_idx >= g_nbodies) return 0;
+    if (body_idx < 0 || body_idx >= cnb()) return 0;
     return body_is_in_merge(body_idx);
 }
 
@@ -2578,7 +2589,7 @@ int collision_body_needs_dense_trail(int body_idx)
 {
     int root;
 
-    if (body_idx < 0 || body_idx >= g_nbodies || !g_bodies[body_idx].alive)
+    if (body_idx < 0 || body_idx >= cnb() || !g_bodies[body_idx].alive)
         return 0;
     if (body_is_in_merge(body_idx))
         return 1;

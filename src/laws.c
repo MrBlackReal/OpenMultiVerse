@@ -14,6 +14,7 @@ UniverseLaws g_laws = {
     .lambda     = 0.0,
     .pn_factor  = 0.0,
     .c_light    = LAWS_DEFAULT_C_LIGHT,
+    .gravity_isolation = LAWS_DEFAULT_GRAV_ISOLATION,
 };
 
 void laws_reset(void)
@@ -25,4 +26,5 @@ void laws_reset(void)
     g_laws.lambda     = 0.0;
     g_laws.pn_factor  = 0.0;
     g_laws.c_light    = LAWS_DEFAULT_C_LIGHT;
+    g_laws.gravity_isolation = LAWS_DEFAULT_GRAV_ISOLATION;
 }
