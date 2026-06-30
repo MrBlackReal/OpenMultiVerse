@@ -334,6 +334,7 @@ static void load_snapshot(const JsonNode *bodies_arr)
         strncpy(bo->name, json_str(json_get(bn, "name"), "body"), 31);
         bo->name[31] = '\0';
         bo->is_star = (int)json_num(json_get(bn, "is_star"), 0.0);
+        bo->is_black_hole = (int)json_num(json_get(bn, "is_black_hole"), 0.0);
         bo->mass    = json_num(json_get(bn, "mass"), 0.0);
         bo->radius  = json_num(json_get(bn, "radius_km"), 1.0) * 1000.0;
         read_color(json_get(bn, "color"), bo->col);
@@ -499,8 +500,8 @@ int universe_save(const char *path)
         first = 0;
         fprintf(f, "    { \"name\": ");
         fput_json_str(f, b->name);
-        fprintf(f, ", \"is_star\": %d, \"parent_index\": %d, \"parent\": ",
-                b->is_star ? 1 : 0, parent_slot);
+        fprintf(f, ", \"is_star\": %d, \"is_black_hole\": %d, \"parent_index\": %d, \"parent\": ",
+                b->is_star ? 1 : 0, b->is_black_hole ? 1 : 0, parent_slot);
         fput_json_str(f, parent);
         fprintf(f, ",\n");
         fprintf(f, "      \"mass\": %.10e, \"radius_km\": %.6f,\n",
@@ -635,7 +636,10 @@ void universe_load(const char *path)
         JsonNode *bn;
         for (bn = bodies_arr->first_child; bn; bn = bn->next) {
             const char *type = json_str(json_get(bn, "type"), "");
-            if (strcmp(type, "star") != 0) continue;
+            /* Black holes are placed and grouped like stars (a massive system
+             * root that bodies orbit); only their rendering differs. */
+            int is_bh = (strcmp(type, "black_hole") == 0);
+            if (strcmp(type, "star") != 0 && !is_bh) continue;
 
             const char *name   = json_str(json_get(bn, "name"),      "unknown");
             double      mass   = json_num(json_get(bn, "mass"),       0.0);
@@ -660,6 +664,7 @@ void universe_load(const char *path)
             bo->pos[0]         = px; bo->pos[1] = py; bo->pos[2] = pz;
             bo->col[0]         = col[0]; bo->col[1] = col[1]; bo->col[2] = col[2];
             bo->is_star        = 1;
+            bo->is_black_hole  = is_bh;
             read_rotation(bn, bo);
 
             /* Stash bulk velocity; convert km/s → m/s */

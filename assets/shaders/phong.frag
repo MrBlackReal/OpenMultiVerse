@@ -926,9 +926,26 @@ void main() {
         shade_N = normalize(mix(shade_N, N, cloud_mask));
     }
 
-    /* ---- Phong diffuse ------------------------------------------------ */
-    diff = max(dot(shade_N, L), 0.0);
-    float light = u_ambient + (1.0 - u_ambient) * diff;
+    /* ---- Day / night lighting with a softened, warm terminator -------- */
+    /* The geometric terminator (N·L = 0) is widened into a gradient so the
+     * day->night boundary reads as a band, not a razor edge — a cheap stand-in
+     * for the sun's finite disk plus a little atmospheric light-wrap.  A warm
+     * reddening rides the dusk line (sunset colour), and the night side falls
+     * to a faint cool ambient (earthshine / skyglow) instead of a flat grey,
+     * so shadowed hemispheres look shadowed rather than dead.  Applies to every
+     * body; stars return earlier (emissive) and lava/city emission is added on
+     * top, so neither is affected.                                            */
+    float ndl = dot(shade_N, L);
+    float day = smoothstep(-0.12, 0.22, ndl);          /* soft terminator   */
 
-    frag_color = vec4(surface * light + lava_emit, 1.0);
+    float dusk    = day * (1.0 - day) * 2.0;           /* peaks at terminator */
+    vec3  sun_col = mix(vec3(1.00, 0.97, 0.92),        /* warm-white sunlight */
+                        vec3(1.00, 0.58, 0.34),        /* dusk reddening      */
+                        dusk * 0.55);
+    vec3  amb_col = mix(vec3(0.30, 0.38, 0.56),        /* cool night ambient  */
+                        vec3(0.88, 0.90, 0.94),        /* neutral day ambient */
+                        day) * u_ambient;
+
+    vec3 lighting = amb_col + sun_col * ((1.0 - u_ambient) * day);
+    frag_color = vec4(surface * lighting + lava_emit, 1.0);
 }

@@ -205,13 +205,20 @@ int nearest_star_idx(void)
 
 /* Walk the parent chain from body i until a body with parent == -1 is found
  * (that body is a star, by the parent-chain convention in universe.c).
- * Returns -1 if the chain is broken or i is invalid. */
+ * Returns -1 if the chain is broken or i is invalid.
+ *
+ * The step counter is a hard cycle guard: a well-formed chain visits each body
+ * at most once, so it can never exceed g_nbodies hops. If corrupt data forms a
+ * loop (e.g. a stale build where the Body layout disagrees between translation
+ * units), we bail out with -1 instead of spinning forever. */
 int body_root_star(int i)
 {
+    int steps = 0;
     if (i < 0 || i >= g_nbodies) return -1;
     while (g_bodies[i].parent >= 0) {
         i = g_bodies[i].parent;
         if (i < 0 || i >= g_nbodies) return -1;
+        if (++steps > g_nbodies) return -1;   /* cycle: parent chain looped */
     }
     return i;
 }

@@ -50,6 +50,7 @@
 #include "body.h"
 #include "camera.h"
 #include "starfield.h"
+#include "nebula.h"
 #include "trails.h"
 #include "rings.h"
 #include "asteroids.h"
@@ -192,6 +193,15 @@ static GLint  s_gl_radius    = -1;
 static GLint  s_gl_right     = -1;
 static GLint  s_gl_up        = -1;
 static GLint  s_gl_color     = -1;
+
+/* Black-hole billboard — accretion disk + shadow, alpha-blended. */
+static GLuint s_bh_shader = 0;
+static GLint  s_bh_vp     = -1;
+static GLint  s_bh_center = -1;
+static GLint  s_bh_radius = -1;
+static GLint  s_bh_right  = -1;
+static GLint  s_bh_up     = -1;
+static GLint  s_bh_color  = -1;
 
 /* Supernova passes: volumetric cloud and core. */
 static GLuint s_supernova_core_shader = 0;
@@ -788,6 +798,19 @@ void render_init(void) {
         s_gl_right  = glGetUniformLocation(s_glare_shader, "u_cam_right");
         s_gl_up     = glGetUniformLocation(s_glare_shader, "u_cam_up");
         s_gl_color  = glGetUniformLocation(s_glare_shader, "u_color");
+    }
+
+    /* --- Black-hole shader --- */
+    s_bh_shader = gl_shader_load("assets/shaders/bh.vert", "assets/shaders/bh.frag");
+    if (!s_bh_shader)
+        fprintf(stderr, "[Render] black-hole shader failed\n");
+    else {
+        s_bh_vp     = glGetUniformLocation(s_bh_shader, "u_vp");
+        s_bh_center = glGetUniformLocation(s_bh_shader, "u_center");
+        s_bh_radius = glGetUniformLocation(s_bh_shader, "u_radius");
+        s_bh_right  = glGetUniformLocation(s_bh_shader, "u_cam_right");
+        s_bh_up     = glGetUniformLocation(s_bh_shader, "u_cam_up");
+        s_bh_color  = glGetUniformLocation(s_bh_shader, "u_color");
     }
 
     /* --- Supernova shaders --- */
@@ -1523,6 +1546,13 @@ void render_frame(const float view[16], const float proj[16],
         glDisable(GL_BLEND);
     }
 
+    /* ------------------------------------------------------------------ 2.7. Nebulae (volumetric) */
+    /* Real-position volumetric clouds; depth-tested against opaque geometry so
+     * planets/stars occlude or embed correctly. Drawn camera-relative. */
+    nebula_render(vp_camrel, cam_right, cam_up, cam_fwd, g_cam.pos,
+                  tanf(FOV * 0.5f * (float)(PI / 180.0)), aspect,
+                  WIN_W, WIN_H);
+
     /* ------------------------------------------------------------------ 2.75. Supernova cloud + core */
     if (sn_count > 0 && s_supernova_cloud_shader) {
         glUseProgram(s_supernova_cloud_shader);
@@ -1723,6 +1753,7 @@ void render_frame(const float view[16], const float proj[16],
     int *dot_stars = s_rs_dot_stars, *dot_planets = s_rs_dot_planets, *dot_moons = s_rs_dot_moons;
     for (int i = 0; i < g_nbodies; i++) {
         if (!g_bodies[i].alive) continue;
+        if (g_bodies[i].is_black_hole) continue;       /* drawn by the BH pass */
         if (info[i].dcam >= NEAR_DOT_DIST) continue;   /* far → cheap pass below */
         if      (g_bodies[i].is_star)       dot_stars  [dot_ns++] = i;
         else if (g_bodies[i].parent < 0 ||
@@ -1908,6 +1939,7 @@ void render_frame(const float view[16], const float proj[16],
         for (int i = 0; i < g_nbodies; i++) {
             Body *b = &g_bodies[i];
             if (!b->alive || !info[i].show) continue;     /* spheres drawn elsewhere */
+            if (b->is_black_hole) continue;               /* drawn by the BH pass */
             if (info[i].dcam < NEAR_DOT_DIST) continue;    /* near → handled above */
 
             float f = b->is_star ? 1.0f : system_dot_fade_for_body(i);
@@ -1999,6 +2031,7 @@ void render_frame(const float view[16], const float proj[16],
         for (int i = 0; i < g_nbodies; i++) {
             if (!g_bodies[i].alive) continue;
             if (!g_bodies[i].is_star) continue;
+            if (g_bodies[i].is_black_hole) continue;   /* no corona; BH pass below */
             /* Phase 3: skip the glare billboard for stars whose corona is
              * sub-pixel — at galaxy scale that is the overwhelming majority, and
              * each one is a full draw call + 4 uniform updates.  Below
@@ -2027,6 +2060,54 @@ void render_frame(const float view[16], const float proj[16],
             glUniform3f(s_gl_center, rx, ry, rz);
             glUniform1f(s_gl_radius, radius);
             glUniform3f(s_gl_color,
+                        g_bodies[i].col[0], g_bodies[i].col[1], g_bodies[i].col[2]);
+            glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+        }
+
+        glBindVertexArray(0);
+        glDepthFunc(GL_LESS);
+        glDepthMask(GL_TRUE);
+        glDisable(GL_BLEND);
+    }
+
+    /* ------------------------------------------------------------------ 6.4. Black holes
+     * Shadow + accretion disk billboards, alpha-blended (the shadow is opaque
+     * so it occludes the background; the disk/ring write HDR-bright colour that
+     * bloom turns into a glow).  Depth-tested so a nearer body occludes the BH;
+     * distant ones are scaled toward the camera to stay on screen, like glare. */
+    if (s_bh_shader) {
+        const float BH_MAX_DIST = 1500.0f;
+
+        glUseProgram(s_bh_shader);
+        glUniformMatrix4fv(s_bh_vp, 1, GL_FALSE, vp_camrel);
+        glUniform3f(s_bh_right, cam_right[0], cam_right[1], cam_right[2]);
+        glUniform3f(s_bh_up,    cam_up[0],    cam_up[1],    cam_up[2]);
+
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glDepthMask(GL_FALSE);
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LEQUAL);
+        glBindVertexArray(s_sphere_vao);
+
+        for (int i = 0; i < g_nbodies; i++) {
+            if (!g_bodies[i].alive || !g_bodies[i].is_black_hole) continue;
+
+            float rx = (float)(g_bodies[i].pos[0] * RS - g_cam.pos[0]);
+            float ry = (float)(g_bodies[i].pos[1] * RS - g_cam.pos[1]);
+            float rz = (float)(g_bodies[i].pos[2] * RS - g_cam.pos[2]);
+            if (rx*cam_fwd[0] + ry*cam_fwd[1] + rz*cam_fwd[2] < 0.0f) continue;
+
+            float dist   = sqrtf(rx*rx + ry*ry + rz*rz);
+            float radius = (float)(g_bodies[i].radius * RS);
+            if (dist > BH_MAX_DIST && dist > 1e-6f) {
+                float s = BH_MAX_DIST / dist;
+                rx *= s; ry *= s; rz *= s; radius *= s;
+            }
+
+            glUniform3f(s_bh_center, rx, ry, rz);
+            glUniform1f(s_bh_radius, radius);
+            glUniform3f(s_bh_color,
                         g_bodies[i].col[0], g_bodies[i].col[1], g_bodies[i].col[2]);
             glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
         }

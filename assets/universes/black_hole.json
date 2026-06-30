@@ -1,0 +1,48 @@
+// OpenMultiVerse — "Black Hole" demo.
+// A ~4 million solar-mass black hole (Sagittarius A*-scale) with a cluster of
+// bodies on tight, fast, eccentric orbits, like the S-stars around the galactic
+// centre. The black hole renders as a dark event-horizon shadow ringed by a
+// bright accretion disk; orbiting bodies are whipped around at a large fraction
+// of light speed by Newtonian gravity.
+{
+  "laws": {
+    "G": 6.674e-11, "softening": 1e5, "time_scale": 1.0,
+    "force_exp": 2.0, "lambda": 0.0, "pn_factor": 0.0, "c_light": 2.99792458e8
+  },
+  "bodies": [
+    {
+      "name": "Gargantua",
+      "type": "black_hole",
+      "mass": 7.96e36,
+      "radius_km": 11800000.0,
+      "color": [1.0, 0.55, 0.25],
+      "pos_ly": [0.0, 0.0, 0.0]
+    },
+
+    {
+      "name": "S1", "type": "planet", "parent": "Gargantua",
+      "mass": 1.9e27, "radius_km": 70000.0, "color": [0.62, 0.80, 1.0],
+      "keplerian": { "a": 3.2, "e": 0.34, "i": 14.0, "Omega": 35.0, "omega_tilde": 80.0, "L": 10.0 }
+    },
+    {
+      "name": "S2", "type": "planet", "parent": "Gargantua",
+      "mass": 5.7e26, "radius_km": 58000.0, "color": [1.0, 0.86, 0.55],
+      "keplerian": { "a": 5.0, "e": 0.55, "i": 48.0, "Omega": 120.0, "omega_tilde": 200.0, "L": 140.0 }
+    },
+    {
+      "name": "S3", "type": "planet", "parent": "Gargantua",
+      "mass": 1.0e27, "radius_km": 62000.0, "color": [1.0, 0.55, 0.40],
+      "keplerian": { "a": 7.5, "e": 0.20, "i": 95.0, "Omega": 210.0, "omega_tilde": 20.0, "L": 250.0 }
+    },
+    {
+      "name": "S4", "type": "planet", "parent": "Gargantua",
+      "mass": 8.0e26, "radius_km": 55000.0, "color": [0.75, 0.95, 0.85],
+      "keplerian": { "a": 11.0, "e": 0.62, "i": 130.0, "Omega": 300.0, "omega_tilde": 160.0, "L": 60.0 }
+    },
+    {
+      "name": "S5", "type": "planet", "parent": "Gargantua",
+      "mass": 1.5e27, "radius_km": 80000.0, "color": [0.85, 0.78, 1.0],
+      "keplerian": { "a": 16.0, "e": 0.30, "i": 25.0, "Omega": 75.0, "omega_tilde": 110.0, "L": 300.0 }
+    }
+  ]
+}

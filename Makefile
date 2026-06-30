@@ -18,7 +18,12 @@ SRCDIR  = src
 SRCS    = $(wildcard $(SRCDIR)/*.c)
 OBJS    = $(SRCS:.c=.o)
 
-CFLAGS  = -Wall -Wextra -O2 -std=c99 -I$(SRCDIR) -fopenmp
+# -MMD -MP emits a .d file per object listing the headers it #includes, so
+# editing a header (e.g. src/body.h) forces every dependent .c to recompile.
+# Without this, make's default rule only tracks the .c -> .o edge and a struct
+# layout change in a header silently leaves stale objects compiled against the
+# old layout — a memory-corruption / infinite-loop footgun.
+CFLAGS  = -Wall -Wextra -O2 -std=c99 -I$(SRCDIR) -fopenmp -MMD -MP
 
 IMGUI      ?= 0
 CIMGUI_DIR  = extern/cimgui
@@ -112,7 +117,11 @@ $(SRCDIR)/%.o: $(SRCDIR)/%.c
 	$(CXX) $(IMGUI_CXXFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(SRCDIR)/*.o $(TARGET) $(TARGET).exe resource.o catalogtool catalogtool.exe
+	rm -f $(SRCDIR)/*.o $(SRCDIR)/*.d $(TARGET) $(TARGET).exe resource.o catalogtool catalogtool.exe
 	rm -f $(CIMGUI_DIR)/*.o $(CIMGUI_DIR)/imgui/*.o $(CIMGUI_DIR)/imgui/backends/*.o
+
+# Pull in the auto-generated header dependencies (.d files from -MMD). The leading
+# '-' suppresses errors on the first build before any .d files exist.
+-include $(OBJS:.o=.d)
 
 .PHONY: all clean

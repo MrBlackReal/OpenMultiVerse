@@ -12,6 +12,7 @@
 #include "camera.h"
 #include "body.h"
 #include "post.h"
+#include "nebula.h"
 #include <math.h>
 #include <string.h>
 #include <ctype.h>
@@ -175,13 +176,52 @@ static void teleport_to_body(int idx)
     cam_fly_to(target, yaw, pitch);
 }
 
+/* Fly to nebula `i`, framing it from outside at a few radii out and looking at
+ * its centre. Nebulae are real world objects now, so this is a real teleport
+ * (same eased flight as teleport_to_body); from the framed view you can fly the
+ * rest of the way in to be enveloped by the volume. */
+static void teleport_to_nebula(int i)
+{
+    double pos[3];
+    nebula_position(i, pos);
+    double radius    = nebula_radius_au(i);
+    double view_dist = fmax(radius * 2.5, 1.0);
+
+    double dx = 1.0, dy = -0.32, dz = 1.0;
+    double dl = sqrt(dx*dx + dy*dy + dz*dz);
+    dx /= dl; dy /= dl; dz /= dl;
+
+    double target[3] = {
+        pos[0] - dx * view_dist,
+        pos[1] - dy * view_dist,
+        pos[2] - dz * view_dist,
+    };
+    float yaw   = (float)(atan2(dz, dx) * 180.0 / PI);
+    float pitch = (float)(asin(dy) * 180.0 / PI);
+    cam_fly_to(target, yaw, pitch);
+}
+
 /* Render the "Navigate" tab: a name search over every live body with a
- * click-to-teleport result list. */
+ * click-to-teleport result list, plus a catalogue-nebula list that flies the
+ * camera to the chosen nebula. */
 static void menu_render_navigate(void)
 {
     static char s_query[64] = "";
 
-    igTextDisabled("Search for a star or object, then click to jump to it.");
+    igTextDisabled("Search for a star or object to jump to, "
+                   "or pick a nebula to fly to.");
+    igSpacing();
+
+    /* Nebulae are real world objects: list them all (only a handful) and fly
+     * to the one clicked, framed from outside. */
+    if (igCollapsingHeader_TreeNodeFlags("Nebulae (fly to)", 0)) {
+        for (int i = 0; i < nebula_count(); i++) {
+            char label[96];
+            snprintf(label, sizeof(label), "~ %s##neb%d", nebula_name(i), i);
+            if (igSelectable_Bool(label, false, 0, (ImVec2_c){ 0.0f, 0.0f }))
+                teleport_to_nebula(i);
+        }
+    }
     igSpacing();
     igPushItemWidth(-1.0f);
     igInputTextWithHint("##search", "type a name (e.g. Proxima, Jupiter, Kepler)",
@@ -348,6 +388,24 @@ int menu_render(int current_preset, int *laws_changed, const char **out_load_pat
                     igSetItemTooltip("How strongly the glow is added back.");
                     igPopItemWidth();
                     if (ch) post_set_bloom(en, th, in);
+                }
+
+                igSeparator();
+                {
+                    int   nen, nst; float nde;
+                    nebula_get_params(&nen, &nde, &nst);
+                    bool  nb = nen;
+                    int   nch = 0;
+                    if (igCheckbox("Nebulae", &nb)) { nen = nb; nch = 1; }
+                    igSetItemTooltip("Real-catalogue volumetric nebulae you can fly into.");
+                    igPushItemWidth(igGetContentRegionAvail().x * 0.55f);
+                    nch |= igSliderFloat("Nebula density", &nde, 0.0f, 2.0f, "%.2f", 0);
+                    igSetItemTooltip("Cloud opacity / brightness.");
+                    nch |= igSliderInt("Nebula steps", &nst, 4, 48, "%d", 0);
+                    igSetItemTooltip("Raymarch quality vs. performance. Distant nebulae "
+                                     "use fewer steps automatically.");
+                    igPopItemWidth();
+                    if (nch) nebula_set_params(nen, nde, nst);
                 }
             }
 

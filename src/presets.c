@@ -15,6 +15,10 @@ static const UniversePreset s_presets[] = {
       "exoplanets at their true light-year positions (~16,000 bodies), running "
       "in real time. Rebuild a smaller slice with "
       "tools/build_known_universe.py --max-systems N." },
+    { "Black Hole", "assets/universes/black_hole.json",
+      "A ~4 million solar-mass black hole — dark event-horizon shadow ringed by "
+      "a glowing accretion disk, with bodies whipping around it at relativistic "
+      "speeds." },
     { "Strong Gravity", "assets/universes/strong_gravity.json",
       "G is ~4x stronger — orbits are much faster and tighter." },
     { "Inverse-Cube Forces", "assets/universes/inverse_cube.json",

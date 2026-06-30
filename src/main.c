@@ -38,6 +38,7 @@
 #include "physics.h"
 #include "camera.h"
 #include "starfield.h"
+#include "nebula.h"
 #include "trails.h"
 #include "labels.h"
 #include "render.h"
@@ -338,6 +339,8 @@ static void init_runtime_world(void) {
     cam_reset();
     boot_log("Initializing starfield");
     starfield_init();
+    boot_log("Initializing nebulae");
+    nebula_init();
     boot_log("Initializing trails");
     trails_gl_init();
     boot_log("Initializing renderer");
@@ -366,6 +369,7 @@ static void shutdown_runtime_world(void) {
     render_shutdown();
     labels_shutdown();
     trails_gl_shutdown();
+    nebula_shutdown();
     starfield_shutdown();
     universe_shutdown();
 }

@@ -14,6 +14,8 @@ typedef struct {
     double fast_acc[3];    /* m/s^2 dominant parent force, RESPA inner step */
     float  col[3];         /* RGB display colour              */
     int    is_star;
+    int    is_black_hole;  /* 1 = render as accretion disk + shadow (no glare/   */
+                           /* sphere). Also is_star=1 so it acts as a system root */
     int    alive;           /* 0 = removed/absorbed; index kept stable */
     int    parent;         /* index of parent body (-1 = none)                  */
                            /* stars: -1; planets: star idx; moons: planet idx   */
