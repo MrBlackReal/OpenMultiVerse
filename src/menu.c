@@ -11,6 +11,7 @@
 #include "universe.h"
 #include "camera.h"
 #include "body.h"
+#include "post.h"
 #include <math.h>
 #include <string.h>
 #include <ctype.h>
@@ -162,11 +163,16 @@ static void teleport_to_body(int idx)
     double dl = sqrt(dx*dx + dy*dy + dz*dz);
     dx /= dl; dy /= dl; dz /= dl;
 
-    g_cam.pos[0] = tx - dx * view_dist;
-    g_cam.pos[1] = ty - dy * view_dist;
-    g_cam.pos[2] = tz - dz * view_dist;
-    g_cam.yaw   = (float)(atan2(dz, dx) * 180.0 / PI);
-    g_cam.pitch = (float)(asin(dy) * 180.0 / PI);
+    double target[3] = {
+        tx - dx * view_dist,
+        ty - dy * view_dist,
+        tz - dz * view_dist,
+    };
+    float yaw   = (float)(atan2(dz, dx) * 180.0 / PI);
+    float pitch = (float)(asin(dy) * 180.0 / PI);
+
+    /* Fly there with an eased animation rather than snapping. */
+    cam_fly_to(target, yaw, pitch);
 }
 
 /* Render the "Navigate" tab: a name search over every live body with a
@@ -320,6 +326,28 @@ int menu_render(int current_preset, int *laws_changed, const char **out_load_pat
                     g_laws.pn_factor  = 0.0;
                     g_laws.gravity_isolation = LAWS_DEFAULT_GRAV_ISOLATION;
                     if (laws_changed) *laws_changed = 1;
+                }
+            }
+
+            igSpacing();
+            /* ---- Visuals ------------------------------------------------ */
+            if (igCollapsingHeader_TreeNodeFlags("Visuals", 0)) {
+                if (!post_available()) {
+                    igTextDisabled("Bloom unavailable (shader load failed).");
+                } else {
+                    int   en; float th, in;
+                    post_get_bloom(&en, &th, &in);
+                    bool  b = en;
+                    int   ch = 0;
+                    if (igCheckbox("Bloom", &b)) { en = b; ch = 1; }
+                    igSetItemTooltip("HDR glow around bright stars and glare.");
+                    igPushItemWidth(igGetContentRegionAvail().x * 0.55f);
+                    ch |= igSliderFloat("Bloom threshold", &th, 0.0f, 2.0f, "%.2f", 0);
+                    igSetItemTooltip("Brightness above which pixels start to glow.");
+                    ch |= igSliderFloat("Bloom intensity", &in, 0.0f, 3.0f, "%.2f", 0);
+                    igSetItemTooltip("How strongly the glow is added back.");
+                    igPopItemWidth();
+                    if (ch) post_set_bloom(en, th, in);
                 }
             }
 

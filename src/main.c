@@ -51,6 +51,7 @@
 #include "audio.h"
 #include "presets.h"
 #include "menu.h"
+#include "post.h"
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -341,6 +342,8 @@ static void init_runtime_world(void) {
     trails_gl_init();
     boot_log("Initializing renderer");
     render_init();
+    boot_log("Initializing post-processing");
+    post_init();
     boot_log("Initializing rings");
     rings_init(s_universe_path);
     boot_log("Initializing asteroid belts");
@@ -961,7 +964,16 @@ int main(int argc, char **argv) {
             handle_event(&e, dt, &running);
         }
 
-        if (!s_pause_menu_open && !g_inspect_orbit_mode)
+        /* Navigate-teleport fly animation. Any manual move key cancels it so
+         * the user is never locked out of control mid-flight. */
+        if (cam_fly_active()) {
+            if (s_key_w || s_key_s || s_key_a || s_key_d || s_key_q || s_key_e)
+                cam_fly_cancel();
+            else
+                cam_fly_update(dt);
+        }
+
+        if (!cam_fly_active() && !s_pause_menu_open && !g_inspect_orbit_mode)
             camera_move(dt);
 
         /* Physics — RESPA hierarchical integrator */
@@ -1068,8 +1080,18 @@ int main(int argc, char **argv) {
             mat4_lookAt(view, eye, ctr, up);
         }
 
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        /* Bloom: render the scene into an HDR target, then composite the glow
+         * to the screen. When disabled/unavailable these are no-ops and we draw
+         * straight to the default framebuffer. */
+        if (post_enabled()) {
+            post_begin();
+        } else {
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glViewport(0, 0, WIN_W, WIN_H);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        }
         render_frame(view, proj, view_rot, dt);
+        post_end();
         ui_render();
 
         /* Multiverse overlay (drawn last, on top). Returns a preset to switch

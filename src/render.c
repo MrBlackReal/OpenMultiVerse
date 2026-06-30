@@ -511,6 +511,41 @@ static int *s_rs_occluders = NULL;
 static int  s_rs_nocc      = 0;
 
 /*
+ * star_dot_pixel_size — point size (px) for a body's centre dot.
+ *
+ * Stars vary in size by apparent magnitude so the field reads like real sky:
+ * bright/near/luminous stars draw as larger points, faint ones small.  The
+ * luminosity proxy is (R/R☉)² (the star's temperature is already conveyed by
+ * its colour); apparent magnitude is
+ *     m = M☉ − 2.5·log10(L/L☉) + 5·log10(d_pc) − 5,
+ * and brighter (smaller m) maps to a larger point, clamped to a sane range.
+ * `dcam` is the true camera distance in AU (render units), so far stars are
+ * sized by their real distance even though their draw position is clamped.
+ * Non-stars get a fixed small dot.
+ */
+static float star_dot_pixel_size(int idx, float dcam)
+{
+    const float BASE_DOT_PX = 2.3f;
+    if (!g_bodies[idx].is_star) return BASE_DOT_PX;
+
+    const double R_SUN_M   = 6.957e8;
+    const double AU_PER_PC = 206264.806;
+    const double M_SUN     = 4.83;
+
+    double L = (double)g_bodies[idx].radius / R_SUN_M;
+    L = L * L;
+    if (!(L > 1e-6)) L = 1e-6;
+    double d_pc = (double)dcam / AU_PER_PC;
+    if (!(d_pc > 1e-9)) d_pc = 1e-9;
+
+    double m = M_SUN - 2.5 * log10(L) + 5.0 * log10(d_pc) - 5.0;
+    float size = (float)(7.0 - 0.45 * (m + 1.0));   /* m≈−1 → 7px ; m≈+12 → ~1px */
+    if (size < 1.4f) size = 1.4f;
+    if (size > 7.0f) size = 7.0f;
+    return size;
+}
+
+/*
  * body_point_star_glare_visibility — compute how much the dot for body_idx
  * is occluded/dimmed by other stars' glare coronae.
  *
@@ -833,11 +868,14 @@ void render_init(void) {
         glUseProgram(0);
     }
 
-    /* --- Dot shader (shared with starfield: color.vert / color.frag) --- */
-    s_dot_shader = gl_shader_load("assets/shaders/color.vert",
+    /* --- Dot shader: star_dot.vert adds a per-point size (attribute 2) so the
+     * dot field can convey stellar magnitude; color.frag rounds the sprite.
+     * Independent program from the background starfield (which keeps color.vert),
+     * so this does not change the skybox. --- */
+    s_dot_shader = gl_shader_load("assets/shaders/star_dot.vert",
                                   "assets/shaders/color.frag");
     if (!s_dot_shader) {
-        fprintf(stderr, "[Render] color shader failed\n");
+        fprintf(stderr, "[Render] star_dot shader failed\n");
         return;
     }
     s_dot_vp = glGetUniformLocation(s_dot_shader, "u_vp");
@@ -851,16 +889,19 @@ void render_init(void) {
     }
     s_impact_particle_vp = glGetUniformLocation(s_impact_particle_shader, "u_vp");
 
-    /* Dynamic dot VBO: layout = (x,y,z, r,g,b,a) × MAX_BODIES.
+    /* Dynamic dot VBO: layout = (x,y,z, r,g,b,a, size) × MAX_BODIES.
      * GL_DYNAMIC_DRAW since it is rebuilt every frame from live body positions. */
     s_dot_vao = gl_vao_create();
-    s_dot_vbo = gl_vbo_create(MAX_BODIES * 7 * sizeof(float),
+    s_dot_vbo = gl_vbo_create(MAX_BODIES * 8 * sizeof(float),
                                NULL, GL_DYNAMIC_DRAW);
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 7*sizeof(float), (void*)0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8*sizeof(float), (void*)0);
     glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 7*sizeof(float),
+    glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 8*sizeof(float),
                           (void*)(3*sizeof(float)));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, 8*sizeof(float),
+                          (void*)(7*sizeof(float)));
     glBindVertexArray(0);
 
     /* Impact particle VBO: layout = (x,y,z, r,g,b,a, size) per particle */
@@ -1194,7 +1235,7 @@ static void render_scratch_ensure(int n)
     s_rs_dot_overlap_alpha = realloc(s_rs_dot_overlap_alpha, (size_t)c * sizeof(float));
     s_rs_dot_candidate     = realloc(s_rs_dot_candidate,     (size_t)c * sizeof(int));
     s_rs_dot_vis           = realloc(s_rs_dot_vis,           (size_t)c * sizeof(int));
-    s_rs_dot_data          = realloc(s_rs_dot_data,     (size_t)c * 7 * sizeof(float));
+    s_rs_dot_data          = realloc(s_rs_dot_data,     (size_t)c * 8 * sizeof(float));
     s_rs_occluders         = realloc(s_rs_occluders,        (size_t)c * sizeof(int));
     if (!s_rs_info || !s_rs_body_px || !s_rs_dot_order || !s_rs_dot_stars ||
         !s_rs_dot_planets || !s_rs_dot_moons || !s_rs_dot_sx || !s_rs_dot_sy ||
@@ -1838,13 +1879,14 @@ void render_frame(const float view[16], const float proj[16],
                     bx *= s; by *= s; bz *= s;
                 }
             }
-            dot_data[dot_count*7+0] = bx;
-            dot_data[dot_count*7+1] = by;
-            dot_data[dot_count*7+2] = bz;
-            dot_data[dot_count*7+3] = b->col[0];
-            dot_data[dot_count*7+4] = b->col[1];
-            dot_data[dot_count*7+5] = b->col[2];
-            dot_data[dot_count*7+6] = f;
+            dot_data[dot_count*8+0] = bx;
+            dot_data[dot_count*8+1] = by;
+            dot_data[dot_count*8+2] = bz;
+            dot_data[dot_count*8+3] = b->col[0];
+            dot_data[dot_count*8+4] = b->col[1];
+            dot_data[dot_count*8+5] = b->col[2];
+            dot_data[dot_count*8+6] = f;
+            dot_data[dot_count*8+7] = star_dot_pixel_size(i, info[i].dcam);
             dot_count++;
         }
     }
@@ -1881,13 +1923,14 @@ void render_frame(const float view[16], const float proj[16],
                     bx *= s; by *= s; bz *= s;
                 }
             }
-            dot_data[dot_count*7+0] = bx;
-            dot_data[dot_count*7+1] = by;
-            dot_data[dot_count*7+2] = bz;
-            dot_data[dot_count*7+3] = b->col[0];
-            dot_data[dot_count*7+4] = b->col[1];
-            dot_data[dot_count*7+5] = b->col[2];
-            dot_data[dot_count*7+6] = f;
+            dot_data[dot_count*8+0] = bx;
+            dot_data[dot_count*8+1] = by;
+            dot_data[dot_count*8+2] = bz;
+            dot_data[dot_count*8+3] = b->col[0];
+            dot_data[dot_count*8+4] = b->col[1];
+            dot_data[dot_count*8+5] = b->col[2];
+            dot_data[dot_count*8+6] = f;
+            dot_data[dot_count*8+7] = star_dot_pixel_size(i, info[i].dcam);
             dot_count++;
         }
     }
@@ -1901,19 +1944,24 @@ void render_frame(const float view[16], const float proj[16],
         if (dot_count > s_dot_vbo_cap) {
             int c = s_dot_vbo_cap ? s_dot_vbo_cap : MAX_BODIES;
             while (c < dot_count) c *= 2;
-            glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)c * 7 * sizeof(float),
+            glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)c * 8 * sizeof(float),
                          NULL, GL_DYNAMIC_DRAW);
             s_dot_vbo_cap = c;
         }
         glBufferSubData(GL_ARRAY_BUFFER, 0,
-                        dot_count * 7 * sizeof(float), dot_data);
-        glDisable(GL_DEPTH_TEST);
+                        dot_count * 8 * sizeof(float), dot_data);
+        /* Depth-test the dots so a background star is occluded by a foreground
+         * planet/star sphere (color.frag writes the same log-depth as phong.frag,
+         * so the comparison is exact).  Depth writes stay OFF: dots must not
+         * occlude each other or the trails/rings/glare drawn afterwards. */
+        glEnable(GL_DEPTH_TEST);
         glDepthMask(GL_FALSE);
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glPointSize(2.5f);
+        /* star_dot.vert sets gl_PointSize per dot (magnitude-driven). */
+        glEnable(GL_PROGRAM_POINT_SIZE);
         glDrawArrays(GL_POINTS, 0, dot_count);
-        glPointSize(1.0f);
+        glDisable(GL_PROGRAM_POINT_SIZE);
         glDisable(GL_BLEND);
         glDepthMask(GL_TRUE);
         glEnable(GL_DEPTH_TEST);

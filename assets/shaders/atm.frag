@@ -78,13 +78,28 @@ void main() {
      * (the camera itself), so use oc2 rather than the infinite-line p2. */
     float p    = sqrt(b > 0.0 ? oc2 : p2);
     float norm = clamp((p - R) / (R_atm - R), 0.0, 1.0);
-    float glow = pow(1.0 - norm, 3.0);
+    /* Broad power-law glow plus a tighter term for a brighter limb line. */
+    float glow = pow(1.0 - norm, 3.0) + 0.35 * pow(1.0 - norm, 9.0);
 
-    /* Lit-side boost: outward normal at atmosphere hit point vs. sun dir */
+    /* Scattering model:
+     *   sun_dot  — illumination of the limb point (lit side > 0)
+     *   day      — smooth day/night with a soft terminator
+     *   twilight — scattering peaks where the sun grazes the limb (sunset band)
+     *   forward  — forward-scatter halo when looking toward the star through the
+     *              shell, i.e. a bright ring when the star is behind the planet */
+    vec3  sun_dir = normalize(u_sun_rel);
     vec3  hit_n   = normalize(u_oc + t_hit * ray_dir);
-    float sun_dot = dot(hit_n, normalize(u_sun_rel));
-    float lit     = 0.15 + 0.85 * clamp(sun_dot, 0.0, 1.0);
+    float sun_dot = dot(hit_n, sun_dir);
 
+    float day      = clamp(sun_dot * 1.2 + 0.1, 0.0, 1.0);
+    float twilight = pow(clamp(1.0 - abs(sun_dot) * 2.2, 0.0, 1.0), 1.5);
+    float forward  = pow(clamp(dot(ray_dir, sun_dir), 0.0, 1.0), 6.0);
+
+    /* Cool day tint shifts toward a warm sunset hue through the twilight band. */
+    vec3 sunset = mix(u_atm_color, vec3(1.0, 0.5, 0.25), 0.85);
+    vec3 col    = mix(u_atm_color, sunset, twilight);
+
+    float lit   = 0.10 + 0.90 * day + 0.70 * forward;
     float alpha = glow * u_atm_intensity * lit;
     if (alpha < 0.003) discard;
 
@@ -102,5 +117,5 @@ void main() {
     float eye_depth  = t_atm_back * dot(ray_dir, u_cam_fwd);
     gl_FragDepth = log2(eye_depth + 1.0) / log2(FAR + 1.0);
 
-    frag_color = vec4(u_atm_color * alpha, alpha);
+    frag_color = vec4(col * alpha, alpha);
 }
