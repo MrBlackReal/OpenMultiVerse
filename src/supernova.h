@@ -36,5 +36,13 @@ void supernova_reset(void);
 void supernova_step(double dt);
 int supernova_try_trigger(int star_a, int star_b, double rel_speed,
                           double hit_t, double frame_dt);
+
+/* Detonate a single star in place (end-of-life core collapse, or the gentle
+ * planetary-nebula puff of a low-mass star). Retires the star and spawns the
+ * appropriate remnant body — black hole, neutron star, or white dwarf — by
+ * progenitor mass, scaling the blast so a low-mass death reads as a soft
+ * nebula. Returns the new remnant body index (>0) on success, 0 on failure.
+ * Used by the stellar lifecycle (lifecycle.c). */
+int supernova_detonate(int star_idx);
 int supernova_render_events(SupernovaRenderEvent *out, int max_events,
                             const double cam_pos[3]);

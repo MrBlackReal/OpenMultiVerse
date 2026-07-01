@@ -21,3 +21,21 @@ int  post_enabled(void);    /* available AND turned on */
 
 void post_get_bloom(int *enabled, float *threshold, float *intensity);
 void post_set_bloom(int enabled, float threshold, float intensity);
+
+/* Tonemap mode: 0 = off (legacy linear), 1 = ACES filmic, 2 = Reinhard.
+ * exposure is a linear multiplier applied before the curve (tonemap on). */
+void post_get_tonemap(int *mode, float *exposure);
+void post_set_tonemap(int mode, float exposure);
+
+/* Lens optics, all opt-in (0 = no effect):
+ *   auto_exposure — adapt exposure to scene luminance (multiplies exposure).
+ *   chromatic     — lateral chromatic aberration strength.
+ *   vignette      — corner darkening, 0..1. */
+void post_get_optics(int *auto_exposure, float *chromatic, float *vignette);
+void post_set_optics(int auto_exposure, float chromatic, float vignette);
+
+/* Relativistic optics for this frame (beta 0 = off). Set per frame from the
+ * camera's actual velocity; applied as screen-space aberration + Doppler shift.
+ * (cx, cy) is the heading point in UV (0.5, 0.5 = look axis) — the camera's
+ * velocity vector projected to screen space, toward which the field bunches. */
+void post_set_relativistic(float beta, float cx, float cy);

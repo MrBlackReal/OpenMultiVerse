@@ -17,6 +17,11 @@ void inspect_exit_orbit(void);
 
 void inspect_pick_center(const float vp_camrel[16], const BodyRenderInfo *info);
 int  inspect_begin_orbit(void);
+
+/* Programmatically focus the orbit camera on a specific body (e.g. follow a
+ * supernova remnant after the progenitor it was orbiting died). Enters inspect
+ * + orbit mode targeting idx from the current camera position. */
+void inspect_focus_body(int idx);
 void inspect_orbit_mouse(int dx, int dy, float sens_deg_per_px);
 void inspect_orbit_zoom(int wheel_y);
 void inspect_orbit_update(float dt);

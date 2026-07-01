@@ -4,6 +4,19 @@
 #pragma once
 #include "common.h"
 
+/* Stellar lifecycle phase. Drives radius/colour and death events.
+ * MAIN_SEQUENCE is 0 so zero-initialised stars start on the main sequence. */
+typedef enum {
+    STAR_MAIN_SEQUENCE = 0,
+    STAR_SUBGIANT,
+    STAR_RED_GIANT,
+    STAR_PLANETARY_NEBULA, /* transient low-mass death puff */
+    STAR_WHITE_DWARF,
+    STAR_NEUTRON_STAR,
+    STAR_BLACK_HOLE_REMNANT,
+    STAR_DEAD             /* source star retired into a supernova remnant body */
+} StarPhase;
+
 typedef struct {
     char   name[32];
     double mass;           /* kg                              */
@@ -16,6 +29,23 @@ typedef struct {
     int    is_star;
     int    is_black_hole;  /* 1 = render as accretion disk + shadow (no glare/   */
                            /* sphere). Also is_star=1 so it acts as a system root */
+    float  agn_activity;   /* 0 = quiet hole; >0 = active quasar/AGN: scales     */
+                           /* disk brightness + drives the relativistic jets     */
+    float  accretion_disk; /* accretion-disk strength (0 = none). A ring-like    */
+                           /* element decoupled from is_black_hole so a hole can  */
+                           /* be bare or dressed; default on for BH/quasar types  */
+    float  dust_torus;     /* obscuring dust-torus strength (0 = none): the outer */
+                           /* AGN doughnut that hides the core when edge-on       */
+
+    /* Accretion state (black holes; evolved by accretion.c on the stellar
+     * clock). agn_activity above is the Eddington ratio, now an OUTPUT of this
+     * model rather than a fixed authored tag. See accretion.h. */
+    double gas_reservoir;   /* kg of fuel left to accrete (0 = starved)           */
+    double mdot;            /* current accretion rate, kg/s                       */
+    double eddington_ratio; /* L / L_edd (mirrors agn_activity, unclamped)        */
+    double spin_a;          /* dimensionless Kerr spin a* (signed: +prograde),    */
+                            /* seeded from rotation_rate, spun up by accretion;   */
+                            /* source of truth for the ISCO in render.c           */
     int    alive;           /* 0 = removed/absorbed; index kept stable */
     int    parent;         /* index of parent body (-1 = none)                  */
                            /* stars: -1; planets: star idx; moons: planet idx   */
@@ -23,6 +53,16 @@ typedef struct {
     double dyn_dt_outer;   /* s, recommended slow-force timestep ceiling         */
     double dyn_dt_inner;   /* s, recommended parent-force timestep ceiling       */
     int    dyn_bucket;     /* 0=slow .. 3=very fast                             */
+
+    /* Stellar lifecycle (stars only; lazily initialised by lifecycle.c).
+     * base_* capture the main-sequence appearance so phases scale/tint off it
+     * and so a phase change is reversible. base_radius<=0 means "not captured
+     * yet" — lifecycle_ensure_base() fills it from the current radius/colour. */
+    int    star_phase;       /* StarPhase                                    */
+    double age_yr;           /* accumulated stellar age in years             */
+    double ms_lifetime_yr;   /* main-sequence lifetime from mass (0=uncomputed)*/
+    double base_radius;      /* main-sequence radius in m (0=not captured)   */
+    float  base_col[3];      /* main-sequence display colour                 */
 
     /* Rotation */
     double obliquity;       /* axial tilt in degrees (from ecliptic north)  */

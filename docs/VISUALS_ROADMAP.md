@@ -63,19 +63,66 @@ saved/loaded in snapshots. A dedicated billboard pass (`render.c`, shaders
 paths. New **"Black Hole"** preset (`assets/universes/black_hole.json`,
 registered in `presets.c`): a ~4e6 M☉ hole with bodies on tight
 relativistic-speed orbits.
-**Visual check (verified):** the first `bh.frag` drew a face-on concentric
-bullseye that didn't read as a black hole. Reworked to the Gargantua / EHT
-idiom — the accretion disk is now an **inclined** elliptical annulus (vertical
-`SQUASH`), the opaque shadow occludes its far half so it only shows as a bright
-**arc lensed over the top**, the near half crosses in front of the shadow, plus
-a tight photon ring and Doppler beaming (approaching side brighter + bluer).
-Confirmed in-build: looks like a black hole. Pure fragment-shader change, no
-uniform/pipeline edits. Tunables at the top of `bh.frag`.
-**TODO later:** real gravitational lensing of the background; neutron-star
-variant; let a massive supernova remnant collapse into one.
-**Risk:** moderate — new body type touches loader/render.
+**Visual check (verified):** evolved through two rewrites. (1) A face-on
+concentric bullseye — scrapped. (2) A camera-facing billboard with a *faked*
+inclination (`SQUASH`) in the Gargantua/EHT idiom — looked right head-on but was
+flat: the disk never tilted as you flew around it (it was a 2D texture, not 3D).
+(3) **Now a full raymarcher** (`bh.frag`): each fragment seeds a real view ray
+and integrates the Schwarzschild null geodesic
+(`acc = -1.5·h²·p/|p|⁵`, horizon = 1 Rs) with adaptive stepping. This gives a
+**view-correct 3D** hole — the accretion disk is a real annulus in the equatorial
+plane (`u_disk_normal`, from the body's obliquity), so orbiting shows it face-on
+(circular ring) → 3/4 (Interstellar over-the-top arc) → edge-on (thin line + full
+lensed halo), all for real. Includes the photon ring (grazing pile-up near
+1.5 Rs), the shadow (swallowed rays), Doppler beaming (approaching side brighter
++ bluer), and a faint lensed procedural starfield that fades to transparent where
+undeflected so the real background shows. The disk itself is **animated FBM
+turbulence with Keplerian differential rotation** (`u_time`, ω ∝ r^-1.5, so it
+winds into trailing spirals — inner fast, outer slow) plus a bright inner rim,
+instead of a static band pattern. Opaque first-surface disk (front-to-back
+correct, no far-side bleed-through). `bh.vert` passes the camera-relative world
+pos for the ray seed; `render.c` passes `u_disk_normal`. **Verified via headless
+offscreen renders** (see memory `headless-render`): clean across face-on / 3/4 /
+edge-on / close-up, 54–79 fps. Tunables at the top of `bh.frag`
+(`DISK_IN/OUT`, `STEPS`, `BOUND`).
+**TODO later:** background lens uses procedural stars (real starfield isn't a
+sampleable texture at BH-draw time); neutron-star variant; let a massive
+supernova remnant collapse into one; the higher-order photon-image substructure
+inside the shadow is faint but slightly aliased on extreme close-ups.
+**Risk:** moderate — new body type touches loader/render; raymarch cost scales
+with on-screen coverage (bounded billboard + adaptive steps keep it ~50+ fps).
 
-## 5. Nebulae 🟡
+## 4b. Quasars / AGN / blazars ✅
+**Goal:** active-galactic-nucleus phenomena on top of the raymarched hole.
+**Done:** new `float agn_activity` on `Body` (0 = quiet, >0 = active). The loader
+accepts `"type": "quasar"` (activity defaults 1.0) and an optional `"activity"`
+on any black hole; persisted in snapshots (`agn_activity`). Four effects, all
+verified via headless renders (`tools/shot.sh`, quiet + quasar + blazar,
+face-on / 3/4 / edge-on / pole-on, ~50–105 fps):
+- **Supercharged disk** (`bh.frag` `u_activity`): active holes get a broader
+  (`disk_out` → 8 Rs), hotter/bluer, HDR-bright blazing disk. `act=0` is
+  bit-identical to the quiet hole.
+- **Frame-dragging photon ring** (`bh.frag` `u_spin`): the limb rotating toward
+  us is brighter/bluer (subtle when quiet, strong when active). Spin sense from
+  `rotation_rate`; closest-approach position tracked for the asymmetry.
+- **Relativistic jets** (`jet.vert`/`jet.frag`, new additive pass in `render.c`):
+  twin collimated beams along the spin axis — flaring cone, two-octave FBM
+  filaments advecting outward, and **travelling shock knots**; per-lobe Doppler
+  beaming (approaching lobe blazes bright + blue, receding one dims). Axis-aligned
+  cylindrical billboard (reuses the sphere-quad VAO); fades out as it goes edge-on
+  so the pole-on view stays clean.
+- **Blazar**: same jets, jet aimed near the viewer → beaming makes the approaching
+  jet outshine everything. Off-axis is dramatic; pole-on shows the face-on disk +
+  beamed core.
+Since expanded into a full composable AGN engine — see UNIFIED_ROADMAP_REFINED
+§1.4 for the authoritative writeup (decoupled `disk`/`torus` ring-elements, dust
+torus, helical jets, physics-based sizing from mass/spin, remnant-collapse disk)
+and the deferred TODOs.
+New presets: `quasar.json`, `blazar.json` (+ existing `black_hole.json`), all in
+`presets.c`.
+**Risk:** low-moderate — additive jet/torus passes + body fields; quiet BH unchanged.
+
+## 5. Nebulae ✅
 **Goal:** real, visitable emission nebulae — far away a backdrop, up close a
 volume you fly through, with no LOD transition.
 **Done:** new `src/nebula.{c,h}` + `nebula.vert`/`nebula.frag`. 18 real
@@ -98,17 +145,41 @@ embed). Menu → Visuals **Nebulae** toggle; Navigate tab **fly-to** each nebula
 **Data vs. artistic:** positions, physical sizes and per-type colours are real;
 only `NEBULA_DENSITY` (opacity/brightness) is exaggerated — real nebulae are far
 too faint to see in colour.
-**Needs visual check + tuning:** `NEBULA_DENSITY`, the raymarch `STEPS`/step
-weighting, and the far-blob look from the solar system. Verify the seamless
-fly-in (no pop crossing the clamp / billboard→fullscreen boundary) and that
-embedded stars read correctly.
+**Visual check (verified):** shape archetypes and the seamless far→near fly-in
+confirmed good in-build.
+**Known follow-ups (deferred):** the volumetric pass costs ~21 fps with a large
+nebula filling the screen — render it at half resolution (≈4× fewer fragments,
+standard for volumetrics) to recover it. **The half-res technique now exists**:
+the supernova cloud renders into a half-res target and composites back via
+`vol_composite.frag` (see below) — the nebula pass can reuse the same
+target/approach. Near clouds read a touch soft; a small `s_density` bump or
+sharper FBM contrast would help. Both adjustable live in Visuals.
 **TODO later:** optional CSV asset (`assets/nebulae.csv`) for user-extensible
 placement; a faint Milky Way band; per-sample depth compositing for embedded
 opaque bodies (currently near-surface depth approximation).
 **Risk:** moderate — volumetric transparency + multi-scale clamping.
 
+## 6. Stellar lifecycle + supernova (galaxy-scale) ✅
+**Done:** `src/lifecycle.{c,h}` evolves a star main-sequence → subgiant → red
+giant → death; high-mass stars core-collapse to a neutron star / black hole, low
+-mass stars puff a planetary nebula to a white dwarf. Driven manually from the
+Inspect panel (Age to next phase / Trigger Supernova) or continuously via a
+**Stellar time** slider (`g_stellar_years_per_sec`, default 0 = manual). Death
+routes through `supernova_detonate()` (`supernova.c`), reusing the existing
+flash/core/cloud blast + remnant machinery.
+**Performance (so it survives the 16k-body "Known Universe"):**
+- Cloud raymarch → **half-res** target + composite (`vol_composite.frag`); the
+  screen-filling explosion no longer drops to single-digit fps.
+- Shock kick is O(N), not O(N²): the reachable set (radius = `shock_speed ×
+  CLOUD_DURATION`, mass-dependent) is gathered once at detonation; subtree
+  mass/push/destroy walk a cached CSR child index. See `docs/SCALING_HANDOFF.md`.
+**Visual check:** needs eyes on a running build — confirm the explosion framerate
+and that nearby bodies are still kicked/destroyed.
+**Risk:** moderate — offscreen volumetric pass + body-lifecycle events.
+
 ---
 
 Order rationale: 1 and 3 are low-risk, high-return shader/VBO tweaks; 2 (bloom)
 is the marquee effect but introduces an offscreen pipeline so it goes after the
-cheap wins; 4 and 5 are additive new content. Re-order on request.
+cheap wins; 4 and 5 are additive new content; 6 adds time evolution and the
+half-res volumetric optimisation the nebula pass can reuse. Re-order on request.

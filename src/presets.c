@@ -19,6 +19,20 @@ static const UniversePreset s_presets[] = {
       "A ~4 million solar-mass black hole — dark event-horizon shadow ringed by "
       "a glowing accretion disk, with bodies whipping around it at relativistic "
       "speeds." },
+    { "Quasar", "assets/universes/quasar.json",
+      "An active galactic nucleus: the same black hole accreting hard, so its "
+      "disk blazes and twin relativistic jets fire along the spin axis." },
+    { "Blazar", "assets/universes/blazar.json",
+      "A quasar with a jet aimed near the viewer — the beamed jet outshines "
+      "everything (fly along the poles to look down the barrel)." },
+    { "Black Hole Zoo", "assets/universes/black_hole_zoo.json",
+      "A gallery of every black-hole look the engine supports — bare "
+      "Schwarzschild, spinning Kerr, stellar-mass, quasar, blazar, radio "
+      "galaxy, and disk/torus-off variants — one per system, scattered in 3D." },
+    { "Microquasar (X-ray binary)", "assets/universes/microquasar.json",
+      "A stellar-mass black hole fed by a giant companion overflowing its Roche "
+      "lobe. Advance Stellar time and watch (Inspect) the donor feed the hole's "
+      "reservoir, sustaining the disk/jets and spinning the hole up." },
     { "Strong Gravity", "assets/universes/strong_gravity.json",
       "G is ~4x stronger — orbits are much faster and tighter." },
     { "Inverse-Cube Forces", "assets/universes/inverse_cube.json",

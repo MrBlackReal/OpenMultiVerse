@@ -396,6 +396,14 @@ int inspect_begin_orbit(void)
     return 1;
 }
 
+void inspect_focus_body(int idx)
+{
+    if (idx < 0 || idx >= g_nbodies || !g_bodies[idx].alive) return;
+    g_inspect_mode = 1;
+    set_orbit_target_from_camera(idx, 0.95);
+    g_inspect_orbit_mode = 1;
+}
+
 void inspect_orbit_mouse(int dx, int dy, float sens_deg_per_px)
 {
     double s = (double)sens_deg_per_px * PI / 180.0;

@@ -49,10 +49,13 @@
 #include "inspect.h"
 #include "collision.h"
 #include "supernova.h"
+#include "lifecycle.h"
+#include "accretion.h"
 #include "audio.h"
 #include "presets.h"
 #include "menu.h"
 #include "post.h"
+#include "loading.h"
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -76,9 +79,11 @@ static int   s_vsync_enabled = 1;
 static float s_music_vol  = 0.6f;
 
 /* ── pause menu ───────────────────────────────────────────────────────────── */
-#define SLIDER_STEP    0.05f
-#define MOUSE_SENS_MIN 0.05f
-#define MOUSE_SENS_MAX 1.0f
+/* Control tunables now live in g_settings (see settings.h); aliased here so the
+ * existing call sites read the live value. */
+#define SLIDER_STEP    (g_settings.slider_step)
+#define MOUSE_SENS_MIN (g_settings.mouse_sens_min)
+#define MOUSE_SENS_MAX (g_settings.mouse_sens_max)
 
 static int s_pause_menu_open = 0;
 static int s_pause_menu_selected = 0;
@@ -117,8 +122,8 @@ static int s_speed_idx = 4;   /* start at 1.0 days/s */
  * Normal range : [0.00001, 200] AU/s  (0.00001 AU/s ≈ walking pace near Earth)
  * Warp range   : [200, 63241] AU/s    (63241 AU/s = 1 ly/s, i.e. full warp)
  * Pressing T clamps the current speed to the warp range and shows "WARP" in HUD. */
-#define WARP_SPEED_MIN_AU    200.0f
-#define WARP_SPEED_MAX_AU  63241.0f
+#define WARP_SPEED_MIN_AU  (g_settings.warp_speed_min_au)
+#define WARP_SPEED_MAX_AU  (g_settings.warp_speed_max_au)
 int s_warp = 0;
 int g_warp = 0;
 
@@ -253,7 +258,7 @@ static double system_cam_dist2(int root, const double cam_m[3]) {
  * systems this close are integrated each frame.  Everything farther is frozen
  * (a far-field dot) — this is what keeps a galaxy-scale universe real-time, and
  * also stops one distant tight exoplanet from capping everyone's timestep. */
-#define ACTIVE_RADIUS_LY 2.0
+#define ACTIVE_RADIUS_LY (g_settings.active_radius_ly)
 
 static void warmup_universe(void) {
     /* A loaded snapshot already holds settled state at a specific instant;
@@ -262,7 +267,7 @@ static void warmup_universe(void) {
         boot_log("Snapshot loaded — skipping warm-up");
         return;
     }
-    const double WARMUP_DT = 365.0 * 2.0 * DAY;
+    const double WARMUP_DT = 365.0 * g_settings.warmup_years * DAY;
     int sys_n = physics_system_count();
     int completed = 0;
 
@@ -271,7 +276,7 @@ static void warmup_universe(void) {
      * exoplanet can need millions of substeps for 730 days).  They warm up
      * lazily if/when you fly to them.  The nearest system is always included so
      * single-system universes still settle. */
-    const double WARMUP_RADIUS_LY = 1.5;
+    const double WARMUP_RADIUS_LY = g_settings.warmup_radius_ly;
     double cam_m[3] = { g_cam.pos[0] * AU, g_cam.pos[1] * AU, g_cam.pos[2] * AU };
     int nearest = -1;
     double nearest_d2 = 1e300, radius_m2 = (WARMUP_RADIUS_LY * LY) * (WARMUP_RADIUS_LY * LY);
@@ -291,6 +296,9 @@ static void warmup_universe(void) {
                     "nearby system%s\n",
             WARMUP_DT / DAY, n_warm, sys_n, sys_n == 1 ? "" : "s");
     fflush(stdout);
+    loading_status("Warming up %d system%s", n_warm, n_warm == 1 ? "" : "s");
+    loading_progress(0.0);
+    loading_tick();
 #ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic)
 #endif
@@ -325,42 +333,77 @@ static void warmup_universe(void) {
             fprintf(stdout, "[Boot] Warm-up progress: %d/%d systems (%s)\n",
                     completed, sys_n, g_bodies[root].name);
             fflush(stdout);
+            /* Only the master thread owns the GL context, so only it may draw
+             * the loading overlay; workers keep integrating meanwhile. */
+#ifdef _OPENMP
+            if (omp_get_thread_num() == 0)
+#endif
+            {
+                loading_status("Warming up systems  %d / %d", completed, n_warm);
+                loading_progress((double)completed / (double)n_warm);
+                loading_tick();
+            }
         }
     }
+    loading_progress(1.0);
+    loading_tick();
     physics_advance_time(WARMUP_DT);
     boot_log("Warm-up complete");
 }
 
 /* ── world init / shutdown ────────────────────────────────────────────────── */
+/* Set a loading-overlay phase: status text + indeterminate sweep + one frame.
+ * Used for the quick GL-init steps, which each run as a single blocking call. */
+static void loading_phase(const char *label) {
+    loading_status("%s", label);
+    loading_indeterminate();
+    loading_tick();
+}
+
 static void init_runtime_world(void) {
     boot_log("Preparing runtime world");
-    universe_load(s_universe_path);
+    loading_begin();
+    loading_phase("Loading universe");
+    universe_load(s_universe_path);   /* drives its own determinate progress */
     boot_log("Resetting camera");
     cam_reset();
+    loading_phase("Generating starfield");
     boot_log("Initializing starfield");
     starfield_init();
+    loading_phase("Placing nebulae");
     boot_log("Initializing nebulae");
     nebula_init();
+    loading_phase("Allocating trails");
     boot_log("Initializing trails");
     trails_gl_init();
+    loading_phase("Initializing renderer");
     boot_log("Initializing renderer");
     render_init();
+    loading_phase("Initializing post-processing");
     boot_log("Initializing post-processing");
     post_init();
+    post_set_tonemap(g_settings.tonemap_mode, g_settings.tonemap_exposure);
+    post_set_optics(g_settings.auto_exposure, g_settings.chromatic_aberration,
+                    g_settings.vignette);
+    loading_phase("Building ring systems");
     boot_log("Initializing rings");
     rings_init(s_universe_path);
+    loading_phase("Building asteroid belts");
     boot_log("Initializing asteroid belts");
     asteroids_init(s_universe_path);
+    loading_phase("Preparing labels");
     boot_log("Initializing labels");
     labels_init();
     boot_log("Initializing build mode");
     build_init();
     boot_log("Initializing inspect mode");
     inspect_init();
+    loading_phase("Building acceleration structures");
     boot_log("Refreshing physics timestep model");
     physics_refresh_timestep_model();
     warmup_universe();
     boot_log("Runtime world ready");
+    loading_end();
 }
 
 static void shutdown_runtime_world(void) {
@@ -485,7 +528,15 @@ static int app_init(void) {
     boot_log("Initializing GLEW");
     glewExperimental = GL_TRUE;
     GLenum err = glewInit();
-    if (err != GLEW_OK) {
+    /* GLEW loads the GL function pointers first, then probes GLX. Under the
+     * offscreen/EGL (surfaceless) driver there is no GLX display, so glewInit()
+     * returns GLEW_ERROR_NO_GLX_DISPLAY *after* the core pointers are already
+     * loaded — harmless for headless rendering, so tolerate just that one. */
+    if (err != GLEW_OK
+#ifdef GLEW_ERROR_NO_GLX_DISPLAY
+        && err != GLEW_ERROR_NO_GLX_DISPLAY
+#endif
+        ) {
         fprintf(stderr, "[Main] GLEW: %s\n", glewGetErrorString(err));
         return 0;
     }
@@ -511,8 +562,11 @@ static int app_init(void) {
 }
 
 static void app_quit(void) {
+    if (settings_dirty())     /* persist only if something changed this session */
+        settings_save();
     audio_shutdown();
     menu_shutdown();
+    loading_shutdown();
     ui_shutdown();
     shutdown_runtime_world();
     SDL_GL_DeleteContext(s_ctx);
@@ -936,8 +990,64 @@ static void camera_move(float dt) {
  *                is what render_frame() uses for all distant geometry. Avoids
  *                float32 cancellation at interstellar distances.
  */
+/* ---- headless screenshot ---------------------------------------------------
+ * Read the default framebuffer (GL_BACK, before the swap) and write a binary
+ * PPM (P6), flipped to top-down.  Used by the --shot path so offscreen renders
+ * can be captured and inspected without a display. */
+static void save_screenshot_ppm(const char *path) {
+    int w = WIN_W, h = WIN_H;
+    if (w < 1 || h < 1) return;
+    unsigned char *px = (unsigned char *)malloc((size_t)w * h * 3);
+    if (!px) return;
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadBuffer(GL_BACK);
+    glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, px);
+    FILE *f = fopen(path, "wb");
+    if (f) {
+        fprintf(f, "P6\n%d %d\n255\n", w, h);
+        for (int y = h - 1; y >= 0; y--)
+            fwrite(px + (size_t)y * w * 3, 1, (size_t)w * 3, f);
+        fclose(f);
+        fprintf(stdout, "[Shot] wrote %s (%dx%d)\n", path, w, h);
+    }
+    free(px);
+}
+
 int main(int argc, char **argv) {
-    (void)argc; (void)argv;
+    /* ---- headless / screenshot CLI ----------------------------------------
+     * --headless           run with SDL's offscreen (EGL surfaceless) driver,
+     *                      no window on the desktop.
+     * --shot PATH          render --frames frames, dump PATH (PPM), then quit.
+     * --frames N           frames to render before the shot (default 6).
+     * --preset PATH        load this universe JSON instead of the default.
+     * --cam x,y,z,yaw,pitch position the camera (AU, degrees) after load.    */
+    const char *shot_path   = NULL;
+    int         shot_frames = 6;
+    int         headless    = 0;
+    int         cam_set     = 0;
+    double      cam_pos[3]  = { 0.0, 0.0, 0.0 };
+    float       cam_yaw = 0.0f, cam_pitch = 0.0f;
+
+    for (int a = 1; a < argc; a++) {
+        if      (!strcmp(argv[a], "--headless")) headless = 1;
+        else if (!strcmp(argv[a], "--shot")    && a + 1 < argc) shot_path   = argv[++a];
+        else if (!strcmp(argv[a], "--frames")  && a + 1 < argc) shot_frames = atoi(argv[++a]);
+        else if (!strcmp(argv[a], "--preset")  && a + 1 < argc)
+            snprintf(s_universe_path, sizeof s_universe_path, "%s", argv[++a]);
+        else if (!strcmp(argv[a], "--cam")     && a + 1 < argc)
+            cam_set = (sscanf(argv[++a], "%lf,%lf,%lf,%f,%f",
+                              &cam_pos[0], &cam_pos[1], &cam_pos[2],
+                              &cam_yaw, &cam_pitch) == 5);
+    }
+    if (shot_frames < 1) shot_frames = 1;
+    if (headless) {
+        setenv("SDL_VIDEODRIVER", "offscreen", 1);  /* EGL surfaceless, no window */
+        setenv("SDL_AUDIODRIVER", "dummy", 1);
+    }
+
+    /* Global settings first — every later macro (FOV, NUM_STARS, …) reads
+     * g_settings, so it must be populated before anything else runs. */
+    settings_load();
 
     if (!app_init()) return 1;
 
@@ -948,12 +1058,24 @@ int main(int argc, char **argv) {
     boot_log("Initializing UI");
     ui_init();
     sync_pause_menu_ui();
+    boot_log("Initializing loading overlay");
+    loading_init(s_win);
     init_runtime_world();
+
+    /* Headless camera override (after the world load, which resets the camera). */
+    if (cam_set) {
+        g_cam.pos[0] = cam_pos[0];
+        g_cam.pos[1] = cam_pos[1];
+        g_cam.pos[2] = cam_pos[2];
+        g_cam.yaw    = cam_yaw;
+        g_cam.pitch  = cam_pitch;
+    }
 
     /* Timing */
     Uint64 freq    = SDL_GetPerformanceFrequency();
     Uint64 prev    = SDL_GetPerformanceCounter();
     int    running = 1;
+    int    frame_no = 0;
 
     while (running) {
         Uint64 now = SDL_GetPerformanceCounter();
@@ -1054,6 +1176,24 @@ int main(int argc, char **argv) {
                 collision_step(effective_sim_dt);
                 asteroids_step(effective_sim_dt);
                 rings_tick(effective_sim_dt);
+                /* Stellar evolution runs on its own clock (years/real-second),
+                 * decoupled from the capped orbital dt — so a star can age and
+                 * die without ever speeding up the integrator. dt is the real
+                 * frame time; no-op unless auto-aging is enabled. */
+                lifecycle_step(dt);
+                /* Black-hole accretion runs on the same stellar clock: quasars
+                 * drain their gas reservoir → Ṁ → Eddington ratio (activity) and
+                 * grow, so they visibly fade over cosmic time. No-op at rate 0. */
+                accretion_step(dt);
+                /* Safety net: if a step produced a non-finite body (NaN/inf),
+                 * remove it before it corrupts the camera-relative render math
+                 * and freezes the view. The log tells us a runaway happened. */
+                {
+                    int scrubbed = physics_sanitize_state();
+                    if (scrubbed > 0)
+                        fprintf(stderr, "[physics] removed %d non-finite body(ies) "
+                                        "after step\n", scrubbed);
+                }
             }
         }
 
@@ -1095,6 +1235,76 @@ int main(int argc, char **argv) {
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         }
         render_frame(view, proj, view_rot, dt);
+
+        /* Relativistic optics: derive an effective beta from the camera's actual
+         * speed (position delta / dt). Warp velocities are >> c, so this is a
+         * stylistic ramp across the warp range, not a literal v/c. Effect shows
+         * only when actually moving fast; 0 below ~200 AU/s. */
+        {
+            static double rel_prev[3];
+            static int    rel_have = 0;
+            static float  rel_beta = 0.0f;   /* time-eased, not instantaneous   */
+            static float  rel_cx   = 0.5f;   /* heading point in UV (eased)      */
+            static float  rel_cy   = 0.5f;
+            float target = 0.0f;
+            float head_cx = 0.5f, head_cy = 0.5f;   /* this frame's raw heading  */
+            if (rel_have && dt > 1e-4f) {
+                double dx = g_cam.pos[0] - rel_prev[0];
+                double dy = g_cam.pos[1] - rel_prev[1];
+                double dz = g_cam.pos[2] - rel_prev[2];
+                double len = sqrt(dx*dx + dy*dy + dz*dz);
+                double sp  = len / dt;                          /* AU/s */
+                float s = (float)((sp - 200.0) / (60000.0 - 200.0));
+                s = s < 0.0f ? 0.0f : (s > 1.0f ? 1.0f : s);
+                s = s * s * (3.0f - 2.0f * s);                  /* smoothstep */
+                target = (float)g_settings.relativistic * s;
+
+                /* Heading: project the unit velocity vector to screen space via
+                 * vp_camrel = proj × view_rot.  When motion aligns with the look
+                 * axis this lands at the centre; strafing/off-axis travel offsets
+                 * it, so the aberration + Doppler focus tracks where you're
+                 * actually going rather than where you're pointing. */
+                if (len > 1e-9) {
+                    float vd[3] = { (float)(dx / len), (float)(dy / len),
+                                    (float)(dz / len) };
+                    Mat4 vp; mat4_mul(vp, proj, view_rot);
+                    float sx, sy;
+                    if (mat4_project(vp, vd[0], vd[1], vd[2],
+                                     WIN_W, WIN_H, &sx, &sy)) {
+                        float ox = sx / (float)WIN_W - 0.5f;
+                        float oy = sy / (float)WIN_H - 0.5f;
+                        /* Clamp the offset so a near-perpendicular velocity can't
+                         * fling the focus into a corner (keeps the edge taper and
+                         * texture sampling sane). */
+                        float om = sqrtf(ox * ox + oy * oy);
+                        const float lim = 0.28f;
+                        if (om > lim) { ox *= lim / om; oy *= lim / om; }
+                        head_cx = 0.5f + ox;
+                        head_cy = 0.5f + oy;
+                    }
+                }
+            }
+            /* Ease beta in (warp "FOV" ramps up smoothly, tau ~0.5 s) but drop
+             * out instantly when the target falls — so slowing/stopping snaps
+             * the effect off rather than lingering. */
+            if (target > rel_beta)
+                rel_beta += (target - rel_beta) * (1.0f - expf(-dt / 0.5f));
+            else
+                rel_beta = target;
+            /* Ease the heading both ways (tau ~0.25 s) so the focus glides when
+             * the velocity direction changes instead of snapping. */
+            {
+                float k = 1.0f - expf(-dt / 0.25f);
+                rel_cx += (head_cx - rel_cx) * k;
+                rel_cy += (head_cy - rel_cy) * k;
+            }
+            rel_prev[0] = g_cam.pos[0];
+            rel_prev[1] = g_cam.pos[1];
+            rel_prev[2] = g_cam.pos[2];
+            rel_have = 1;
+            post_set_relativistic(rel_beta, rel_cx, rel_cy);
+        }
+
         post_end();
         ui_render();
 
@@ -1105,6 +1315,12 @@ int main(int argc, char **argv) {
         const char *load_path = NULL;
         int menu_pick = menu_render(preset_index_of_path(s_universe_path),
                                     &laws_changed, &load_path);
+
+        /* Headless screenshot: capture the back buffer (this frame) then quit. */
+        if (shot_path && ++frame_no >= shot_frames) {
+            save_screenshot_ppm(shot_path);
+            running = 0;
+        }
 
         SDL_GL_SwapWindow(s_win);
 

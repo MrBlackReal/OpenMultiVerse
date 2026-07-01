@@ -47,6 +47,7 @@ uniform float u_cloud_rotation;  /* continuous cloud angle, never wrapped  */
 uniform float u_obliquity;    /* axial tilt, radians (0 = upright)      */
 uniform int   u_planet_type;  /* 0-9, selects colour recipe             */
 uniform float u_star_heat;    /* 0..1 surface heating from star approach */
+uniform float u_starspots;    /* 0..1 star-surface granulation/spot strength */
 uniform int   u_impact_count;
 uniform vec3  u_impact_dir[32];
 uniform vec3  u_impact_tangent1[32];
@@ -541,7 +542,33 @@ void main() {
         float limb   = 1.0 - 0.38 * one_mu - 0.31 * one_mu * one_mu;
         vec3 white   = vec3(1.0, 0.98, 0.95);
         vec3 disc    = mix(white, u_color, 0.15 * one_mu);
-        frag_color   = vec4(disc * limb, 1.0);
+        vec3 col     = disc * limb;
+
+        /* Granulation + starspots, in a body-local frame so they rotate in and
+         * out of view with the star's spin (rotational modulation falls out for
+         * free).  Cool stars get more/darker spots; hot stars almost none. */
+        if (u_starspots > 0.0) {
+            float co = cos(u_obliquity), so = sin(u_obliquity);
+            float tx =  co * N.x - so * N.y;
+            float ty =  so * N.x + co * N.y;
+            float tz =  N.z;
+            float cr = cos(-u_rotation), sr = sin(-u_rotation);
+            vec3  NL = vec3(tx * cr - tz * sr, ty, tx * sr + tz * cr);
+
+            /* fine convective mottling */
+            float gran = fbm(NL * 14.0) - 0.5;
+            col *= 1.0 + u_starspots * gran * 0.18;
+
+            /* larger cooler patches, weighted by how red (cool) the star is.
+             * fbm() here centres near 0.5 and peaks ~0.7, so the threshold sits
+             * low; cool has a floor so spots stay visible on hot stars too. */
+            float cool  = clamp((u_color.r - u_color.b) * 1.2 + 0.45, 0.15, 1.0);
+            float spotn = fbm(NL * 3.0 + vec3(11.0, 4.0, 7.0));
+            float spot  = smoothstep(0.45, 0.60, spotn) * cool * u_starspots;
+            col = mix(col, col * vec3(0.32, 0.24, 0.22), spot);
+        }
+
+        frag_color = vec4(col, 1.0);
         return;
     }
 

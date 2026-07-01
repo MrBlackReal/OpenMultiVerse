@@ -42,6 +42,12 @@ double physics_system_outer_dt_limit(int idx);
 double physics_system_inner_dt_limit(int idx);
 void   physics_advance_time(double dt);
 
+/* Safety net: retire any body whose position/velocity has become non-finite
+ * (NaN/inf). A single such body corrupts the camera-relative render math and
+ * freezes the view ("whole screen flicker"), so we remove it instead. Returns
+ * the number of bodies retired this call. */
+int    physics_sanitize_state(void);
+
 /* Legacy single-step KDK (kept for reference / one-off use) */
 void physics_step(double dt);
 

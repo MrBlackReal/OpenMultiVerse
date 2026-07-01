@@ -193,5 +193,10 @@ void main() {
 
     eye_depth = min(eye_depth, FAR * 0.9995);
     gl_FragDepth = log2(eye_depth + 1.0) / log2(FAR + 1.0);
-    frag_color = vec4(accumColor, accumAlpha);
+    /* Premultiplied-alpha output: accumColor is already coverage-weighted, so
+     * multiply by accumAlpha once more and pair with glBlendFunc(GL_ONE,
+     * GL_ONE_MINUS_SRC_ALPHA). For a single layer this is identical on-screen to
+     * the old (accumColor, accumAlpha) + SRC_ALPHA blend, but it lets the pass
+     * be rendered into a separate half-res target and composited back. */
+    frag_color = vec4(accumColor * accumAlpha, accumAlpha);
 }

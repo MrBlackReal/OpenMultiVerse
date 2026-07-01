@@ -70,21 +70,24 @@ double g_sim_time  = 0.0;
 double g_sim_speed = DAY;
 int    g_paused    = 0;
 
-/* ── timestep constants ─────────────────────────────────────────────────── */
-
-#define OUTER_PERIOD_DIVISOR 24.0
-#define INNER_PERIOD_DIVISOR 96.0
-/* OUTER_DT_MIN: prevents a single very-short-period moon from throttling every
- * system in the scene by imposing a global floor on the outer timestep. */
-#define OUTER_DT_MIN (DAY * 0.05)
-#define INNER_DT_MIN 60.0          /* 1-minute floor; below this physics diverges */
-#define INNER_DT_MAX (DAY * 0.02)  /* ~29 min ceiling; sufficient for all planets */
-#define OUTER_DT_DEFAULT DAY
+/* ── timestep constants ─────────────────────────────────────────────────────
+ * Per-universe now (live in g_laws, persisted in each universe's "laws" block).
+ * Aliased here so the integrator code reads the current value unchanged.
+ *   OUTER_DT_MIN: prevents a single very-short-period moon from throttling
+ *   every system in the scene by imposing a floor on the outer timestep.
+ *   INNER_DT_MIN: 1-minute-ish floor; below this physics diverges.
+ *   INNER_DT_MAX: ceiling sufficient for all planets. */
+#define OUTER_PERIOD_DIVISOR (g_laws.outer_period_divisor)
+#define INNER_PERIOD_DIVISOR (g_laws.inner_period_divisor)
+#define OUTER_DT_MIN         (g_laws.outer_dt_min)
+#define INNER_DT_MIN         (g_laws.inner_dt_min)
+#define INNER_DT_MAX         (g_laws.inner_dt_max)
+#define OUTER_DT_DEFAULT     (g_laws.outer_dt_default)
 
 /* ── per-system timestep state (computed by physics_refresh_timestep_model) */
 
-static double s_outer_dt_limit = OUTER_DT_DEFAULT;
-static double s_inner_dt_limit = INNER_DT_MAX;
+static double s_outer_dt_limit = LAWS_DEFAULT_OUTER_DT_DEFAULT;
+static double s_inner_dt_limit = LAWS_DEFAULT_INNER_DT_MAX;
 
 /* Per-system / per-body tables.  Heap-allocated and grown to g_nbodies so the
  * engine is no longer hard-capped at MAX_BODIES bodies (which a galaxy-scale
@@ -444,6 +447,26 @@ double physics_system_inner_dt_limit(int idx)
 }
 
 void physics_advance_time(double dt) { g_sim_time += dt; }
+
+int physics_sanitize_state(void)
+{
+    int removed = 0;
+    for (int i = 0; i < g_nbodies; i++) {
+        Body *b = &g_bodies[i];
+        int bad = 0;
+        if (!b->alive) continue;
+        for (int k = 0; k < 3; k++) {
+            if (!isfinite(b->pos[k]) || !isfinite(b->vel[k])) { bad = 1; break; }
+        }
+        if (bad) {
+            b->alive = 0;
+            b->mass = 0.0;
+            b->trail_emitting = 0;
+            removed++;
+        }
+    }
+    return removed;
+}
 
 /* Walk the parent chain from child upward; return 1 if ancestor appears. */
 static int is_ancestor_of(int ancestor, int child) {

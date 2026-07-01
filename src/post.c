@@ -14,11 +14,26 @@
 #include "common.h"
 #include "gl_utils.h"
 #include <stdio.h>
+#include <math.h>
 
 static int    s_ok        = 0;     /* shaders compiled */
 static int    s_enabled   = 1;     /* user toggle */
 static float  s_threshold = 0.80f;
 static float  s_intensity = 1.10f;
+
+/* Tonemap: 0 = off (legacy linear), 1 = ACES, 2 = Reinhard. Seeded here, then
+ * overridden from g_settings (tonemap_mode/exposure) at startup. */
+static int    s_tonemap   = 1;
+static float  s_exposure  = 0.76f;
+
+/* Lens optics (all opt-in; 0 = no effect). Seeded from g_settings at startup. */
+static int    s_auto_exp  = 0;       /* auto-exposure adaptation toggle        */
+static float  s_chromatic = 0.0f;    /* lateral chromatic aberration strength  */
+static float  s_vignette  = 0.0f;    /* corner darkening 0..1                  */
+static float  s_adapted   = 1.0f;    /* smoothed auto-exposure factor (runtime)*/
+static float  s_rel_beta  = 0.0f;    /* relativistic optics 0..1 (set per frame)*/
+static float  s_rel_cx    = 0.5f;    /* heading point in UV (velocity vector)   */
+static float  s_rel_cy    = 0.5f;
 
 static int    s_w = 0, s_h = 0;    /* size the targets were built for */
 static int    s_bw = 0, s_bh = 0;  /* half-res blur size */
@@ -30,6 +45,9 @@ static GLuint s_sh_bright = 0, s_sh_blur = 0, s_sh_comp = 0;
 static GLint  s_u_bright_scene, s_u_bright_thresh;
 static GLint  s_u_blur_tex, s_u_blur_dir;
 static GLint  s_u_comp_scene, s_u_comp_bloom, s_u_comp_intensity;
+static GLint  s_u_comp_exposure, s_u_comp_tonemap;
+static GLint  s_u_comp_chromatic, s_u_comp_vignette, s_u_comp_rel_beta;
+static GLint  s_u_comp_rel_center;
 
 static GLuint s_quad_vao = 0, s_quad_vbo = 0;
 
@@ -118,6 +136,12 @@ void post_init(void)
     s_u_comp_scene     = glGetUniformLocation(s_sh_comp,   "u_scene");
     s_u_comp_bloom     = glGetUniformLocation(s_sh_comp,   "u_bloom");
     s_u_comp_intensity = glGetUniformLocation(s_sh_comp,   "u_intensity");
+    s_u_comp_exposure  = glGetUniformLocation(s_sh_comp,   "u_exposure");
+    s_u_comp_tonemap   = glGetUniformLocation(s_sh_comp,   "u_tonemap");
+    s_u_comp_chromatic = glGetUniformLocation(s_sh_comp,   "u_chromatic");
+    s_u_comp_vignette  = glGetUniformLocation(s_sh_comp,   "u_vignette");
+    s_u_comp_rel_beta  = glGetUniformLocation(s_sh_comp,   "u_rel_beta");
+    s_u_comp_rel_center= glGetUniformLocation(s_sh_comp,   "u_rel_center");
 
     /* Fullscreen quad (two triangles) in NDC. */
     static const float quad[12] = {
@@ -150,6 +174,67 @@ void post_set_bloom(int enabled, float threshold, float intensity)
     s_intensity = intensity;
 }
 
+void post_get_tonemap(int *mode, float *exposure)
+{
+    if (mode)     *mode     = s_tonemap;
+    if (exposure) *exposure = s_exposure;
+}
+
+void post_set_tonemap(int mode, float exposure)
+{
+    s_tonemap  = (mode < 0) ? 0 : (mode > 2 ? 2 : mode);
+    s_exposure = exposure;
+}
+
+void post_get_optics(int *auto_exposure, float *chromatic, float *vignette)
+{
+    if (auto_exposure) *auto_exposure = s_auto_exp;
+    if (chromatic)     *chromatic     = s_chromatic;
+    if (vignette)      *vignette      = s_vignette;
+}
+
+void post_set_optics(int auto_exposure, float chromatic, float vignette)
+{
+    s_auto_exp  = auto_exposure ? 1 : 0;
+    s_chromatic = chromatic < 0.0f ? 0.0f : chromatic;
+    s_vignette  = vignette  < 0.0f ? 0.0f : (vignette > 1.0f ? 1.0f : vignette);
+}
+
+void post_set_relativistic(float beta, float cx, float cy)
+{
+    s_rel_beta = beta < 0.0f ? 0.0f : (beta > 1.0f ? 1.0f : beta);
+    s_rel_cx   = cx;
+    s_rel_cy   = cy;
+}
+
+/* Auto-exposure: average the scene luminance from the 1x1 top mip, then ease a
+ * normalised factor toward a target so going from a dark void to a bright field
+ * self-balances.  Result multiplies the manual exposure, so the user's exposure
+ * value stays a meaningful anchor (comp). Returns the factor to multiply in. */
+static float auto_exposure_factor(void)
+{
+    int max_dim = s_w > s_h ? s_w : s_h;
+    if (max_dim < 1) return 1.0f;
+    int last = (int)floorf(log2f((float)max_dim));   /* 1x1 mip level */
+
+    glBindTexture(GL_TEXTURE_2D, s_scene_tex);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    float px[4] = { 0, 0, 0, 0 };
+    glGetTexImage(GL_TEXTURE_2D, last, GL_RGBA, GL_FLOAT, px);
+
+    float lum = 0.2126f * px[0] + 0.7152f * px[1] + 0.0722f * px[2];
+    /* K is a reference luminance: target factor ~1 for a typical bright scene.
+     * Clamp so a near-black void can only brighten so far. */
+    const float K = 0.40f;
+    float target = K / (lum > 1e-4f ? lum : 1e-4f);
+    if (target < 0.30f) target = 0.30f;
+    if (target > 3.00f) target = 3.00f;
+
+    /* Frame-rate-independent enough for an eye-adaptation feel. */
+    s_adapted += (target - s_adapted) * 0.04f;
+    return s_adapted;
+}
+
 void post_begin(void)
 {
     if (!post_enabled()) return;
@@ -175,6 +260,15 @@ void post_end(void)
     glDisable(GL_DEPTH_TEST);
     glDepthMask(GL_FALSE);
     glDisable(GL_BLEND);
+
+    /* Final exposure. Computed up front (before any texture units are bound for
+     * the passes below) because auto_exposure_factor() generates mips on and
+     * reads back the scene texture. */
+    float exposure = s_exposure;
+    if (s_tonemap != 0 && s_auto_exp) {
+        glActiveTexture(GL_TEXTURE0);
+        exposure *= auto_exposure_factor();
+    }
 
     /* 1. Bright-pass: full-res scene -> half-res blur[0]. */
     glViewport(0, 0, s_bw, s_bh);
@@ -215,6 +309,12 @@ void post_end(void)
     glBindTexture(GL_TEXTURE_2D, src_tex);
     glUniform1i(s_u_comp_bloom, 1);
     glUniform1f(s_u_comp_intensity, s_intensity);
+    glUniform1f(s_u_comp_exposure, exposure);
+    glUniform1i(s_u_comp_tonemap, s_tonemap);
+    glUniform1f(s_u_comp_chromatic, s_chromatic);
+    glUniform1f(s_u_comp_vignette, s_vignette);
+    glUniform1f(s_u_comp_rel_beta, s_rel_beta);
+    glUniform2f(s_u_comp_rel_center, s_rel_cx, s_rel_cy);
     draw_quad();
 
     /* Restore state expected by the UI / next frame. */

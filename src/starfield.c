@@ -231,6 +231,10 @@ void starfield_init(void) {
     StarVertex *stars = NULL;
     float *verts;
 
+    /* Re-callable: release any prior GL resources so a settings-driven
+     * regenerate (new star count) doesn't leak the old buffers/shader. */
+    if (s_vao || s_vbo || s_shader) starfield_shutdown();
+
     s_shader = gl_shader_load("assets/shaders/color.vert",
                               "assets/shaders/color.frag");
     if (!s_shader) return;

@@ -18,7 +18,11 @@
 
 in vec2 v_uv;
 
-uniform vec3 u_color;
+uniform vec3  u_color;
+uniform float u_spike;    /* diffraction-spike strength (0 = none, default) */
+uniform float u_corona;   /* corona streamer strength  (0 = none, default)  */
+uniform float u_time;     /* seconds, for corona animation                  */
+uniform float u_seed;     /* per-star phase offset so coronae differ        */
 
 out vec4 frag_color;
 
@@ -43,6 +47,28 @@ void main() {
     float outer_fade = 1.0 - smoothstep(BILL_SCALE - 9.0, BILL_SCALE, r);
 
     float total = shine * outer_fade;
+
+    /* Optional 4-point diffraction spikes (screen-axis aligned, since v_uv runs
+     * along cam_right/cam_up). Thin angular lobes with a long radial reach, added
+     * on top of the smooth bloom. */
+    if (u_spike > 0.0) {
+        float ang  = atan(v_uv.y, v_uv.x);
+        float lobe = pow(abs(cos(2.0 * ang)), 18.0);   /* peaks every 90° */
+        total += u_spike * lobe * exp(-r_safe * 0.22) * outer_fade;
+    }
+
+    /* Optional corona: faint animated streamers, stronger on hot (blue) stars.
+     * Soft one-sided angular lobes that rotate slowly; per-star u_seed keeps
+     * neighbouring stars from pulsing in lockstep. */
+    if (u_corona > 0.0) {
+        float ang = atan(v_uv.y, v_uv.x);
+        float streamers = sin(ang * 9.0  + u_seed * 6.2831 + u_time * 0.50)
+                  + 0.6 * sin(ang * 17.0 - u_seed * 3.0    - u_time * 0.31);
+        streamers = max(streamers, 0.0);
+        float hot = clamp((u_color.b - u_color.r) * 1.4 + 0.35, 0.0, 1.0);
+        total += u_corona * streamers * exp(-r_safe * 0.30) * outer_fade
+                 * (0.25 + 0.75 * hot) * 0.35;
+    }
 
     if (total < 0.001) discard;
 

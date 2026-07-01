@@ -135,7 +135,7 @@ Extract the folder to any location on your machine.
 
 ## Vision
 
-Space is incomprehensibly large. Most simulations either abstract that away or confine you to a single solar system. OpenVerse doesn't.
+Space is incomprehensibly large. Most simulations either abstract that away or confine you to a single solar system. OpenMultiVerse doesn't.
 
 - **Real scale.** Every distance, mass, and orbital period is physically accurate. The emptiness between planets is real. Flying from Earth to Neptune takes time.
 - **Real dynamics.** Bodies move under genuine N-body gravity — no baked animations, no shortcuts. Disrupt the solar system and watch it react.
@@ -166,8 +166,11 @@ Space is incomprehensibly large. Most simulations either abstract that away or c
 | Exotic terms — cosmological repulsion (Λ) & post-Newtonian precession | ✓ |
 | Multiverse — multiple selectable universes, each with its own laws | ✓ |
 | ImGui universe picker + live law sliders (optional `IMGUI=1` build) | ✓ |
-| Black holes | planned |
-| Enhanced rendering | planned |
+| Galaxy-scale rendering — camera-driven active region + far-field points, ~16k bodies in real time | ✓ |
+| Real-data presets — full NASA Exoplanet / Gaia catalog as the "Known Universe" | ✓ |
+| Stellar lifecycle — main-sequence → giant → white dwarf / neutron star / black hole | ✓ |
+| Black holes — accretion disk + shadow + photon ring rendering | ✓ |
+| HDR bloom, enhanced atmospheres (scattering, day/night), volumetric nebulae | ✓ |
 
 ---
 
@@ -221,7 +224,12 @@ make catalogtool
 
 Small real samples live in `assets/catalogs/`, and the bundled presets
 **TRAPPIST-1 (real)**, **Stellar Neighborhood (real)**, **Solar System
-(Horizons)**, and **Real Stars (Gaia)** are generated from them.
+(Horizons)**, and **Real Stars (Gaia)** are generated from them. The
+**Known Universe** preset merges the Solar System with the full NASA Exoplanet +
+Gaia catalogs into a single ~16,000-body universe — generate or resize it with
+`python3 tools/build_known_universe.py --max-systems N` (`N=0` = everything). See
+[docs/SCALING_HANDOFF.md](docs/SCALING_HANDOFF.md) for how the renderer keeps that
+many bodies real-time.
 
 ---
 
@@ -267,7 +275,7 @@ For a full technical reference of the codebase, see [ARCHITECTURE.md](ARCHITECTU
 
 ## Contributing
 
-OpenVerse is open source and early in development. The physics engine, rendering pipeline, and coordinate system are all designed to scale beyond a single solar system. If you want to help push toward a truly open universe, contributions are welcome.
+OpenMultiVerse is open source and early in development. The physics engine, rendering pipeline, and coordinate system are all designed to scale beyond a single solar system — and, increasingly, beyond a single set of physical laws. If you want to help push toward a truly open multiverse, contributions are welcome.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on reporting bugs, requesting features, and submitting pull requests.
 

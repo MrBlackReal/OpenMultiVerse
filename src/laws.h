@@ -25,6 +25,17 @@
 #define LAWS_DEFAULT_C_LIGHT    2.99792458e8   /* m/s                       */
 #define LAWS_DEFAULT_GRAV_ISOLATION 1.0        /* stars gravitationally isolated */
 
+/* Timestep model (per-universe). dt_outer = T/outer_div clamped to
+ * [outer_dt_min, outer_dt_default]; dt_inner = T/inner_div clamped to
+ * [inner_dt_min, inner_dt_max]. SI seconds (1 day = 86400 s).
+ * Don't set inner_dt_min much below 60 s — the integrator diverges. */
+#define LAWS_DEFAULT_OUTER_PERIOD_DIVISOR  24.0
+#define LAWS_DEFAULT_INNER_PERIOD_DIVISOR  96.0
+#define LAWS_DEFAULT_OUTER_DT_MIN          4320.0    /* 0.05 day            */
+#define LAWS_DEFAULT_INNER_DT_MIN          60.0      /* 1 min floor         */
+#define LAWS_DEFAULT_INNER_DT_MAX          1728.0    /* 0.02 day (~29 min)  */
+#define LAWS_DEFAULT_OUTER_DT_DEFAULT      86400.0   /* 1 day               */
+
 typedef struct {
     /* ---- tunable constants (Phase 1) ---------------------------------- */
     double G;            /* gravitational constant                         */
@@ -53,6 +64,17 @@ typedef struct {
      * Set to 0 in JSON for a deliberately-coupled scenario (star cluster,
      * galaxy collision) where interstellar gravity is the point. */
     double gravity_isolation;
+
+    /* ---- per-system adaptive timestep model --------------------------- */
+    /* See LAWS_DEFAULT_*_DIVISOR / *_DT_* above. These set integration
+     * accuracy vs. cost: larger divisors / smaller dt caps = more accurate,
+     * slower; the floors keep the integrator from diverging. */
+    double outer_period_divisor;
+    double inner_period_divisor;
+    double outer_dt_min;
+    double inner_dt_min;
+    double inner_dt_max;
+    double outer_dt_default;
 } UniverseLaws;
 
 /* The single active law set.  Read in the physics hot loop, so it is a plain

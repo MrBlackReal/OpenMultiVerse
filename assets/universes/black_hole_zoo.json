@@ -1,0 +1,168 @@
+// OpenMultiVerse — "Black Hole Zoo".
+//
+// A gallery of every black-hole appearance the raymarched engine currently
+// supports, one hole per system, scattered a few hundredths of a light-year
+// apart in 3D (deliberately NOT collinear, so looking toward one never stacks
+// another hole behind it). Fly, or object-search / teleport, between them. Each
+// is driven purely by its data — mass, spin (rotation_period_days), obliquity,
+// and the disk/torus/activity flags — so the differences are physics, not art.
+//
+// What drives the look:
+//   mass                 -> horizon size (Rs = 2GM/c^2) + disk colour
+//                           (stellar-mass = blue-white hot; supermassive = red)
+//                           + Keplerian swirl rate.
+//   rotation_period_days -> spin a* -> Kerr ISCO (inner disk edge) + jet power
+//                           (Blandford-Znajek: no spin -> no jets).
+//   obliquity_deg        -> tilt of disk/torus/jet axis (the viewing angle that
+//                           separates quasar / blazar / radio-galaxy looks).
+//   disk / torus         -> presence of the accretion disk and dust torus.
+//   activity ("quasar")  -> supercharged disk + jets + beamed core.
+//
+// Viewing tips: most read best from the side (look horizontally). For the
+// blazar, fly up toward its spin axis to look down the jet; for the radio
+// galaxy, stay level to see the edge-on torus cut across the core.
+{
+  "laws": {
+    "G": 6.674e-11, "softening": 1e5, "time_scale": 1.0,
+    "force_exp": 2.0, "lambda": 0.0, "pn_factor": 0.0, "c_light": 2.99792458e8
+  },
+  "bodies": [
+    // 1. Bare Schwarzschild hole: no disk, no torus, no spin. Just the event-
+    //    horizon shadow and the grazing photon ring.
+    {
+      "name": "Schwarzschild (bare)",
+      "type": "black_hole",
+      "disk": 0.0, "torus": 0.0,
+      "mass": 7.96e36,
+      "radius_km": 11800000.0,
+      "color": [0.9, 0.9, 0.95],
+      "pos_ly": [0.0, 0.0, 0.0]
+    },
+
+    // 2. Schwarzschild + disk, non-spinning: the ISCO sits at 3 Rs, so there is
+    //    a wide dark gap between the shadow and the inner disk edge.
+    {
+      "name": "Schwarzschild + Disk",
+      "type": "black_hole",
+      "mass": 7.96e36,
+      "radius_km": 11800000.0,
+      "color": [1.0, 0.6, 0.3],
+      "pos_ly": [0.05, 0.02, 0.04]
+    },
+
+    // 3. Near-maximal Kerr hole (Gargantua): fast spin drags the ISCO in to
+    //    ~0.5 Rs, so the disk hugs the shadow (the "Interstellar" look).
+    //    Supermassive -> cool orange-red disk. A few bodies whip around it.
+    {
+      "name": "Kerr (Gargantua)",
+      "type": "black_hole",
+      "mass": 7.96e36,
+      "radius_km": 11800000.0,
+      "color": [1.0, 0.55, 0.25],
+      "rotation_period_days": 0.0029,
+      "pos_ly": [0.02, 0.05, 0.09]
+    },
+    {
+      "name": "S-star A", "type": "planet", "parent": "Kerr (Gargantua)",
+      "mass": 1.9e27, "radius_km": 70000.0, "color": [0.62, 0.80, 1.0],
+      "keplerian": { "a": 3.2, "e": 0.34, "i": 14.0, "Omega": 35.0, "omega_tilde": 80.0, "L": 10.0 }
+    },
+    {
+      "name": "S-star B", "type": "planet", "parent": "Kerr (Gargantua)",
+      "mass": 8.0e26, "radius_km": 55000.0, "color": [1.0, 0.86, 0.55],
+      "keplerian": { "a": 6.0, "e": 0.55, "i": 48.0, "Omega": 120.0, "omega_tilde": 200.0, "L": 140.0 }
+    },
+
+    // 4. Stellar-mass hole (~10 Msun) with a disk and strong spin. Low mass ->
+    //    a much hotter, blue-white disk (Shakura-Sunyaev T ~ (Mdot/M^2)^1/4).
+    //    Its horizon is tiny (Rs ~ 30 km), so it reads small up close; the
+    //    distance clamp keeps it visible from afar.
+    {
+      "name": "Stellar-mass Hole",
+      "type": "black_hole",
+      "mass": 1.989e31,
+      "radius_km": 29.54,
+      "color": [0.75, 0.85, 1.0],
+      "rotation_period_days": 3.0e-8,
+      "pos_ly": [0.10, -0.03, 0.03]
+    },
+
+    // 5. Classic quasar: disk + dust torus + relativistic jets, tilted so you
+    //    see the torus mostly edge-on and the jets rising along the spin axis.
+    {
+      "name": "Quasar",
+      "type": "quasar",
+      "activity": 1.0,
+      "mass": 7.96e36,
+      "radius_km": 11800000.0,
+      "color": [1.0, 0.62, 0.30],
+      "obliquity_deg": 20.0,
+      "rotation_period_days": 0.0032,
+      "pos_ly": [0.07, 0.04, 0.12]
+    },
+    {
+      "name": "Q-star", "type": "planet", "parent": "Quasar",
+      "mass": 1.0e27, "radius_km": 62000.0, "color": [1.0, 0.55, 0.40],
+      "keplerian": { "a": 9.5, "e": 0.20, "i": 95.0, "Omega": 210.0, "omega_tilde": 20.0, "L": 250.0 }
+    },
+
+    // 6. Blazar: a highly active quasar whose jet tilts toward the viewer.
+    //    Relativistic beaming makes the approaching jet + beamed core blaze.
+    {
+      "name": "Blazar",
+      "type": "quasar",
+      "activity": 1.6,
+      "mass": 7.96e36,
+      "radius_km": 11800000.0,
+      "color": [1.0, 0.62, 0.30],
+      "obliquity_deg": 33.0,
+      "rotation_period_days": 0.0030,
+      "pos_ly": [0.13, 0.01, 0.06]
+    },
+
+    // 7. Radio galaxy: the same quasar engine but with the torus edge-on
+    //    (obliquity 0 -> spin axis vertical, torus horizontal). From a level
+    //    viewpoint the dust doughnut cuts across and obscures the bright core.
+    {
+      "name": "Radio Galaxy (edge-on)",
+      "type": "quasar",
+      "activity": 1.0,
+      "mass": 7.96e36,
+      "radius_km": 11800000.0,
+      "color": [1.0, 0.6, 0.32],
+      "obliquity_deg": 0.0,
+      "rotation_period_days": 0.0032,
+      "pos_ly": [0.11, -0.04, 0.13]
+    },
+
+    // 8. Quasar with the accretion disk switched off: a bare event-horizon
+    //    shadow still dressed with a dust torus and relativistic jets.
+    {
+      "name": "Quasar (no disk)",
+      "type": "quasar",
+      "activity": 1.0,
+      "disk": 0.0,
+      "mass": 7.96e36,
+      "radius_km": 11800000.0,
+      "color": [1.0, 0.62, 0.30],
+      "obliquity_deg": 20.0,
+      "rotation_period_days": 0.0032,
+      "pos_ly": [0.16, 0.05, 0.03]
+    },
+
+    // 9. Quasar with the dust torus switched off: a blazing disk and jets, no
+    //    obscuring doughnut, so the core is exposed from every angle.
+    {
+      "name": "Quasar (no torus)",
+      "type": "quasar",
+      "activity": 1.0,
+      "torus": 0.0,
+      "mass": 7.96e36,
+      "radius_km": 11800000.0,
+      "color": [1.0, 0.62, 0.30],
+      "obliquity_deg": 20.0,
+      "rotation_period_days": 0.0032,
+      "pos_ly": [0.15, -0.02, 0.10]
+    }
+  ]
+}

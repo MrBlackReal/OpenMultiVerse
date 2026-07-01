@@ -62,6 +62,7 @@
 #include "math3d.h"
 #include "supernova.h"
 #include "ui_theme.h"
+#include "settings.h"
 #include <math.h>
 #include <string.h>
 
@@ -94,6 +95,7 @@ static GLint  s_sp_cloud_rotation = -1;
 static GLint  s_sp_obliquity   = -1;
 static GLint  s_sp_ptype       = -1;   /* procedural texture variant index */
 static GLint  s_sp_star_heat   = -1;
+static GLint  s_sp_starspots   = -1;
 static GLint  s_sp_impact_count = -1;
 static GLint  s_sp_impact_dir   = -1;
 static GLint  s_sp_impact_t1    = -1;
@@ -174,6 +176,8 @@ static GLuint s_dot_shader  = 0;
 static GLuint s_dot_vao     = 0;
 static GLuint s_dot_vbo     = 0;           /* dynamic: updated each frame */
 static GLint  s_dot_vp      = -1;
+static GLint  s_dot_time    = -1;
+static GLint  s_dot_twinkle = -1;
 
 /* Impact ejecta particles — additive GL_POINTS from collision system */
 static GLuint s_impact_particle_shader = 0;
@@ -193,6 +197,10 @@ static GLint  s_gl_radius    = -1;
 static GLint  s_gl_right     = -1;
 static GLint  s_gl_up        = -1;
 static GLint  s_gl_color     = -1;
+static GLint  s_gl_spike     = -1;
+static GLint  s_gl_corona    = -1;
+static GLint  s_gl_time      = -1;
+static GLint  s_gl_seed      = -1;
 
 /* Black-hole billboard — accretion disk + shadow, alpha-blended. */
 static GLuint s_bh_shader = 0;
@@ -202,6 +210,50 @@ static GLint  s_bh_radius = -1;
 static GLint  s_bh_right  = -1;
 static GLint  s_bh_up     = -1;
 static GLint  s_bh_color  = -1;
+static GLint  s_bh_disk_n = -1;
+static GLint  s_bh_time   = -1;
+static GLint  s_bh_activity = -1;
+static GLint  s_bh_spin     = -1;
+static GLint  s_bh_disk     = -1;
+static GLint  s_bh_disk_in  = -1;
+static GLint  s_bh_disk_temp = -1;
+static GLint  s_bh_disk_rate = -1;
+
+/* AGN relativistic jets — axis-aligned billboard, additive glow. */
+static GLuint s_jet_shader   = 0;
+static GLint  s_jet_vp       = -1;
+static GLint  s_jet_center   = -1;
+static GLint  s_jet_axis     = -1;
+static GLint  s_jet_len      = -1;
+static GLint  s_jet_width    = -1;
+static GLint  s_jet_color    = -1;
+static GLint  s_jet_time     = -1;
+static GLint  s_jet_activity = -1;
+
+/* AGN dust torus — raymarched volumetric doughnut, alpha-over. */
+static GLuint s_torus_shader = 0;
+static GLint  s_torus_vp     = -1;
+static GLint  s_torus_center = -1;
+static GLint  s_torus_ext    = -1;
+static GLint  s_torus_right  = -1;
+static GLint  s_torus_up     = -1;
+static GLint  s_torus_rs     = -1;
+static GLint  s_torus_normal = -1;
+static GLint  s_torus_rmaj   = -1;
+static GLint  s_torus_rmin   = -1;
+static GLint  s_torus_color  = -1;
+static GLint  s_torus_time   = -1;
+static GLint  s_torus_rate   = -1;
+
+/* AGN beamed core — camera-facing additive glow (blazar nucleus). */
+static GLuint s_agncore_shader = 0;
+static GLint  s_agncore_vp     = -1;
+static GLint  s_agncore_center = -1;
+static GLint  s_agncore_size   = -1;
+static GLint  s_agncore_right  = -1;
+static GLint  s_agncore_up     = -1;
+static GLint  s_agncore_color  = -1;
+static GLint  s_agncore_int    = -1;
 
 /* Supernova passes: volumetric cloud and core. */
 static GLuint s_supernova_core_shader = 0;
@@ -242,6 +294,18 @@ static GLint  s_sn_cloud_fullscreen = -1;
 static GLint  s_sn_cloud_fov_tan = -1;
 static GLint  s_sn_cloud_aspect = -1;
 static GLint  s_sn_cloud_screen = -1;
+
+/* Half-resolution offscreen target for the expensive volumetric cloud pass.
+ * The supernova cloud raymarch is heavily fragment-bound (16 steps × ~7 FBM
+ * each); when the cloud fills the screen it dominates the frame. Render it at
+ * half resolution (¼ the fragments) into s_vol_color, then composite it back
+ * over the scene — the standard volumetrics optimisation. */
+static GLuint s_vol_fbo = 0;
+static GLuint s_vol_color = 0;          /* RGBA16F, half-res, premultiplied */
+static int    s_vol_w = 0, s_vol_h = 0;
+static GLuint s_vol_composite_shader = 0;
+static GLint  s_vol_comp_tex = -1;
+static GLuint s_vol_quad_vao = 0, s_vol_quad_vbo = 0;
 
 /* Glare billboard is STAR_GLARE_BILL_SCALE × the star's visual radius.
  * This constant is also used to compute when the dot fades as the glare grows. */
@@ -499,6 +563,59 @@ static float supernova_distance_fade_local(float dist, float radius)
     return 1.0f - (float)smoothstepd(fade_start, fade_end, dist);
 }
 
+/* (Re)create the half-res volumetric target at half the current window size.
+ * Colour only (no depth attachment): the cloud is composited as a translucent
+ * foreground layer, so it isn't depth-tested against the scene while at half
+ * res — a brief, contained trade-off during a supernova in exchange for ¼ the
+ * raymarch fragments and robustness (a scaling depth-blit from a multisampled
+ * default framebuffer is not portable). */
+static void vol_target_ensure(void)
+{
+    int hw = WIN_W > 1 ? WIN_W / 2 : 1;
+    int hh = WIN_H > 1 ? WIN_H / 2 : 1;
+    if (s_vol_fbo && hw == s_vol_w && hh == s_vol_h) return;
+    s_vol_w = hw;
+    s_vol_h = hh;
+    if (!s_vol_fbo)   glGenFramebuffers(1, &s_vol_fbo);
+    if (!s_vol_color) glGenTextures(1, &s_vol_color);
+    glBindTexture(GL_TEXTURE_2D, s_vol_color);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, hw, hh, 0, GL_RGBA, GL_FLOAT, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, s_vol_fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, s_vol_color, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+/* Physical scales of a black hole, for realistic rendering sizes:
+ *   rs_m    — Schwarzschild radius 2GM/c² (metres), from mass;
+ *   a_star  — dimensionless spin, from Ω·Rs/c (surface-speed proxy), 0..0.998;
+ *   isco_rs — prograde Kerr ISCO (Bardeen 1972) in Rs units: 3 at a*=0 down to
+ *             ~0.5 near-maximal, i.e. the inner accretion-disk edge.
+ * Everything the BH/jet/torus passes draw is expressed in Rs, so deriving Rs
+ * from mass makes the whole engine scale physically with the hole's mass. */
+static void bh_scales(const Body *b, double *rs_m, double *a_star, double *isco_rs)
+{
+    const double G = 6.674e-11, C = 2.99792458e8;
+    double M  = b->mass > 0.0 ? b->mass : 1.0;
+    double Rs = 2.0 * G * M / (C * C);
+    /* Spin magnitude comes from the evolved a* (accretion.c spins it up); fall
+     * back to the raw rotation_rate only for a hole that never got seeded. */
+    double a  = fabs(b->spin_a);
+    if (a == 0.0 && b->rotation_rate != 0.0) a = fabs(b->rotation_rate) * Rs / C;
+    if (a > 0.998) a = 0.998;
+    double z1 = 1.0 + cbrt(1.0 - a * a) * (cbrt(1.0 + a) + cbrt(1.0 - a));
+    double z2 = sqrt(3.0 * a * a + z1 * z1);
+    double risco_M = 3.0 + z2 - sqrt((3.0 - z1) * (3.0 + z1 + 2.0 * z2));
+    *rs_m    = Rs;
+    *a_star  = a;
+    *isco_rs = risco_M * 0.5;   /* M = GM/c² = Rs/2 → convert to Rs units */
+}
+
 /* Visual render radius in AU-units (= metres × RS), accounting for collision
  * scaling.  Bodies that have absorbed mass grow their visual radius. */
 static float visual_radius(int i, float dcam) {
@@ -753,6 +870,7 @@ void render_init(void) {
     s_sp_obliquity = glGetUniformLocation(s_sphere_shader, "u_obliquity");
     s_sp_ptype     = glGetUniformLocation(s_sphere_shader, "u_planet_type");
     s_sp_star_heat = glGetUniformLocation(s_sphere_shader, "u_star_heat");
+    s_sp_starspots = glGetUniformLocation(s_sphere_shader, "u_starspots");
     s_sp_impact_count = glGetUniformLocation(s_sphere_shader, "u_impact_count");
     s_sp_impact_dir   = glGetUniformLocation(s_sphere_shader, "u_impact_dir[0]");
     s_sp_impact_t1    = glGetUniformLocation(s_sphere_shader, "u_impact_tangent1[0]");
@@ -798,6 +916,10 @@ void render_init(void) {
         s_gl_right  = glGetUniformLocation(s_glare_shader, "u_cam_right");
         s_gl_up     = glGetUniformLocation(s_glare_shader, "u_cam_up");
         s_gl_color  = glGetUniformLocation(s_glare_shader, "u_color");
+        s_gl_spike  = glGetUniformLocation(s_glare_shader, "u_spike");
+        s_gl_corona = glGetUniformLocation(s_glare_shader, "u_corona");
+        s_gl_time   = glGetUniformLocation(s_glare_shader, "u_time");
+        s_gl_seed   = glGetUniformLocation(s_glare_shader, "u_seed");
     }
 
     /* --- Black-hole shader --- */
@@ -811,6 +933,62 @@ void render_init(void) {
         s_bh_right  = glGetUniformLocation(s_bh_shader, "u_cam_right");
         s_bh_up     = glGetUniformLocation(s_bh_shader, "u_cam_up");
         s_bh_color  = glGetUniformLocation(s_bh_shader, "u_color");
+        s_bh_disk_n = glGetUniformLocation(s_bh_shader, "u_disk_normal");
+        s_bh_time   = glGetUniformLocation(s_bh_shader, "u_time");
+        s_bh_activity = glGetUniformLocation(s_bh_shader, "u_activity");
+        s_bh_spin     = glGetUniformLocation(s_bh_shader, "u_spin");
+        s_bh_disk     = glGetUniformLocation(s_bh_shader, "u_disk");
+        s_bh_disk_in  = glGetUniformLocation(s_bh_shader, "u_disk_in");
+        s_bh_disk_temp = glGetUniformLocation(s_bh_shader, "u_disk_temp");
+        s_bh_disk_rate = glGetUniformLocation(s_bh_shader, "u_disk_rate");
+    }
+
+    /* --- AGN jet shader --- */
+    s_jet_shader = gl_shader_load("assets/shaders/jet.vert", "assets/shaders/jet.frag");
+    if (!s_jet_shader)
+        fprintf(stderr, "[Render] jet shader failed\n");
+    else {
+        s_jet_vp       = glGetUniformLocation(s_jet_shader, "u_vp");
+        s_jet_center   = glGetUniformLocation(s_jet_shader, "u_center");
+        s_jet_axis     = glGetUniformLocation(s_jet_shader, "u_axis");
+        s_jet_len      = glGetUniformLocation(s_jet_shader, "u_len");
+        s_jet_width    = glGetUniformLocation(s_jet_shader, "u_width");
+        s_jet_color    = glGetUniformLocation(s_jet_shader, "u_color");
+        s_jet_time     = glGetUniformLocation(s_jet_shader, "u_time");
+        s_jet_activity = glGetUniformLocation(s_jet_shader, "u_activity");
+    }
+
+    /* --- AGN dust torus shader --- */
+    s_torus_shader = gl_shader_load("assets/shaders/torus.vert", "assets/shaders/torus.frag");
+    if (!s_torus_shader)
+        fprintf(stderr, "[Render] torus shader failed\n");
+    else {
+        s_torus_vp     = glGetUniformLocation(s_torus_shader, "u_vp");
+        s_torus_center = glGetUniformLocation(s_torus_shader, "u_center");
+        s_torus_ext    = glGetUniformLocation(s_torus_shader, "u_ext");
+        s_torus_right  = glGetUniformLocation(s_torus_shader, "u_cam_right");
+        s_torus_up     = glGetUniformLocation(s_torus_shader, "u_cam_up");
+        s_torus_rs     = glGetUniformLocation(s_torus_shader, "u_rs");
+        s_torus_normal = glGetUniformLocation(s_torus_shader, "u_normal");
+        s_torus_rmaj   = glGetUniformLocation(s_torus_shader, "u_rmaj");
+        s_torus_rmin   = glGetUniformLocation(s_torus_shader, "u_rmin");
+        s_torus_color  = glGetUniformLocation(s_torus_shader, "u_color");
+        s_torus_time   = glGetUniformLocation(s_torus_shader, "u_time");
+        s_torus_rate   = glGetUniformLocation(s_torus_shader, "u_rate");
+    }
+
+    /* --- AGN beamed-core shader --- */
+    s_agncore_shader = gl_shader_load("assets/shaders/agncore.vert", "assets/shaders/agncore.frag");
+    if (!s_agncore_shader)
+        fprintf(stderr, "[Render] AGN core shader failed\n");
+    else {
+        s_agncore_vp     = glGetUniformLocation(s_agncore_shader, "u_vp");
+        s_agncore_center = glGetUniformLocation(s_agncore_shader, "u_center");
+        s_agncore_size   = glGetUniformLocation(s_agncore_shader, "u_size");
+        s_agncore_right  = glGetUniformLocation(s_agncore_shader, "u_cam_right");
+        s_agncore_up     = glGetUniformLocation(s_agncore_shader, "u_cam_up");
+        s_agncore_color  = glGetUniformLocation(s_agncore_shader, "u_color");
+        s_agncore_int    = glGetUniformLocation(s_agncore_shader, "u_intensity");
     }
 
     /* --- Supernova shaders --- */
@@ -864,6 +1042,24 @@ void render_init(void) {
         s_sn_cloud_screen = glGetUniformLocation(s_supernova_cloud_shader, "u_screen");
     }
 
+    /* --- Half-res volumetric composite (upscales the supernova cloud layer) --- */
+    s_vol_composite_shader = gl_shader_load("assets/shaders/post_quad.vert",
+                                            "assets/shaders/vol_composite.frag");
+    if (!s_vol_composite_shader) {
+        fprintf(stderr, "[Render] vol_composite shader failed\n");
+    } else {
+        static const float vquad[12] = {
+            -1.0f, -1.0f,  1.0f, -1.0f, -1.0f,  1.0f,
+            -1.0f,  1.0f,  1.0f, -1.0f,  1.0f,  1.0f,
+        };
+        s_vol_comp_tex = glGetUniformLocation(s_vol_composite_shader, "u_tex");
+        s_vol_quad_vao = gl_vao_create();
+        s_vol_quad_vbo = gl_vbo_create(sizeof(vquad), vquad, GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+        glBindVertexArray(0);
+    }
+
     /* --- Atmosphere glow shader --- */
     s_atm_shader = gl_shader_load("assets/shaders/atm.vert",
                                   "assets/shaders/atm.frag");
@@ -901,7 +1097,9 @@ void render_init(void) {
         fprintf(stderr, "[Render] star_dot shader failed\n");
         return;
     }
-    s_dot_vp = glGetUniformLocation(s_dot_shader, "u_vp");
+    s_dot_vp      = glGetUniformLocation(s_dot_shader, "u_vp");
+    s_dot_time    = glGetUniformLocation(s_dot_shader, "u_time");
+    s_dot_twinkle = glGetUniformLocation(s_dot_shader, "u_twinkle");
 
     /* --- Impact particle shader --- */
     s_impact_particle_shader = gl_shader_load("assets/shaders/impact_particle.vert",
@@ -1030,6 +1228,7 @@ static void render_build_preview(const float vp_camrel[16])
         };
         glUseProgram(s_dot_shader);
         glUniformMatrix4fv(s_dot_vp, 1, GL_FALSE, vp_camrel);
+        glUniform1f(s_dot_twinkle, 0.0f);   /* placement cursor: no twinkle */
         glBindVertexArray(s_dot_vao);
         glBindBuffer(GL_ARRAY_BUFFER, s_dot_vbo);
         glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(dot), dot);
@@ -1424,6 +1623,7 @@ void render_frame(const float view[16], const float proj[16],
         glUniform1f(s_sp_obliquity, (float)(b->obliquity * (PI / 180.0)));
         glUniform1i(s_sp_ptype,     get_planet_type(b->name));
         glUniform1f(s_sp_star_heat, collision_body_star_heat(i));
+        glUniform1f(s_sp_starspots, b->is_star ? (float)g_settings.starspots : 0.0f);
 
         /* Upload per-body collision impact spots (craters/ejecta) for the shader */
         {
@@ -1553,8 +1753,30 @@ void render_frame(const float view[16], const float proj[16],
                   tanf(FOV * 0.5f * (float)(PI / 180.0)), aspect,
                   WIN_W, WIN_H);
 
-    /* ------------------------------------------------------------------ 2.75. Supernova cloud + core */
+    /* ------------------------------------------------------------------ 2.75. Supernova cloud */
+    /* The cloud raymarch is fragment-bound and fills the screen when the camera
+     * is near the blast. Render it into a half-res target (¼ the fragments) and
+     * composite it back over the scene; fall back to a direct full-res draw if
+     * the composite shader is unavailable. */
     if (sn_count > 0 && s_supernova_cloud_shader) {
+        int   use_halfres = (s_vol_composite_shader != 0 && s_vol_quad_vao != 0);
+        GLint prev_fbo = 0;
+        float screen_w = (float)WIN_W, screen_h = (float)WIN_H;
+
+        if (use_halfres) {
+            GLfloat prev_clear[4];
+            glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prev_fbo);
+            vol_target_ensure();
+            glBindFramebuffer(GL_FRAMEBUFFER, s_vol_fbo);
+            glViewport(0, 0, s_vol_w, s_vol_h);
+            glGetFloatv(GL_COLOR_CLEAR_VALUE, prev_clear);
+            glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glClearColor(prev_clear[0], prev_clear[1], prev_clear[2], prev_clear[3]);
+            screen_w = (float)s_vol_w;
+            screen_h = (float)s_vol_h;
+        }
+
         glUseProgram(s_supernova_cloud_shader);
         glUniformMatrix4fv(s_sn_cloud_vp, 1, GL_FALSE, vp_camrel);
         glUniform3f(s_sn_cloud_right, cam_right[0], cam_right[1], cam_right[2]);
@@ -1562,12 +1784,18 @@ void render_frame(const float view[16], const float proj[16],
         glUniform3f(s_sn_cloud_fwd, cam_fwd[0], cam_fwd[1], cam_fwd[2]);
         glUniform1f(s_sn_cloud_fov_tan, tanf(FOV * 0.5f * (float)(PI / 180.0)));
         glUniform1f(s_sn_cloud_aspect, aspect);
-        glUniform2f(s_sn_cloud_screen, (float)WIN_W, (float)WIN_H);
+        glUniform2f(s_sn_cloud_screen, screen_w, screen_h);
 
         glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        /* Premultiplied "over": matches the cloud shader's premultiplied output
+         * and is identical on-screen to the old SRC_ALPHA blend for a single
+         * layer, while letting the layer be composited from the half-res target. */
+        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
         glDepthMask(GL_FALSE);
-        glEnable(GL_DEPTH_TEST);
+        /* Half-res layer carries no scene depth, so it isn't depth-tested; the
+         * full-res fallback keeps testing so planets occlude the cloud. */
+        if (use_halfres) glDisable(GL_DEPTH_TEST);
+        else             glEnable(GL_DEPTH_TEST);
         glBindVertexArray(s_sphere_vao);
 
         for (int i = 0; i < sn_count; i++) {
@@ -1606,7 +1834,24 @@ void render_frame(const float view[16], const float proj[16],
         }
 
         glBindVertexArray(0);
+
+        if (use_halfres) {
+            /* Upscale + composite the half-res cloud back over the scene. */
+            glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo);
+            glViewport(0, 0, WIN_W, WIN_H);
+            glUseProgram(s_vol_composite_shader);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, s_vol_color);
+            glUniform1i(s_vol_comp_tex, 0);
+            glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+            glBindVertexArray(s_vol_quad_vao);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            glBindVertexArray(0);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+
         glDepthMask(GL_TRUE);
+        glEnable(GL_DEPTH_TEST);
         glDisable(GL_BLEND);
     }
 
@@ -1970,6 +2215,8 @@ void render_frame(const float view[16], const float proj[16],
     if (dot_count > 0) {
         glUseProgram(s_dot_shader);
         glUniformMatrix4fv(s_dot_vp, 1, GL_FALSE, vp_camrel);
+        glUniform1f(s_dot_time,    (float)SDL_GetTicks() * 0.001f);
+        glUniform1f(s_dot_twinkle, (float)g_settings.star_twinkle);
         glBindVertexArray(s_dot_vao);
         glBindBuffer(GL_ARRAY_BUFFER, s_dot_vbo);
         /* Grow the GPU buffer past its initial MAX_BODIES sizing if needed. */
@@ -2020,6 +2267,9 @@ void render_frame(const float view[16], const float proj[16],
         glUniformMatrix4fv(s_gl_vp, 1, GL_FALSE, vp_camrel);
         glUniform3f(s_gl_right, cam_right[0], cam_right[1], cam_right[2]);
         glUniform3f(s_gl_up,    cam_up[0],    cam_up[1],    cam_up[2]);
+        glUniform1f(s_gl_spike,  (float)g_settings.lens_spikes);
+        glUniform1f(s_gl_corona, (float)g_settings.star_corona);
+        glUniform1f(s_gl_time,   (float)SDL_GetTicks() * 0.001f);
 
         glEnable(GL_BLEND);
         glBlendFunc(GL_ONE, GL_ONE);   /* purely additive */
@@ -2061,6 +2311,7 @@ void render_frame(const float view[16], const float proj[16],
             glUniform1f(s_gl_radius, radius);
             glUniform3f(s_gl_color,
                         g_bodies[i].col[0], g_bodies[i].col[1], g_bodies[i].col[2]);
+            glUniform1f(s_gl_seed, (float)(i % 1024) * 0.1013f);
             glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
         }
 
@@ -2082,10 +2333,11 @@ void render_frame(const float view[16], const float proj[16],
         glUniformMatrix4fv(s_bh_vp, 1, GL_FALSE, vp_camrel);
         glUniform3f(s_bh_right, cam_right[0], cam_right[1], cam_right[2]);
         glUniform3f(s_bh_up,    cam_up[0],    cam_up[1],    cam_up[2]);
+        glUniform1f(s_bh_time,  (float)SDL_GetTicks() * 0.001f);
 
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glDepthMask(GL_FALSE);
+        glDepthMask(GL_TRUE);        /* bh.frag writes true per-fragment depth */
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(GL_LEQUAL);
         glBindVertexArray(s_sphere_vao);
@@ -2099,7 +2351,9 @@ void render_frame(const float view[16], const float proj[16],
             if (rx*cam_fwd[0] + ry*cam_fwd[1] + rz*cam_fwd[2] < 0.0f) continue;
 
             float dist   = sqrtf(rx*rx + ry*ry + rz*rz);
-            float radius = (float)(g_bodies[i].radius * RS);
+            double rs_m, a_star, isco_rs;
+            bh_scales(&g_bodies[i], &rs_m, &a_star, &isco_rs);
+            float radius = (float)(rs_m * RS);   /* horizon radius from mass */
             if (dist > BH_MAX_DIST && dist > 1e-6f) {
                 float s = BH_MAX_DIST / dist;
                 rx *= s; ry *= s; rz *= s; radius *= s;
@@ -2107,8 +2361,233 @@ void render_frame(const float view[16], const float proj[16],
 
             glUniform3f(s_bh_center, rx, ry, rz);
             glUniform1f(s_bh_radius, radius);
+            glUniform1f(s_bh_disk_in, (float)isco_rs);
             glUniform3f(s_bh_color,
                         g_bodies[i].col[0], g_bodies[i].col[1], g_bodies[i].col[2]);
+            /* Disk spin axis (world space). Ecliptic north maps to GL +Y; a
+             * non-zero obliquity tilts the disk about the GL X axis. */
+            {
+                double ob = g_bodies[i].obliquity * (PI / 180.0);
+                glUniform3f(s_bh_disk_n, 0.0f, (float)cos(ob), (float)sin(ob));
+            }
+            glUniform1f(s_bh_activity, g_bodies[i].agn_activity);
+            {
+                double sp = g_bodies[i].spin_a != 0.0 ? g_bodies[i].spin_a
+                                                       : g_bodies[i].rotation_rate;
+                glUniform1f(s_bh_spin, sp < 0.0 ? -1.0f : 1.0f);
+            }
+            glUniform1f(s_bh_disk, g_bodies[i].accretion_disk);
+            /* Disk hotness. When the hole is actually accreting, use the real
+             * Shakura-Sunyaev peak effective temperature from Ṁ:
+             *   T_peak ≈ 0.488·(3·G·M·Ṁ / (8π·σ·r_in³))^¼,  r_in = ISCO,
+             * mapped log-linearly to the shader's 0..1 blue↔red hotness. So a
+             * fading quasar's disk visibly reddens as Ṁ drops, and a stellar-mass
+             * hole (hotter per T ∝ (Ṁ/M²)^¼) runs blue-white. Holes with no
+             * accretion data fall back to the old mass+activity proxy. */
+            {
+                double msun = 1.989e30;
+                double hot;
+                if (g_bodies[i].mdot > 0.0) {
+                    const double SIGMA = 5.670374e-8;   /* Stefan-Boltzmann */
+                    double r_in = isco_rs * rs_m;       /* ISCO radius, metres */
+                    double T4 = 3.0 * 6.674e-11 * g_bodies[i].mass * g_bodies[i].mdot
+                                / (8.0 * PI * SIGMA * r_in * r_in * r_in);
+                    double Tpeak = 0.488 * pow(T4, 0.25);
+                    /* log10(T): ~5.4 (cool AGN) → red, ~7.3 (stellar-mass) → blue. */
+                    hot = (log10(Tpeak) - 5.37) / (7.30 - 5.37);
+                } else {
+                    double act = g_bodies[i].agn_activity > 0.05 ? g_bodies[i].agn_activity : 0.05;
+                    hot = 0.90 - 0.10 * log10(g_bodies[i].mass / msun) + 0.15 * log10(act);
+                }
+                hot = hot < 0.0 ? 0.0 : (hot > 1.0 ? 1.0 : hot);
+                glUniform1f(s_bh_disk_temp, (float)hot);
+                /* Visual Keplerian swirl rate: ω ∝ 1/M physically; log-compressed
+                 * so a supermassive disk turns slowly and a stellar one fast, both
+                 * still visibly animated. */
+                double rate = 4.0 * pow(2.0e33 / g_bodies[i].mass, 0.12);
+                rate = rate < 1.4 ? 1.4 : (rate > 9.0 ? 9.0 : rate);
+                glUniform1f(s_bh_disk_rate, (float)rate);
+            }
+            glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+        }
+
+        glBindVertexArray(0);
+        glDepthFunc(GL_LESS);
+        glDepthMask(GL_TRUE);
+        glDisable(GL_BLEND);
+    }
+
+    /* ---------------------------------- 6.4b. AGN relativistic jets (additive) */
+    if (s_jet_shader) {
+        const float BH_MAX_DIST = 1500.0f;
+        glUseProgram(s_jet_shader);
+        glUniformMatrix4fv(s_jet_vp, 1, GL_FALSE, vp_camrel);
+        glUniform1f(s_jet_time, (float)SDL_GetTicks() * 0.001f);
+
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_ONE, GL_ONE);          /* additive glow */
+        glDepthMask(GL_FALSE);
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LEQUAL);
+        glBindVertexArray(s_sphere_vao);
+
+        for (int i = 0; i < g_nbodies; i++) {
+            if (!g_bodies[i].alive || !g_bodies[i].is_black_hole) continue;
+            if (g_bodies[i].agn_activity <= 0.0f) continue;
+
+            float rx = (float)(g_bodies[i].pos[0] * RS - g_cam.pos[0]);
+            float ry = (float)(g_bodies[i].pos[1] * RS - g_cam.pos[1]);
+            float rz = (float)(g_bodies[i].pos[2] * RS - g_cam.pos[2]);
+            float dist   = sqrtf(rx * rx + ry * ry + rz * rz);
+            double rs_m, a_star, isco_rs;
+            bh_scales(&g_bodies[i], &rs_m, &a_star, &isco_rs);
+            float radius = (float)(rs_m * RS);
+            if (dist > BH_MAX_DIST && dist > 1e-6f) {
+                float s = BH_MAX_DIST / dist;
+                rx *= s; ry *= s; rz *= s; radius *= s;
+            }
+
+            /* Blandford–Znajek: jets are powered by spin, so length and strength
+             * scale with a* — a non-spinning hole barely jets even when accreting. */
+            float spin  = (float)a_star;
+            float power = g_bodies[i].agn_activity * (0.15f + 0.85f * spin);
+            if (power <= 0.0f) continue;
+
+            /* Jets fire along the spin axis (= disk normal). */
+            double ob = g_bodies[i].obliquity * (PI / 180.0);
+            float ax = 0.0f, ay = (float)cos(ob), az = (float)sin(ob);
+            /* Skip when nearly pole-on: the axis-aligned ribbon degenerates to a
+             * quad edge there, and the beamed core carries the look instead. */
+            float jalign = fabsf((rx * ax + ry * ay + rz * az) / (dist > 1e-6f ? dist : 1.0f));
+            if (jalign > 0.94f) continue;
+            glUniform3f(s_jet_center, rx, ry, rz);
+            glUniform3f(s_jet_axis, ax, ay, az);
+            glUniform1f(s_jet_len,   radius * (12.0f + 46.0f * spin));
+            glUniform1f(s_jet_width, radius * 4.5f);
+            glUniform3f(s_jet_color, 0.55f, 0.72f, 1.0f);
+            glUniform1f(s_jet_activity, power);
+            glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+        }
+
+        glBindVertexArray(0);
+        glDepthFunc(GL_LESS);
+        glDepthMask(GL_TRUE);
+        glDisable(GL_BLEND);
+    }
+
+    /* -------------------------------------- 6.4c. AGN dust torus (alpha-over) */
+    if (s_torus_shader) {
+        const float BH_MAX_DIST = 1500.0f;
+        const float RMAJ = 14.0f, RMIN = 6.0f;   /* in Rs units */
+        glUseProgram(s_torus_shader);
+        glUniformMatrix4fv(s_torus_vp, 1, GL_FALSE, vp_camrel);
+        glUniform3f(s_torus_right, cam_right[0], cam_right[1], cam_right[2]);
+        glUniform3f(s_torus_up,    cam_up[0],    cam_up[1],    cam_up[2]);
+        glUniform1f(s_torus_rmaj,  RMAJ);
+        glUniform1f(s_torus_rmin,  RMIN);
+        glUniform1f(s_torus_time,  (float)SDL_GetTicks() * 0.001f);
+
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glDepthMask(GL_TRUE);        /* torus.frag writes true per-fragment depth */
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LEQUAL);
+        glBindVertexArray(s_sphere_vao);
+
+        for (int i = 0; i < g_nbodies; i++) {
+            if (!g_bodies[i].alive || !g_bodies[i].is_black_hole) continue;
+            if (g_bodies[i].dust_torus <= 0.0f) continue;
+
+            float rx = (float)(g_bodies[i].pos[0] * RS - g_cam.pos[0]);
+            float ry = (float)(g_bodies[i].pos[1] * RS - g_cam.pos[1]);
+            float rz = (float)(g_bodies[i].pos[2] * RS - g_cam.pos[2]);
+            float dist   = sqrtf(rx * rx + ry * ry + rz * rz);
+            double rs_m, a_star, isco_rs;
+            bh_scales(&g_bodies[i], &rs_m, &a_star, &isco_rs);
+            float radius = (float)(rs_m * RS);
+            if (dist > BH_MAX_DIST && dist > 1e-6f) {
+                float s = BH_MAX_DIST / dist;
+                rx *= s; ry *= s; rz *= s; radius *= s;
+            }
+            double ob = g_bodies[i].obliquity * (PI / 180.0);
+
+            /* Dust sublimation radius grows with luminosity (~accretion): a more
+             * active nucleus pushes the torus outward and puffs it up. */
+            float lum   = g_bodies[i].agn_activity;
+            float rmaj  = RMAJ * (0.75f + 0.45f * lum);
+            float rmin  = RMIN * (0.80f + 0.35f * lum);
+
+            /* Azimuthal rotation: the dust doughnut orbits the spin axis at its
+             * (large-radius, so slow) Keplerian rate — same swirl-rate model and
+             * spin sense as the disk, evaluated at the torus major radius. */
+            double t_rate = 4.0 * pow(2.0e33 / (g_bodies[i].mass > 0.0 ? g_bodies[i].mass : 1.0), 0.12);
+            t_rate = t_rate < 1.4 ? 1.4 : (t_rate > 9.0 ? 9.0 : t_rate);
+            double sp_t = g_bodies[i].spin_a != 0.0 ? g_bodies[i].spin_a
+                                                     : g_bodies[i].rotation_rate;
+            float spin_sign = sp_t < 0.0 ? -1.0f : 1.0f;
+            float t_omega   = spin_sign * (float)t_rate * powf(rmaj, -1.5f);
+
+            glUniform1f(s_torus_rate,   t_omega);
+            glUniform3f(s_torus_center, rx, ry, rz);
+            glUniform1f(s_torus_ext,    radius * ((rmaj + rmin) * 1.25f + 2.0f));
+            glUniform1f(s_torus_rs,     radius);
+            glUniform1f(s_torus_rmaj,   rmaj);
+            glUniform1f(s_torus_rmin,   rmin);
+            glUniform3f(s_torus_normal, 0.0f, (float)cos(ob), (float)sin(ob));
+            glUniform3f(s_torus_color,  0.52f, 0.36f, 0.24f);
+            glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+        }
+
+        glBindVertexArray(0);
+        glDepthFunc(GL_LESS);
+        glDepthMask(GL_TRUE);
+        glDisable(GL_BLEND);
+    }
+
+    /* -------------------------------- 6.4d. AGN beamed core (blazar, additive) */
+    if (s_agncore_shader) {
+        const float BH_MAX_DIST = 1500.0f;
+        glUseProgram(s_agncore_shader);
+        glUniformMatrix4fv(s_agncore_vp, 1, GL_FALSE, vp_camrel);
+        glUniform3f(s_agncore_right, cam_right[0], cam_right[1], cam_right[2]);
+        glUniform3f(s_agncore_up,    cam_up[0],    cam_up[1],    cam_up[2]);
+
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_ONE, GL_ONE);
+        glDepthMask(GL_FALSE);
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LEQUAL);
+        glBindVertexArray(s_sphere_vao);
+
+        for (int i = 0; i < g_nbodies; i++) {
+            if (!g_bodies[i].alive || !g_bodies[i].is_black_hole) continue;
+            if (g_bodies[i].agn_activity <= 0.0f) continue;
+
+            float rx = (float)(g_bodies[i].pos[0] * RS - g_cam.pos[0]);
+            float ry = (float)(g_bodies[i].pos[1] * RS - g_cam.pos[1]);
+            float rz = (float)(g_bodies[i].pos[2] * RS - g_cam.pos[2]);
+            float dist = sqrtf(rx * rx + ry * ry + rz * rz);
+            double rs_m, a_star, isco_rs;
+            bh_scales(&g_bodies[i], &rs_m, &a_star, &isco_rs);
+            float radius = (float)(rs_m * RS);
+            if (dist > BH_MAX_DIST && dist > 1e-6f) {
+                float s = BH_MAX_DIST / dist;
+                rx *= s; ry *= s; rz *= s; radius *= s;
+            }
+
+            /* Beamed core lights up when the jet points at the camera (pole-on),
+             * scaled by activity and spin (jet power). */
+            double ob = g_bodies[i].obliquity * (PI / 180.0);
+            float ax = 0.0f, ay = (float)cos(ob), az = (float)sin(ob);
+            float align = fabsf((rx * ax + ry * ay + rz * az) / (dist > 1e-6f ? dist : 1.0f));
+            float pole  = (float)smoothstepd(0.35, 0.92, align);
+            float inten = g_bodies[i].agn_activity * (float)a_star * pole * pole * 4.0f;
+            if (inten <= 0.001f) continue;
+
+            glUniform3f(s_agncore_center, rx, ry, rz);
+            glUniform1f(s_agncore_size, radius * 6.0f);
+            glUniform3f(s_agncore_color, 0.72f, 0.83f, 1.0f);
+            glUniform1f(s_agncore_int, inten);
             glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
         }
 

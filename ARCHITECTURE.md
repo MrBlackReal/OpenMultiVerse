@@ -1,9 +1,17 @@
-# OpenVerse Architecture
+# OpenMultiVerse Architecture
 
-This document is the contributor-facing architecture reference for OpenVerse.
+This document is the contributor-facing architecture reference for OpenMultiVerse
+(a fork of [OpenVerse](https://github.com/ortanaV2/OpenVerse)).
 It reflects the current C99/OpenGL codebase and is meant to help humans and
 LLM assistants understand where each subsystem lives, what owns what state, and
 which invariants matter when changing the simulator.
+
+The fork adds, on top of the base simulator: **per-universe physical laws** (a
+selectable "multiverse"), **real-astronomical-data import**, **galaxy-scale
+rendering** (camera-driven active region + far-field points, ~16k bodies in real
+time), a **stellar lifecycle** system, and visual systems (HDR bloom, volumetric
+nebulae, black holes). Forward-looking plans and in-progress work live in `docs/`
+(`SCALING_HANDOFF.md`, `UNIFIED_ROADMAP_REFINED.md`, `VISUALS_ROADMAP.md`).
 
 ---
 
@@ -27,9 +35,10 @@ which invariants matter when changing the simulator.
 
 ## 1. Overview
 
-OpenVerse is a real-time, data-driven universe simulator written in C99.
+OpenMultiVerse is a real-time, data-driven universe simulator written in C99.
 It combines a hierarchical N-body gravity simulation with an OpenGL 3.3 Core
-renderer that can show bodies from planet-surface scale to interstellar scale.
+renderer that can show bodies from planet-surface scale to interstellar scale,
+under physical laws that are configurable per universe.
 
 Primary technologies:
 
@@ -41,7 +50,10 @@ Primary technologies:
 | Music playback | SDL2_mixer |
 | Rendering | OpenGL 3.3 Core, GLSL 330, GLEW |
 | Physics | 2R-RESPA split integrator with per-star-system timestep limits |
-| Data | `assets/universe.json`, parsed by the local JSON parser |
+| Physical laws | Per-universe `g_laws` (G, softening, force exponent, Λ, PN, gravity isolation, timestep model) |
+| App settings | Global, cross-universe `g_settings` (FOV, starfield, warm-up/active radii, fades, controls, overlay, trails); persisted to `settings.json` |
+| Optional menu | Dear ImGui via the `extern/cimgui` submodule (`make IMGUI=1`); inert stubs otherwise |
+| Data | `assets/universe.json` + `assets/universes/*.json` presets; real catalogs via `catalog.c` |
 | Parallelism | OpenMP for warmup across independent star systems |
 
 Design goals:
@@ -51,21 +63,30 @@ Design goals:
 - Keep body indices stable across collisions and runtime additions.
 - Prefer data-driven universe content over hard-coded solar-system data.
 - Let visual systems query physics/collision state instead of owning it.
+- Keep physical constants in `g_laws`, not compile-time `#define`s, so each
+  universe can run different rules.
+- Stay real-time at galaxy scale: only the camera's neighbourhood is fully
+  simulated; everything else is a cheap far-field point.
 
 ---
 
 ## 2. Repository Layout
 
 ```text
-OpenVerse/
+OpenMultiVerse/
 ├── Makefile
 ├── package_linux.sh
 ├── package_windows.sh
 ├── README.md
 ├── ARCHITECTURE.md
 ├── CONTRIBUTING.md
+├── docs/                   In-progress + planned work (SCALING_HANDOFF, roadmaps, VISUALS)
+├── tools/                  catalogtool.c (offline) + build_known_universe.py
+├── extern/cimgui/          Dear ImGui C binding submodule (only used by IMGUI=1)
 ├── assets/
 │   ├── universe.json
+│   ├── universes/          Selectable presets (registered in src/presets.c)
+│   ├── catalogs/           Real catalog CSVs (full ones gitignored)
 │   ├── bright_star_catalog.csv
 │   ├── soundtrack.ogg
 │   ├── window_icon.bmp
@@ -81,20 +102,30 @@ OpenVerse/
 │       ├── star_glare.vert / star_glare.frag
 │       ├── build_line.vert / build_line.frag
 │       ├── ui.vert / ui.frag
-│       └── supernova_billboard.vert / supernova_core.frag / supernova_cloud.frag
+│       ├── supernova_billboard.vert / supernova_core.frag / supernova_cloud.frag
+│       ├── bh.vert / bh.frag                    (black hole: disk + shadow + photon ring)
+│       ├── nebula.vert / nebula.frag            (volumetric raymarched nebulae)
+│       ├── star_dot.vert                        (per-point sized star dots)
+│       └── post_quad.vert + bloom_bright/blur/composite.frag   (HDR bloom)
 └── src/
     ├── main.c              App init, event loop, per-frame scheduling
     ├── common.h            Shared includes, constants, global window size
     ├── math3d.h            Header-only vector/matrix helpers
     ├── gl_utils.c/.h       Shader and buffer helper functions
     ├── json.c/.h           Minimal JSON parser with comments/trailing commas
+    ├── laws.c/.h           Per-universe physical laws (g_laws) + pair-force factor
+    ├── presets.c/.h        Registry of selectable universe JSON files
+    ├── catalog.c/.h        Real-catalog → universe JSON conversion (no SDL/GL)
     ├── body.c/.h           Body array, Keplerian conversion, body helpers
-    ├── universe.c/.h       JSON loader, runtime body allocation/reuse
+    ├── universe.c/.h       JSON loader (incl. "laws" block), runtime body alloc/reuse
     ├── physics.c/.h        RESPA gravity and trail sampling engine
+    ├── lifecycle.c/.h      Stellar evolution state machine (phases + death events)
     ├── collision.c/.h      Collision detection, merges, scars, debris
-    ├── supernova.c/.h      Star-star collision aftermath
+    ├── supernova.c/.h      Star-star collision aftermath + lifecycle detonation
     ├── camera.c/.h         Global free-look camera state
     ├── render.c/.h         Main scene compositor
+    ├── post.c/.h           Offscreen HDR target + bloom post-processing
+    ├── nebula.c/.h         World-space volumetric nebulae
     ├── trails.c/.h         GL upload/draw layer for trail buffers
     ├── labels.c/.h         SDL_ttf label textures and overlap avoidance
     ├── starfield.c/.h      Catalog-backed skybox stars
@@ -102,6 +133,7 @@ OpenVerse/
     ├── asteroids.c/.h      Gravity-integrated asteroid belt particles
     ├── build.c/.h          Runtime sandbox body placement
     ├── inspect.c/.h        Inspection and orbit-camera mode
+    ├── menu.c/.h           Dear ImGui multiverse menu (USE_IMGUI; stubs otherwise)
     ├── ui.c/.h             HUD and pause menu overlay
     ├── ui_theme.c/.h       Shared font lookup and UI accent constants
     └── audio.c/.h          SDL_mixer soundtrack wrapper
@@ -117,8 +149,27 @@ or `verse.exe`.
 Compiler flags:
 
 ```text
--Wall -Wextra -O2 -std=c99 -I$(SRCDIR) -fopenmp
+-Wall -Wextra -O2 -std=c99 -I$(SRCDIR) -fopenmp -MMD -MP
 ```
+
+`-MMD -MP` emit a `.d` file per object listing its included headers, so editing a
+header forces every dependent `.c` to recompile (a struct-layout change otherwise
+silently leaves stale objects — a memory-corruption footgun).
+
+### Build variants
+
+| Command | Result |
+|---|---|
+| `make` | Default build. `menu.c` compiles to inert stubs; no C++/cimgui needed. |
+| `git submodule update --init --recursive` then `make IMGUI=1` | Adds the Dear ImGui multiverse menu (defines `USE_IMGUI`, compiles `extern/cimgui` + Dear ImGui C++ TUs, links `libstdc++`). |
+| `make catalogtool` | Standalone offline catalog converter (no SDL/GL); reuses `src/catalog.c`. |
+
+**`make clean` is required when toggling `IMGUI`** — the Makefile tracks file
+timestamps, not the flag value, so switching without a clean links stale objects.
+
+The Known-Universe preset is generated/resized by
+`python3 tools/build_known_universe.py --max-systems N` (`N=0` = the full
+~16k-body catalog).
 
 Linked libraries:
 
@@ -225,7 +276,8 @@ Important constants in `common.h`:
 | `DAY` | seconds per day |
 | `G_CONST` | gravitational constant |
 | `RS` | `1.0 / AU`, metres to AU render scale |
-| `MAX_BODIES` | compile-time body-slot and per-frame array limit |
+| `LY` | metres per light-year |
+| `MAX_BODIES` | growth seed for heap tables, and the fixed bound for collision/labels (see Galaxy-scale §8.1) |
 | `TRAIL_LEN` | power-of-two trail ring-buffer length per body |
 | `FOV` | vertical field of view in degrees |
 
@@ -234,6 +286,11 @@ Important constants in `common.h`:
 `Body` in `body.h` is the central simulation entity. It stores:
 
 - Display name, mass, radius, color, star flag.
+- `is_black_hole` — flags a star-root body for accretion-disk/shadow rendering
+  (excluded from the normal sphere/glare/dot passes).
+- Stellar lifecycle fields (stars only, lazily initialised by `lifecycle.c`):
+  `star_phase` (`StarPhase` enum) plus `base_*` main-sequence appearance so a
+  phase change scales/tints off it and is reversible.
 - SI position, velocity, slow acceleration, and fast parent acceleration.
 - Stable lifecycle fields: `alive`, `parent`.
 - Per-body timestep estimates.
@@ -245,7 +302,11 @@ Invariants:
 - `g_nbodies` is the high-water slot count, not the number of living bodies.
 - Dead/absorbed slots remain addressable and may be reused by
   `universe_add_body()`.
-- Runtime additions never exceed `MAX_BODIES`.
+- `g_nbodies` can exceed `MAX_BODIES` (the full catalog is ~16k). Physics and
+  render tables grow on the heap; **collision and labels are still bounded by
+  `MAX_BODIES`** and currently cover the first 128 body *indices* (see §8.1).
+  Do not just bump `MAX_BODIES` — `collision.c` has `[MAX_BODIES][MAX_BODIES]`
+  stack arrays.
 - Stars normally have `parent == -1`.
 - Planets/dwarf planets/asteroids normally parent to a star.
 - Moons parent to a non-star body.
@@ -341,11 +402,17 @@ Runtime API:
 
 | Function | Purpose |
 |---|---|
-| `universe_add_body()` | Add or reuse one body slot from a filled `BodyCreateSpec` |
+| `universe_add_body()` | Add a body at runtime: reuse a dead slot (scanning all slots) or grow the heap array via `ensure_capacity()` |
 | `universe_live_body_count()` | Count `alive` bodies |
-| `universe_can_add_body()` | Check live count against `MAX_BODIES` |
+| `universe_can_add_body()` | Always true — runtime adds grow the heap; there is no `MAX_BODIES` cap on creation |
 | `universe_rebind_to_nearest_stars()` | Reassign star-orbiting bodies after sandbox star additions |
 | `universe_shutdown()` | Free trail buffers and the body array |
+
+> Runtime body creation (build mode, supernova remnants, collision spawns) grows
+> the body array on the heap exactly like the loader, so it works in the full
+> ~16k-body universe. `MAX_BODIES` only bounds the fixed collision/labels tables,
+> not how many bodies can exist. (Earlier these paths carried a stale 128-body
+> cap that silently failed in large universes.)
 
 ### `physics.c` / `physics.h`
 
@@ -638,18 +705,137 @@ Header-only vector/matrix utilities:
 - Translation stripping for skybox/camera-relative rendering.
 - Projection helper for world-to-screen tests.
 
+### `laws.c` / `laws.h`
+
+Owns `g_laws` (`UniverseLaws`), the single mutable set of **per-universe**
+physical constants the physics hot loop reads instead of compile-time `#define`s.
+Fields: `G`, `softening`, `time_scale`, `force_exp`, `lambda`, `pn_factor`,
+`c_light`, `gravity_isolation`, plus the adaptive-timestep model
+(`outer_period_divisor`, `inner_period_divisor`, `outer_dt_min`, `inner_dt_min`,
+`inner_dt_max`, `outer_dt_default` — see §8). `laws_reset()` restores Newtonian
+defaults (so JSON fields omitted by a universe fall back to standard physics).
+`laws_pair_factor(r2, r)` returns the pairwise acceleration scale, keeping the
+inverse-square fast path (no `pow()`) when `force_exp == 2`. See §8 for how each
+field enters the force kernel.
+
+### `settings.c` / `settings.h`
+
+Owns `g_settings` (`AppSettings`), the **global, cross-universe** counterpart to
+`g_laws`: the app-level tunables that used to be compile-time `#define`s —
+starfield density, camera FOV, warm-up / active-region radii, far-field fade
+distances, control sensitivities, loading-overlay look, and trail sampling
+geometry. Like `g_laws`, call sites read it through the original macro names
+(`FOV`, `NUM_STARS`, `ACTIVE_RADIUS_LY`, `SYS_*_FADE_*`, `TRAIL_*`, …) aliased
+in `common.h`. Persisted to `settings.json` in the working directory:
+`settings_load()` runs first in `main()`; `settings_save()` runs on quit but
+only when `settings_dirty()` (a snapshot `memcmp`) reports a change. Two fields
+own external resources and apply via the menu's buttons rather than live:
+`num_stars` (`settings_apply_starfield()` → re-runs `starfield_init`) and the
+overlay font sizes (`settings_apply_fonts()` → `loading_reload_fonts()`). The
+"Settings" menu tab edits every field; **per-universe** physics stays in `g_laws`
+and the universe JSON, not here.
+
+### `presets.c` / `presets.h`
+
+The "multiverse" registry: an array of `{name, path, blurb}` universes. The menu
+enumerates them (`preset_count()`/`preset_at()`); `main.c`'s `switch_universe()`
+loads the chosen JSON. `preset_index_of_path()` maps the loaded path back to an
+index for menu highlighting. Preset JSON lives in `assets/universes/`.
+
+### `catalog.c` / `catalog.h`
+
+Converts real astronomical catalogs (NASA Exoplanet Archive, JPL Horizons, Gaia)
+into ordinary universe JSON the existing loader understands — so imported data
+gets laws/rings/asteroids/menu for free. Deliberately free of SDL/OpenGL: it
+backs both the offline `tools/catalogtool.c` CLI and the in-app "Import real
+data" buttons (which convert to a temp file, then load it). `catalog_convert()`
+returns the body count written.
+
+### `lifecycle.c` / `lifecycle.h`
+
+Stellar evolution state machine, on its own clock decoupled from the integrator
+(the orbital sim is never sped up). A star's radius/colour is a function of age;
+the only moment it perturbs the simulation is death. Phases: `MAIN_SEQUENCE →
+SUBGIANT → RED_GIANT → death`; high-mass (≥ ~8 M☉) stars core-collapse to a
+neutron star or black hole, low-mass stars puff a planetary nebula to a white
+dwarf. `lifecycle_advance_phase()` / `lifecycle_trigger_death()` are driven from
+the Inspect panel; `lifecycle_step(dt)` does continuous auto-aging when
+`g_stellar_years_per_sec > 0` (default 0 = manual only). Death calls
+`supernova_detonate()`, which retires the star and spawns the remnant body.
+
+### `post.c` / `post.h`
+
+HDR bloom post-processing. `post_begin()` binds an offscreen RGBA16F target
+before `render_frame()`; `post_end()` runs bright-pass → separable Gaussian blur
+→ additive composite to the screen. Both are no-ops when bloom is unavailable or
+disabled, so the caller wraps every frame unconditionally. Threshold/intensity
+are exposed via `post_get/set_bloom()` (Visuals menu). Targets rebuild on resize.
+
+### `nebula.c` / `nebula.h`
+
+Real-catalogue nebulae as world-space volumetric raymarched clouds. Each has a
+true J2000 position + physical radius; one representation at all ranges (a soft
+blob when far, an enveloping volume when flown into — no LOD switch). Beyond the
+render far-plane the centre/radius are clamped to a shell preserving angular size
+(same trick as the star-dot and black-hole passes). Drawn camera-relative after
+opaque geometry with depth test on / writes off. Exposes a Visuals toggle +
+density/steps and a Navigate-tab enumeration.
+
+### `menu.c` / `menu.h`
+
+The Dear ImGui (cimgui) multiverse overlay, compiled only under `USE_IMGUI`
+(`make IMGUI=1`); every function is a no-op stub otherwise, so `main.c` calls
+them unconditionally. `menu_render()` runs one ImGui frame after the world draws
+and before swap, returning a preset index to switch to (or -1), signalling law
+changes, and optionally a JSON path to load (e.g. a just-imported catalog). It
+also hosts the per-star Inspect panel that drives `lifecycle.c`. `menu_process_event()`
+reports whether ImGui consumed an SDL event so it isn't also treated as game input.
+
 ---
 
 ## 7. Universe Data Format
 
-`assets/universe.json` is the content source for bodies, rings, and asteroid
-belts. The local JSON parser accepts comments and trailing commas.
+`assets/universe.json` (and the `assets/universes/*.json` presets) is the content
+source for laws, bodies, rings, and asteroid belts. The local JSON parser accepts
+comments and trailing commas.
+
+### Laws block
+
+An optional top-level `"laws"` object overrides the Newtonian defaults for that
+universe; any omitted field falls back to the `LAWS_DEFAULT_*` value (so existing
+files keep working). Parsed and round-tripped (save/load) by `universe.c`.
+
+```jsonc
+"laws": {
+  "G": 6.674e-11,          // gravitational constant (m^3 kg^-1 s^-2)
+  "softening": 1e5,        // Plummer softening length (m)
+  "time_scale": 1.0,       // multiplier on simulated time
+  "force_exp": 2.0,        // radial falloff exponent (2 = inverse-square)
+  "lambda": 0.0,           // cosmological outward push ∝ distance (dark-energy analogue)
+  "pn_factor": 0.0,        // post-Newtonian perihelion precession (1 = physical)
+  "gravity_isolation": 1.0,// 1 = star systems gravitate only internally (galaxy-scale; see §8)
+
+  // adaptive-timestep model (all SI seconds; 1 day = 86400):
+  "outer_period_divisor": 24,    // slow step = orbital period / this
+  "inner_period_divisor": 96,    // fast substep = orbital period / this
+  "outer_dt_min": 4320,          // floor on the slow step
+  "inner_dt_min": 60,            // floor on the fast substep (below ~60 s physics diverges)
+  "inner_dt_max": 1728,          // ceiling on the fast substep
+  "outer_dt_default": 86400      // ceiling / fallback for the slow step
+}
+```
+
+App-level tunables (FOV, starfield count, warm-up radius, fades, …) are **not**
+here — they are global, cross-universe, and live in `settings.json` via
+`g_settings` (see `settings.c` in §6).
 
 ### Body Types
 
 Supported body `type` values:
 
 - `star`
+- `black_hole` — loaded/grouped like a star (massive system root) but flagged
+  `is_black_hole` for the accretion-disk/shadow render pass instead of glare.
 - `planet`
 - `dwarf_planet`
 - `asteroid`
@@ -833,6 +1019,45 @@ Trail sampling:
 - Uses frame snapshots so collision code can cut trails at an impact time.
 - Dead bodies can stop emitting and fade retained trails.
 
+### Configurable laws
+
+The force kernel reads `g_laws` (see `laws.c`) rather than constants:
+
+- **G / softening** thread through every pairwise acceleration. `laws_pair_factor()`
+  computes the pair scale, keeping the no-`pow()` fast path for inverse-square.
+- **force_exp** changes the radial falloff exponent (2 = Newtonian; only 1 and 2
+  give closed orbits — others precess).
+- **lambda** adds a cosmological outward term `a += lambda * r_vec`.
+- **pn_factor / c_light** add a post-Newtonian perihelion-precession term.
+- **time_scale** multiplies simulated dt.
+
+`laws_reset()` runs before each universe load so unspecified JSON fields are
+physically standard.
+
+### 8.1 Galaxy-scale: active region and far-field rendering
+
+A live N-body sim can't brute-force a galaxy. The model (Space Engine / Celestia
+style): star systems are gravitationally independent islands, so only the camera's
+neighbourhood is fully simulated and everything else is a cheap point. See
+`docs/SCALING_HANDOFF.md` for the full status; the essentials:
+
+- **Gravity isolation** (`g_laws.gravity_isolation`, default on): a body only feels
+  others in its own system, turning the force kernel from O(active × N) into
+  ≈ O(N). Turn it off only for deliberately-coupled scenarios (clusters).
+- **Active region** (`main.c`): only systems within `ACTIVE_RADIUS_LY` of the
+  camera are stepped; distant systems freeze. Warmup pre-simulates only systems
+  within `WARMUP_RADIUS_LY` (just the Solar System at boot, so boot is fast).
+- **Heap-grown tables**: physics member tables (CSR layout) and `render.c` scratch
+  + dot VBO grow with `g_nbodies`, which can be ~16k.
+- **Near/far dot split** (`render.c`): near bodies get full per-dot treatment
+  (priority sort, overlap dedup, glare occlusion); the ~16k far bodies go through
+  one O(N) pass projected camera-relative in *double* (floating origin), emitted
+  into the dot VBO with a single draw call.
+- **Caveat**: collision and labels still use fixed `[MAX_BODIES]` tables and cover
+  the first 128 body *indices*, not the 128 nearest the camera — so they don't yet
+  follow you across the galaxy (handoff TODO "B2"). **Do not just raise
+  `MAX_BODIES`** — `collision.c` has `[MAX_BODIES][MAX_BODIES]` stack arrays.
+
 ---
 
 ## 9. Collision and Supernova Flow
@@ -874,6 +1099,30 @@ On star-star supernova:
 - Surviving root-orbiting subtrees receive delayed shock pushes.
 - Render events drive volumetric shaders until the event expires.
 
+The same machinery is reused by the stellar lifecycle: a star reaching end of
+life calls `supernova_detonate(star)`, which retires the star and spawns the
+mass-appropriate remnant — black hole, neutron star, or (low-mass) a gentle
+planetary-nebula puff to a white dwarf — scaling the blast accordingly.
+
+### Shock-push performance (galaxy scale)
+
+The shock-kick path is kept linear so a supernova in a 16k-body universe stays
+real-time:
+
+- **Bounded reach.** The maximum blast radius is fixed at detonation —
+  `shock_speed × CLOUD_DURATION`, and `shock_speed` scales with progenitor mass,
+  so a heavier star reaches farther. A single O(N) scan at detonation collects
+  the root-orbiting bodies within that radius into a per-event candidate list;
+  `supernova_step()` then visits only that list each frame instead of all bodies.
+- **Subtree via child index.** `body_subtree_mass()` / `apply_velocity_to_subtree()`
+  / `destroy_subtree()` traverse a cached CSR child index (`children_ensure()`,
+  rebuilt lazily at most once per frame) rather than scanning all bodies to find
+  descendants — O(subtree) instead of O(N) per kicked body.
+
+Together these turn what was O(N²) (every body × all-bodies descendant scan, every
+frame) into O(N), so even a massive blast in a dense cluster — or with
+`gravity_isolation` off — only does work proportional to the bodies actually hit.
+
 ---
 
 ## 10. Rendering Pipeline
@@ -887,27 +1136,39 @@ On star-star supernova:
 `render_frame(view, proj, view_rot, dt)` primarily uses
 `vp_camrel = proj * view_rot`, with body positions already camera-relative.
 
-Current pass order:
+`main.c` wraps the scene in the bloom pipeline: `post_begin()` binds an offscreen
+HDR target, `render_frame()` draws into it, `post_end()` blooms and composites to
+the screen — then the ImGui menu and UI draw on top so they don't bloom. When
+bloom is disabled both wrappers are no-ops and rendering goes straight to the
+default framebuffer.
+
+Current pass order (within `render_frame`):
 
 | Order | Pass | Notes |
 |---|---|---|
 | 1 | Starfield | Catalog/procedural GL points, rotation-only skybox |
 | 2 | Body render info | Compute visual radii, distances, screen metrics |
 | 3 | Inspection pick | Updates highlighted body from screen center |
-| 4 | Spheres | Ray-sphere billboard shader for visible bodies |
+| 4 | Spheres | Ray-sphere billboard shader (excludes black holes) |
 | 5 | Atmospheres/heat glows | Additive atmospheric shell shader |
-| 6 | Supernova clouds | Volumetric ejecta billboard shader |
-| 7 | Supernova core/flash | Hot core and flash shader |
-| 8 | Collision particles | Additive GL point debris |
-| 9 | Center dots | Small-body/star point indicators with overlap pruning |
-| 10 | Rings | Keplerian ring particles |
-| 11 | Asteroids | Belt GL points |
-| 12 | Trails | Retained orbital paths |
-| 13 | Star glare | Additive star halo billboards |
-| 14 | Build preview | Ghost dot, guide lines, distance labels |
-| 15 | Inspection ring | Screen-space dashed target ring |
-| 16 | Labels | Billboard text labels |
-| 17 | UI overlay | Called by `main.c` after `render_frame()` |
+| 6 | Black holes | `bh` billboard: accretion disk + shadow + photon ring |
+| 7 | Nebulae | World-space volumetric raymarch (depth test on, writes off) |
+| 8 | Supernova cloud | Volumetric ejecta raymarch — rendered to a **half-res** target then composited back (`vol_composite`); core/flash stays full-res |
+| 9 | Supernova core/flash | Hot core and flash shader |
+| 10 | Collision particles | Additive GL point debris |
+| 11 | Center dots | Near/far split: sized star dots + far-field O(N) pass |
+| 12 | Rings | Keplerian ring particles |
+| 13 | Asteroids | Belt GL points |
+| 14 | Trails | Retained orbital paths |
+| 15 | Star glare | Additive star halo billboards (sub-pixel glares culled) |
+| 16 | Build preview | Ghost dot, guide lines, distance labels |
+| 17 | Inspection ring | Screen-space dashed target ring |
+| 18 | Labels | Billboard text labels |
+| — | UI / ImGui | Drawn by `main.c` after `post_end()`, so they don't bloom |
+
+(Exact ordering/section numbers live in `render.c`; treat this as the conceptual
+order. The nebula/black-hole passes share the camera-relative double-precision
+floating-origin trick described above.)
 
 Depth and blending:
 
@@ -922,7 +1183,13 @@ Small-body rendering:
 
 - Bodies transition between ray-sphere rendering and dot rendering based on
   projected pixel size.
-- Dot overlap is greedily resolved in priority order: stars, planets, moons.
+- Dots split near vs. far by camera distance (`NEAR_DOT_DIST`). **Near** dots get
+  the full treatment: priority-ordered overlap dedup (stars, planets, moons),
+  glare occlusion, dot↔sphere fade. **Far** dots (the ~16k bulk) go through one
+  O(N) pass — projected camera-relative in double precision (floating origin),
+  no O(N²) work, one draw call.
+- Star dots are sized per-point (`star_dot.vert`) from an apparent-magnitude
+  estimate, so brighter/nearer stars read larger.
 - Stars can be clamped toward the far plane for visibility during warp travel.
 
 ---
@@ -934,6 +1201,7 @@ Small-body rendering:
 | `phong.vert/frag` | Billboard ray-sphere planets/stars, procedural surfaces, collision scars |
 | `atm.vert/frag` | Ray-shell atmospheric and collision heat glow |
 | `color.vert/frag` | Starfield and body/dot GL points |
+| `star_dot.vert` + `color.frag` | Per-point-sized star dots (`gl_PointSize` from magnitude) |
 | `solid.vert/frag` | Trail line strips |
 | `ring.vert` + `color.frag` | Keplerian ring particle positions and colors |
 | `asteroid_particle.vert` + `color.frag` | Asteroid belt point size/fade |
@@ -945,6 +1213,10 @@ Small-body rendering:
 | `supernova_billboard.vert` | Shared billboard vertex shader for supernova passes |
 | `supernova_core.frag` | Supernova flash/core rendering |
 | `supernova_cloud.frag` | Supernova ejecta cloud rendering |
+| `bh.vert/frag` | Black hole: inclined accretion disk, opaque shadow, photon ring, Doppler beaming |
+| `nebula.vert/frag` | World-space volumetric raymarched nebulae (domain-warped FBM) |
+| `post_quad.vert` + `bloom_bright/blur/composite.frag` | HDR bloom: bright-pass → separable Gaussian → additive composite |
+| `post_quad.vert` + `vol_composite.frag` | Upscale + composite the half-res supernova-cloud layer back over the scene (premultiplied over) |
 
 `phong.frag` receives:
 
@@ -1030,7 +1302,7 @@ json.c, gl_utils.c, camera.c, audio.c, ui_theme.c
 
 ### Add or change universe content
 
-Edit `assets/universe.json`.
+Edit `assets/universe.json` (or a file under `assets/universes/`).
 
 - Add stars before their planets.
 - Add planets/dwarf planets/asteroids before their moons.
@@ -1038,6 +1310,19 @@ Edit `assets/universe.json`.
 - Use `moon_keplerian` for moons.
 - Add rings under the top-level `"rings"` array.
 - Add belts under the top-level `"asteroid_belts"` array.
+- Add an optional `"laws"` block to give the universe non-Newtonian physics.
+
+### Add a universe to the multiverse menu
+
+Edit `src/presets.c` — add a `{name, path, blurb}` entry pointing at a JSON file
+under `assets/universes/`. It then appears in the `U` menu picker automatically.
+
+### Add or change a physical law
+
+Edit `src/laws.h` (struct field + `LAWS_DEFAULT_*`), `src/laws.c` (`laws_reset`),
+and `src/universe.c` (parse + save in the `"laws"` block). Apply the field in the
+force kernel in `src/physics.c`; if it affects stability, update timestep
+selection. Expose it on a slider in `src/menu.c` if useful.
 
 ### Add a new build preset
 
@@ -1122,6 +1407,7 @@ Update all of them together or avoid changing the convention.
 
 ## Current Reference Date
 
-This document reflects the codebase in this repository as of May 2026. The
+This document reflects the codebase in this repository as of June 2026, after the
+multiverse-laws, real-data-import, galaxy-scaling, and stellar-lifecycle work. The
 source files remain the authoritative reference when behavior and documentation
-disagree.
+disagree; `docs/` tracks in-progress and planned work.

@@ -7,12 +7,16 @@
 #include "menu.h"
 #include "presets.h"
 #include "laws.h"
+#include "settings.h"
 #include "catalog.h"
 #include "universe.h"
 #include "camera.h"
 #include "body.h"
 #include "post.h"
 #include "nebula.h"
+#include "inspect.h"
+#include "lifecycle.h"
+#include "physics.h"
 #include <math.h>
 #include <string.h>
 #include <ctype.h>
@@ -259,6 +263,239 @@ static void menu_render_navigate(void)
     igEndChild();
 }
 
+/* Render the "Inspect" tab: details of the currently inspected body, plus
+ * stellar-lifecycle controls when it is a star. */
+static void menu_render_inspect(void)
+{
+    int t = g_inspect_target;
+    if (t < 0 || t >= g_nbodies || !g_bodies[t].alive) {
+        igTextDisabled("No object inspected.\n"
+                       "Aim at a body and enter inspect mode to select it.");
+        return;
+    }
+    Body *b = &g_bodies[t];
+    igText("%s", b->name);
+    igTextDisabled("%s", b->is_black_hole ? "Black hole" :
+                         b->is_star ? "Star" : "Planet / moon");
+    igSpacing();
+    igText("Mass    %.3g Msun", b->mass / SOLAR_MASS_KG);
+    igText("Radius  %.3g Rsun", b->radius / 6.9634e8);
+    igSpacing();
+
+    if (b->is_black_hole) {
+        igSeparator();
+        igText("Accretion (AGN engine)");
+        igSpacing();
+        igText("Spin a*          %.4f", b->spin_a);
+        igText("Eddington ratio  %.3g  (L/L_edd)", b->eddington_ratio);
+        igText("Accretion rate   %.3g Msun/yr",
+               b->mdot * 3.15576e7 / SOLAR_MASS_KG);
+        igText("Gas reservoir    %.3g Msun", b->gas_reservoir / SOLAR_MASS_KG);
+        igTextDisabled(b->gas_reservoir > 0.0
+                       ? "Fuelled — activity drives the disk/jets/torus."
+                       : "Starved — quiescent hole.");
+        igTextDisabled("Advance Stellar time to evolve (fade + grow).");
+        igSpacing();
+    }
+
+    if (b->is_star && !b->is_black_hole) {
+        igSeparator();
+        igText("Stellar lifecycle");
+        igSpacing();
+        igText("Phase: %s", lifecycle_phase_name(b->star_phase));
+
+        if (lifecycle_is_evolvable_star(t)) {
+            double tau = b->ms_lifetime_yr > 0.0 ? b->ms_lifetime_yr
+                                                 : lifecycle_ms_lifetime_yr(b->mass);
+            int death_remnant = 0;   /* >0 = a death just spawned this remnant */
+            igTextDisabled("Main-sequence lifetime ~ %.3g yr", tau);
+            if (b->age_yr > 0.0)
+                igTextDisabled("Age ~ %.3g yr (%.0f%% of lifetime)",
+                               b->age_yr, 100.0 * b->age_yr / tau);
+            igSpacing();
+
+            if (igButton("Age to next phase", (ImVec2_c){ -1.0f, 0.0f }))
+                death_remnant = lifecycle_advance_phase(t);
+            igSetItemTooltip("Step main sequence -> subgiant -> red giant -> death.");
+
+            igSpacing();
+            int sn = lifecycle_will_supernova(b->mass);
+            if (igButton(sn ? "Trigger Supernova"
+                            : "Collapse (planetary nebula)",
+                         (ImVec2_c){ -1.0f, 0.0f }))
+                death_remnant = lifecycle_trigger_death(t);
+            igSetItemTooltip(sn
+                ? "Core-collapse now: blow off the envelope and leave a neutron\n"
+                  "star or black hole, kicking nearby bodies."
+                : "End this low-mass star now: a gentle nebula puff leaving a\n"
+                  "white dwarf.");
+
+            /* A death just happened. Inspect mode pauses the sim, which would
+             * freeze the explosion mid-flash forever, so resume so it plays out
+             * and clears — and refocus the orbit camera on the new remnant
+             * (the progenitor it was orbiting no longer exists). */
+            if (death_remnant > 0) {
+                g_paused = 0;
+                inspect_focus_body(death_remnant);
+            }
+        } else {
+            igTextDisabled("This object has reached its final state.");
+        }
+    }
+
+    igSpacing();
+    igSeparator();
+    igSpacing();
+    /* Auto-aging rate: stellar evolution's own clock, independent of the
+     * orbital speed control (which is capped for integrator stability). */
+    float rate = (float)g_stellar_years_per_sec;
+    igPushItemWidth(igGetContentRegionAvail().x * 0.55f);
+    if (igSliderFloat("Stellar time", &rate, 0.0f, 2.0e6f, "%.0f yr/s", 0))
+        g_stellar_years_per_sec = (double)rate;
+    igPopItemWidth();
+    igSetItemTooltip("How fast every star ages on its own clock.\n"
+                     "0 = stars only change via the buttons above.\n"
+                     "This does NOT speed up orbits.");
+}
+
+/* Global application settings (g_settings). Most changes take effect live;
+ * num_stars and the overlay fonts own GL/TTF resources so they apply via a
+ * button. Persisted to settings.json on exit (or "Save now" below). */
+static void menu_render_settings(void)
+{
+    igTextDisabled("Global settings — apply to every universe.\n"
+                   "Saved to settings.json on exit.");
+    igSpacing();
+
+    float w = 0.52f;
+
+    if (igCollapsingHeader_TreeNodeFlags("Performance & scale",
+                                         ImGuiTreeNodeFlags_DefaultOpen)) {
+        float wr = (float)g_settings.warmup_radius_ly;
+        float wy = (float)g_settings.warmup_years;
+        float ar = (float)g_settings.active_radius_ly;
+        igPushItemWidth(igGetContentRegionAvail().x * w);
+        if (igSliderFloat("Warm-up radius", &wr, 0.0f, 10.0f, "%.2f ly", 0))
+            g_settings.warmup_radius_ly = (double)wr;
+        igSetItemTooltip("Systems this close to the start camera are pre-simulated\n"
+                         "at load. Smaller = faster startup.");
+        if (igSliderFloat("Warm-up time", &wy, 0.0f, 10.0f, "%.2f yr", 0))
+            g_settings.warmup_years = (double)wy;
+        igSetItemTooltip("Years of physics pre-simulated so orbits start spread out.");
+        if (igSliderFloat("Active radius", &ar, 0.25f, 20.0f, "%.2f ly",
+                          ImGuiSliderFlags_Logarithmic))
+            g_settings.active_radius_ly = (double)ar;
+        igSetItemTooltip("Radius of the live-simulated region each frame.\n"
+                         "Larger = more bodies integrated = slower.");
+        igPopItemWidth();
+    }
+
+    igSpacing();
+    if (igCollapsingHeader_TreeNodeFlags("Starfield", 0)) {
+        igPushItemWidth(igGetContentRegionAvail().x * w);
+        igSliderInt("Fallback stars", &g_settings.num_stars, 0, 20000, "%d", 0);
+        igPopItemWidth();
+        igSetItemTooltip("Procedural skybox star count (used when no BSC5 catalog).");
+        if (igButton("Regenerate starfield", (ImVec2_c){ -1.0f, 0.0f }))
+            settings_apply_starfield();
+    }
+
+    igSpacing();
+    if (igCollapsingHeader_TreeNodeFlags("Camera & controls", 0)) {
+        igPushItemWidth(igGetContentRegionAvail().x * w);
+        igSliderFloat("Field of view", &g_settings.fov, 30.0f, 110.0f, "%.0f deg", 0);
+        igSliderFloat("Warp min", &g_settings.warp_speed_min_au, 1.0f, 5000.0f,
+                      "%.0f AU/s", ImGuiSliderFlags_Logarithmic);
+        igSliderFloat("Warp max", &g_settings.warp_speed_max_au, 1000.0f, 200000.0f,
+                      "%.0f AU/s", ImGuiSliderFlags_Logarithmic);
+        igSliderFloat("Adjust step", &g_settings.slider_step, 0.01f, 0.5f, "%.2f", 0);
+        igSetItemTooltip("Increment for keyboard/wheel volume & sensitivity changes.");
+        igSliderFloat("Mouse sens min", &g_settings.mouse_sens_min, 0.01f, 1.0f, "%.2f", 0);
+        igSliderFloat("Mouse sens max", &g_settings.mouse_sens_max, 0.1f, 5.0f, "%.2f", 0);
+        igPopItemWidth();
+    }
+
+    igSpacing();
+    if (igCollapsingHeader_TreeNodeFlags("Far-field fade (AU)", 0)) {
+        igPushItemWidth(igGetContentRegionAvail().x * w);
+        igSliderFloat("Trail fade start", &g_settings.sys_trail_fade_start, 0.0f, 5000.0f, "%.0f", 0);
+        igSliderFloat("Trail fade end",   &g_settings.sys_trail_fade_end,   0.0f, 8000.0f, "%.0f", 0);
+        igSliderFloat("Dot fade start",   &g_settings.sys_dot_fade_start,   0.0f, 5000.0f, "%.0f", 0);
+        igSliderFloat("Dot fade end",     &g_settings.sys_dot_fade_end,     0.0f, 8000.0f, "%.0f", 0);
+        igPopItemWidth();
+        igSetItemTooltip("Distance (AU) over which system trails / non-star dots fade out.");
+    }
+
+    igSpacing();
+    if (igCollapsingHeader_TreeNodeFlags("Loading overlay", 0)) {
+        igPushItemWidth(igGetContentRegionAvail().x * w);
+        igSliderInt("Status font px", &g_settings.status_font_px, 8, 48, "%d", 0);
+        igSliderInt("Percent font px", &g_settings.pct_font_px, 6, 36, "%d", 0);
+        igPopItemWidth();
+        if (igButton("Reload fonts", (ImVec2_c){ -1.0f, 0.0f }))
+            settings_apply_fonts();
+        igSeparator();
+
+        float fin  = (float)g_settings.fade_in_dur;
+        float fout = (float)g_settings.fade_out_dur;
+        float pe   = (float)g_settings.prog_ease;
+        float sw   = (float)g_settings.sweep_speed;
+        float pdt  = (float)g_settings.present_dt;
+        igPushItemWidth(igGetContentRegionAvail().x * w);
+        if (igSliderFloat("Fade in",  &fin,  0.0f, 2.0f, "%.2f s", 0)) g_settings.fade_in_dur = (double)fin;
+        if (igSliderFloat("Fade out", &fout, 0.0f, 2.0f, "%.2f s", 0)) g_settings.fade_out_dur = (double)fout;
+        if (igSliderFloat("Progress ease", &pe, 1.0f, 30.0f, "%.1f", 0)) g_settings.prog_ease = (double)pe;
+        if (igSliderFloat("Sweep speed", &sw, 0.1f, 3.0f, "%.2f /s", 0)) g_settings.sweep_speed = (double)sw;
+        if (igSliderFloat("Present interval", &pdt, 0.002f, 0.05f, "%.3f s", 0)) g_settings.present_dt = (double)pdt;
+        igPopItemWidth();
+
+        float col[3] = { g_settings.accent_r, g_settings.accent_g, g_settings.accent_b };
+        if (igColorEdit3("Accent", col, 0)) {
+            g_settings.accent_r = col[0];
+            g_settings.accent_g = col[1];
+            g_settings.accent_b = col[2];
+        }
+    }
+
+    igSpacing();
+    if (igCollapsingHeader_TreeNodeFlags("Trails (advanced)", 0)) {
+        float msl  = (float)g_settings.trail_min_segment_len;
+        float xsl  = (float)g_settings.trail_max_segment_len;
+        float bsl  = (float)g_settings.trail_base_segment_len;
+        float ssl  = (float)g_settings.trail_satellite_segment_len;
+        float caf  = (float)g_settings.trail_close_approach_factor;
+        float cer  = (float)g_settings.trail_curve_error_ratio;
+        igPushItemWidth(igGetContentRegionAvail().x * w);
+        if (igSliderFloat("Min segment (m)", &msl, 1.0e3f, 1.0e6f, "%.0f",
+                          ImGuiSliderFlags_Logarithmic)) g_settings.trail_min_segment_len = (double)msl;
+        if (igSliderFloat("Max segment (m)", &xsl, 1.0e6f, 1.0e10f, "%.3g",
+                          ImGuiSliderFlags_Logarithmic)) g_settings.trail_max_segment_len = (double)xsl;
+        if (igSliderFloat("Base segment (m)", &bsl, 1.0e5f, 1.0e10f, "%.3g",
+                          ImGuiSliderFlags_Logarithmic)) g_settings.trail_base_segment_len = (double)bsl;
+        if (igSliderFloat("Satellite segment (m)", &ssl, 1.0e3f, 1.0e8f, "%.3g",
+                          ImGuiSliderFlags_Logarithmic)) g_settings.trail_satellite_segment_len = (double)ssl;
+        if (igSliderFloat("Close-approach factor", &caf, 0.05f, 1.0f, "%.2f", 0))
+            g_settings.trail_close_approach_factor = (double)caf;
+        if (igSliderFloat("Curve error ratio", &cer, 0.05f, 1.0f, "%.2f", 0))
+            g_settings.trail_curve_error_ratio = (double)cer;
+        igPopItemWidth();
+        igTextDisabled("Retained-length and curve-error bounds use defaults; edit\n"
+                       "settings.json directly for those.");
+    }
+
+    igSpacing();
+    igSeparator();
+    float bw = (igGetContentRegionAvail().x - igGetStyle()->ItemSpacing.x) * 0.5f;
+    if (igButton("Reset to defaults", (ImVec2_c){ bw, 0.0f })) {
+        settings_reset();
+        settings_apply_fonts();
+        settings_apply_starfield();
+    }
+    igSameLine(0.0f, -1.0f);
+    if (igButton("Save now", (ImVec2_c){ bw, 0.0f }))
+        settings_save();
+}
+
 int menu_render(int current_preset, int *laws_changed, const char **out_load_path)
 {
     int switch_to = -1;
@@ -359,13 +596,56 @@ int menu_render(int current_preset, int *laws_changed, const char **out_load_pat
 
                 igSpacing();
                 if (igButton("Reset to Newtonian", (ImVec2_c){ -1.0f, 0.0f })) {
-                    g_laws.G          = LAWS_DEFAULT_G;
-                    g_laws.force_exp  = LAWS_DEFAULT_FORCE_EXP;
-                    g_laws.time_scale = 1.0;
-                    g_laws.lambda     = 0.0;
-                    g_laws.pn_factor  = 0.0;
-                    g_laws.gravity_isolation = LAWS_DEFAULT_GRAV_ISOLATION;
+                    laws_reset();
                     if (laws_changed) *laws_changed = 1;
+                }
+
+                /* ---- Timestep model (advanced, per-universe) ------------ */
+                igSpacing();
+                if (igTreeNode_Str("Timestep model (advanced)")) {
+                    igTextDisabled("Integration accuracy vs. cost. Changes rebuild\n"
+                                   "the per-system timestep model immediately.");
+                    igSpacing();
+                    float opd = (float)g_laws.outer_period_divisor;
+                    float ipd = (float)g_laws.inner_period_divisor;
+                    float odmin = (float)g_laws.outer_dt_min;   /* seconds */
+                    float idmin = (float)g_laws.inner_dt_min;
+                    float idmax = (float)g_laws.inner_dt_max;
+                    float oddef = (float)g_laws.outer_dt_default;
+
+                    igPushItemWidth(igGetContentRegionAvail().x * 0.50f);
+                    int tch = 0;
+                    tch |= igSliderFloat("Outer divisor", &opd, 4.0f, 192.0f, "T / %.0f", 0);
+                    igSetItemTooltip("Slow (star/planet) step = orbital period / this.");
+                    tch |= igSliderFloat("Inner divisor", &ipd, 8.0f, 512.0f, "T / %.0f", 0);
+                    igSetItemTooltip("Fast (moon) substep = orbital period / this.");
+                    tch |= igSliderFloat("Outer dt min", &odmin, 60.0f, 86400.0f, "%.0f s",
+                                         ImGuiSliderFlags_Logarithmic);
+                    igSetItemTooltip("Floor on the slow step (s). Stops one tight orbiter\n"
+                                     "from throttling the whole scene.");
+                    tch |= igSliderFloat("Inner dt min", &idmin, 1.0f, 600.0f, "%.0f s",
+                                         ImGuiSliderFlags_Logarithmic);
+                    igSetItemTooltip("Floor on the fast substep (s).\n"
+                                     "WARNING: much below 60 s and physics diverges.");
+                    tch |= igSliderFloat("Inner dt max", &idmax, 60.0f, 7200.0f, "%.0f s",
+                                         ImGuiSliderFlags_Logarithmic);
+                    igSetItemTooltip("Ceiling on the fast substep (s).");
+                    tch |= igSliderFloat("Outer dt default", &oddef, 3600.0f, 864000.0f, "%.0f s",
+                                         ImGuiSliderFlags_Logarithmic);
+                    igSetItemTooltip("Ceiling / fallback for the slow step (s).");
+                    igPopItemWidth();
+
+                    if (tch) {
+                        if (idmin < 1.0f) idmin = 1.0f;   /* hard floor: divergence */
+                        g_laws.outer_period_divisor = (double)opd;
+                        g_laws.inner_period_divisor = (double)ipd;
+                        g_laws.outer_dt_min         = (double)odmin;
+                        g_laws.inner_dt_min         = (double)idmin;
+                        g_laws.inner_dt_max         = (double)idmax;
+                        g_laws.outer_dt_default     = (double)oddef;
+                        if (laws_changed) *laws_changed = 1;
+                    }
+                    igTreePop();
                 }
             }
 
@@ -388,6 +668,75 @@ int menu_render(int current_preset, int *laws_changed, const char **out_load_pat
                     igSetItemTooltip("How strongly the glow is added back.");
                     igPopItemWidth();
                     if (ch) post_set_bloom(en, th, in);
+
+                    /* ---- Tonemapping (persisted in g_settings) -------- */
+                    igSpacing();
+                    int   tm = g_settings.tonemap_mode;
+                    float ex = g_settings.tonemap_exposure;
+                    int   tch = 0;
+                    igText("Tonemap");
+                    igSetItemTooltip("Filmic highlight roll-off. Off = original "
+                                     "linear look. Needs Bloom (HDR target) on.");
+                    tch |= igRadioButton_IntPtr("Off", &tm, 0);  igSameLine(0.0f, 12.0f);
+                    tch |= igRadioButton_IntPtr("ACES", &tm, 1); igSameLine(0.0f, 12.0f);
+                    tch |= igRadioButton_IntPtr("Reinhard", &tm, 2);
+                    if (tm != 0) {
+                        igPushItemWidth(igGetContentRegionAvail().x * 0.55f);
+                        tch |= igSliderFloat("Exposure", &ex, 0.05f, 8.0f, "%.2f",
+                                             ImGuiSliderFlags_Logarithmic);
+                        igSetItemTooltip("Linear exposure before the tonemap curve.");
+                        igPopItemWidth();
+                    }
+                    if (tch) {
+                        g_settings.tonemap_mode     = tm;
+                        g_settings.tonemap_exposure = ex;
+                        post_set_tonemap(tm, ex);
+                    }
+
+                    /* ---- Lens optics (persisted in g_settings) -------- */
+                    igSpacing();
+                    int   ae = g_settings.auto_exposure;
+                    float ca = g_settings.chromatic_aberration;
+                    float vg = g_settings.vignette;
+                    int   och = 0;
+                    bool  aeb = ae;
+                    if (igCheckbox("Auto exposure", &aeb)) { ae = aeb; och = 1; }
+                    igSetItemTooltip("Adapt exposure to scene brightness "
+                                     "(needs a tonemap mode on).");
+                    igPushItemWidth(igGetContentRegionAvail().x * 0.55f);
+                    och |= igSliderFloat("Chromatic aberration", &ca, 0.0f, 0.02f, "%.4f", 0);
+                    igSetItemTooltip("Lateral colour fringing toward the edges.");
+                    och |= igSliderFloat("Vignette", &vg, 0.0f, 1.0f, "%.2f", 0);
+                    igSetItemTooltip("Darken the corners of the frame.");
+                    igPopItemWidth();
+                    if (och) {
+                        g_settings.auto_exposure        = ae;
+                        g_settings.chromatic_aberration = ca;
+                        g_settings.vignette             = vg;
+                        post_set_optics(ae, ca, vg);
+                    }
+
+                    float sp = g_settings.lens_spikes;
+                    igPushItemWidth(igGetContentRegionAvail().x * 0.55f);
+                    if (igSliderFloat("Star spikes", &sp, 0.0f, 1.5f, "%.2f", 0))
+                        g_settings.lens_spikes = sp;
+                    igSetItemTooltip("Diffraction spikes on bright stars.");
+                    igSliderFloat("Relativistic", &g_settings.relativistic, 0.0f, 1.0f, "%.2f", 0);
+                    igSetItemTooltip("Aberration + Doppler shift at warp speed. "
+                                     "Only visible while moving fast.");
+                    igPopItemWidth();
+
+                    /* ---- Stellar appearance (persisted in g_settings) - */
+                    igSpacing();
+                    igText("Stars");
+                    igPushItemWidth(igGetContentRegionAvail().x * 0.55f);
+                    igSliderFloat("Twinkle", &g_settings.star_twinkle, 0.0f, 1.0f, "%.2f", 0);
+                    igSetItemTooltip("Subtle per-star brightness shimmer on the dot field.");
+                    igSliderFloat("Corona", &g_settings.star_corona, 0.0f, 1.0f, "%.2f", 0);
+                    igSetItemTooltip("Animated glare streamers, stronger on hot blue stars.");
+                    igSliderFloat("Starspots", &g_settings.starspots, 0.0f, 1.0f, "%.2f", 0);
+                    igSetItemTooltip("Granulation and dark spots on close-up star surfaces.");
+                    igPopItemWidth();
                 }
 
                 igSeparator();
@@ -450,6 +799,20 @@ int menu_render(int current_preset, int *laws_changed, const char **out_load_pat
            if (igBeginTabItem("Navigate", NULL, 0)) {
             igSpacing();
             menu_render_navigate();
+            igEndTabItem();
+           }
+
+           /* ===== Inspect tab: body details + stellar lifecycle ========== */
+           if (igBeginTabItem("Inspect", NULL, 0)) {
+            igSpacing();
+            menu_render_inspect();
+            igEndTabItem();
+           }
+
+           /* ===== Settings tab: global app config (g_settings) =========== */
+           if (igBeginTabItem("Settings", NULL, 0)) {
+            igSpacing();
+            menu_render_settings();
             igEndTabItem();
            }
 

@@ -1,0 +1,43 @@
+// OpenMultiVerse — "Microquasar (X-ray binary)".
+//
+// A stellar-mass black hole with a bloated giant companion in a tight orbit.
+// The giant overflows its Roche lobe, so mass streams onto the hole — feeding
+// its gas reservoir (accretion.c), which sustains the accretion disk and jets
+// instead of letting them fade. This is the N-body-coupled accretion path: turn
+// up **Stellar time** (Menu → Visuals, or the Inspect controls) and watch, in
+// the Inspect panel on the hole:
+//   • Gas reservoir topped up by the donor (donor mass drops in step),
+//   • Eddington ratio / accretion rate held up instead of decaying,
+//   • Spin a* slowly climbing as accreted angular momentum spins the hole up,
+//   • the ISCO tightening and the disk running hotter/bluer with Ṁ.
+//
+// The hole is only ~35 km across (Rs of 12 M☉), so up close it is tiny; the
+// far-field clamp keeps it visible. The companion is modelled as a massive,
+// large-radius body on a sub-Roche orbit (planet-type so it can orbit the hole).
+{
+  "laws": {
+    "G": 6.674e-11, "softening": 1e5, "time_scale": 1.0,
+    "force_exp": 2.0, "lambda": 0.0, "pn_factor": 0.0, "c_light": 2.99792458e8
+  },
+  "bodies": [
+    {
+      "name": "Microquasar BH",
+      "type": "black_hole",
+      "activity": 0.15,
+      "mass": 2.4e31,
+      "radius_km": 35.4,
+      "color": [0.80, 0.88, 1.0],
+      "obliquity_deg": 18.0,
+      "rotation_period_days": 4.0e-8,
+      "pos_ly": [0.0, 0.0, 0.0]
+    },
+
+    // Bloated giant donor overflowing its Roche lobe (~14 R_sun radius on a
+    // ~0.15 AU orbit → sits outside its lobe, so mass transfers to the hole).
+    {
+      "name": "Donor Giant", "type": "planet", "parent": "Microquasar BH",
+      "mass": 1.6e31, "radius_km": 9740000.0, "color": [1.0, 0.78, 0.55],
+      "keplerian": { "a": 0.15, "e": 0.02, "i": 18.0, "Omega": 0.0, "omega_tilde": 0.0, "L": 0.0 }
+    }
+  ]
+}

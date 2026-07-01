@@ -16,6 +16,7 @@
       "mass": 7.96e36,
       "radius_km": 11800000.0,
       "color": [1.0, 0.55, 0.25],
+      "rotation_period_days": 0.0029,
       "pos_ly": [0.0, 0.0, 0.0]
     },
 

@@ -21,6 +21,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "settings.h"                /* global app tunables → g_settings */
+
 /* ------------------------------------------------------------------ window */
 #define DEFAULT_WIN_W  1280
 #define DEFAULT_WIN_H   720
@@ -28,7 +30,13 @@ extern int g_win_w;
 extern int g_win_h;
 #define WIN_W  g_win_w
 #define WIN_H  g_win_h
-#define FOV    60.0f
+/*
+ * FOV and the other former compile-time tunables below are now live globals
+ * in g_settings (see settings.h). The original macro names are kept as
+ * aliases so existing call sites read the current value unchanged — the same
+ * pattern as G_CONST / SOFTENING.
+ */
+#define FOV    (g_settings.fov)
 
 /* ------------------------------------------------------------------ math */
 #define PI  3.14159265358979323846
@@ -48,23 +56,26 @@ extern int g_win_h;
 #define SOFTENING  (g_laws.softening)
 
 /* ------------------------------------------------------------------ sim */
+/* MAX_BODIES / TRAIL_LEN are structural (fixed-size stack tables, power-of-2
+ * ring buffer) — they must stay compile-time. Everything tunable below is an
+ * alias into g_settings. */
 #define MAX_BODIES         128
 #define TRAIL_LEN          16384   /* trail circular buffer size (per body, all bodies) */
 #define TRAIL_MASK         (TRAIL_LEN - 1)  /* for fast power-of-2 modulo */
-#define NUM_STARS          4000    /* procedural fallback skybox count */
+#define NUM_STARS          (g_settings.num_stars)  /* procedural fallback skybox count */
 
-/* Trail sampling: fixed global spatial resolution. */
-#define TRAIL_MIN_SEGMENT_LEN       2.0e4        /* m */
-#define TRAIL_MAX_SEGMENT_LEN       4.5e8        /* m */
-#define TRAIL_BASE_SEGMENT_LEN      1.0e8        /* m */
-#define TRAIL_SATELLITE_SEGMENT_LEN  2.0e6       /* m */
-#define TRAIL_CLOSE_APPROACH_FACTOR  0.35        /* denser sampling only near collisions */
-#define TRAIL_TARGET_WORLD_LEN     (128.0 * AU)  /* fixed retained trail length */
-#define TRAIL_SATELLITE_WORLD_LEN   (1.75 * AU)
-#define TRAIL_CURVE_ERROR_RATIO     0.22         /* allowed chord error vs segment length */
-#define TRAIL_CURVE_MIN_ERROR       5.0e3        /* m */
-#define TRAIL_CURVE_MAX_ERROR       2.0e7        /* m */
-#define TRAIL_CURVE_MAX_DEPTH       6
+/* Trail sampling geometry (tunable; see settings.h). */
+#define TRAIL_MIN_SEGMENT_LEN       (g_settings.trail_min_segment_len)
+#define TRAIL_MAX_SEGMENT_LEN       (g_settings.trail_max_segment_len)
+#define TRAIL_BASE_SEGMENT_LEN      (g_settings.trail_base_segment_len)
+#define TRAIL_SATELLITE_SEGMENT_LEN (g_settings.trail_satellite_segment_len)
+#define TRAIL_CLOSE_APPROACH_FACTOR (g_settings.trail_close_approach_factor)
+#define TRAIL_TARGET_WORLD_LEN      (g_settings.trail_target_world_len)
+#define TRAIL_SATELLITE_WORLD_LEN   (g_settings.trail_satellite_world_len)
+#define TRAIL_CURVE_ERROR_RATIO     (g_settings.trail_curve_error_ratio)
+#define TRAIL_CURVE_MIN_ERROR       (g_settings.trail_curve_min_error)
+#define TRAIL_CURVE_MAX_ERROR       (g_settings.trail_curve_max_error)
+#define TRAIL_CURVE_MAX_DEPTH       6           /* recursion-depth cap (structural) */
 
 /* 1 AU → 1.0 GL unit */
 #define RS  (1.0 / AU)
@@ -73,7 +84,7 @@ extern int g_win_h;
 
 /* ------------------------------------------------------------------ system LOD (AU)
  * Distances at which rendering elements fade when flying away from the system. */
-#define SYS_TRAIL_FADE_START  240.0f   /* trails at full opacity below this */
-#define SYS_TRAIL_FADE_END   1200.0f   /* trails fully invisible above this */
-#define SYS_DOT_FADE_START    240.0f   /* non-star dots begin fading        */
-#define SYS_DOT_FADE_END     1200.0f   /* non-star dots fully gone          */
+#define SYS_TRAIL_FADE_START  (g_settings.sys_trail_fade_start)
+#define SYS_TRAIL_FADE_END    (g_settings.sys_trail_fade_end)
+#define SYS_DOT_FADE_START    (g_settings.sys_dot_fade_start)
+#define SYS_DOT_FADE_END      (g_settings.sys_dot_fade_end)

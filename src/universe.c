@@ -46,8 +46,10 @@
  */
 #include "universe.h"
 #include "body.h"
+#include "accretion.h"
 #include "json.h"
 #include "common.h"
+#include "loading.h"
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
@@ -64,6 +66,21 @@
  * The process exits on allocation failure — there is no graceful recovery path
  * since a partially-loaded universe is unusable.
  */
+/* Loading-overlay report for the body passes. The status changes every body, so
+ * re-rendering its text (TTF) per body would dominate load time — callers gate
+ * this behind a coarse stride (LOAD_REPORT_STRIDE) and the bar's easing fills
+ * the gaps. `done` is the running body count across all passes; `n_total` is
+ * every body, so the bar tracks one continuous 0→1 fill while the label names
+ * the current phase. */
+#define LOAD_REPORT_STRIDE 1024
+static void load_report(const char *label, int k, int k_total,
+                        int done, int n_total)
+{
+    loading_status("%s  %d / %d", label, k, k_total);
+    loading_progress(n_total > 0 ? (double)done / (double)n_total : 1.0);
+    loading_tick();
+}
+
 static void ensure_capacity(int needed)
 {
     if (needed <= g_bodies_cap) return;
@@ -234,13 +251,20 @@ int universe_live_body_count(void)
 
 int universe_can_add_body(void)
 {
-    return universe_live_body_count() < MAX_BODIES;
+    /* g_bodies[] grows on the heap (see ensure_capacity), the same way the
+     * loader brings in the full ~16k-body catalogue — runtime adds are no longer
+     * capped at MAX_BODIES. (Collision/labels still only track the first
+     * MAX_BODIES indices, but a body past that is harmless there, exactly like
+     * the bulk of a large universe.) */
+    return 1;
 }
 
 static int find_reusable_body_slot(void)
 {
-    int n = g_nbodies < MAX_BODIES ? g_nbodies : MAX_BODIES;
-    for (int i = 0; i < n; i++) {
+    /* Scan every slot, not just the first MAX_BODIES, so dead slots anywhere in
+     * a large universe (e.g. a supernova progenitor that was just retired) are
+     * reused instead of growing the array unbounded. */
+    for (int i = 0; i < g_nbodies; i++) {
         if (!g_bodies[i].alive) return i;
     }
     return -1;
@@ -335,12 +359,27 @@ static void load_snapshot(const JsonNode *bodies_arr)
         bo->name[31] = '\0';
         bo->is_star = (int)json_num(json_get(bn, "is_star"), 0.0);
         bo->is_black_hole = (int)json_num(json_get(bn, "is_black_hole"), 0.0);
+        bo->agn_activity  = (float)json_num(json_get(bn, "agn_activity"), 0.0);
+        bo->accretion_disk = (float)json_num(json_get(bn, "disk"),
+                                             bo->is_black_hole ? 1.0 : 0.0);
+        bo->dust_torus     = (float)json_num(json_get(bn, "torus"), 0.0);
         bo->mass    = json_num(json_get(bn, "mass"), 0.0);
         bo->radius  = json_num(json_get(bn, "radius_km"), 1.0) * 1000.0;
         read_color(json_get(bn, "color"), bo->col);
         read_rotation(bn, bo);
         read_atmosphere(bn, bo);
+        accretion_init_body(bo);   /* seed the gas reservoir from mass + activity */
         bo->rotation_angle = json_num(json_get(bn, "rotation_angle_rad"), 0.0);
+
+        /* Stellar lifecycle state (stars only; absent in older snapshots). */
+        bo->star_phase     = (int)json_num(json_get(bn, "star_phase"), 0.0);
+        bo->age_yr         = json_num(json_get(bn, "age_yr"), 0.0);
+        bo->ms_lifetime_yr = json_num(json_get(bn, "ms_lifetime_yr"), 0.0);
+        bo->base_radius    = json_num(json_get(bn, "base_radius_m"), 0.0);
+        {
+            JsonNode *bc = json_get(bn, "base_color");
+            if (bc) read_color(bc, bo->base_col);
+        }
 
         JsonNode *st = json_get(bn, "state");
         JsonNode *p  = st ? json_get(st, "pos_m") : NULL;
@@ -358,7 +397,10 @@ static void load_snapshot(const JsonNode *bodies_arr)
 
         alloc_trail(bo);
         g_nbodies++;
+        if ((g_nbodies & (LOAD_REPORT_STRIDE - 1)) == 0)
+            load_report("Loading bodies", g_nbodies, n, g_nbodies, n);
     }
+    load_report("Loading bodies", g_nbodies, n, g_nbodies, n);
 
     /* Resolve parent links now that every body exists.  Prefer parent_index
      * (array position, unambiguous even with duplicate names); fall back to the
@@ -466,11 +508,17 @@ int universe_save(const char *path)
         "  \"laws\": {\n"
         "    \"G\": %.10g, \"softening\": %.10g, \"time_scale\": %.10g,\n"
         "    \"force_exp\": %.10g, \"lambda\": %.10g, \"pn_factor\": %.10g, \"c_light\": %.10g,\n"
-        "    \"gravity_isolation\": %.10g\n"
+        "    \"gravity_isolation\": %.10g,\n"
+        "    \"outer_period_divisor\": %.10g, \"inner_period_divisor\": %.10g,\n"
+        "    \"outer_dt_min\": %.10g, \"inner_dt_min\": %.10g,\n"
+        "    \"inner_dt_max\": %.10g, \"outer_dt_default\": %.10g\n"
         "  },\n\n",
         fin(g_laws.G), fin(g_laws.softening), fin(g_laws.time_scale),
         fin(g_laws.force_exp), fin(g_laws.lambda), fin(g_laws.pn_factor),
-        fin(g_laws.c_light), fin(g_laws.gravity_isolation));
+        fin(g_laws.c_light), fin(g_laws.gravity_isolation),
+        fin(g_laws.outer_period_divisor), fin(g_laws.inner_period_divisor),
+        fin(g_laws.outer_dt_min), fin(g_laws.inner_dt_min),
+        fin(g_laws.inner_dt_max), fin(g_laws.outer_dt_default));
 
     /* Map each g_bodies index to its position in the saved (alive-only) array,
      * so parent links can be written as an index and reload unambiguously even
@@ -500,8 +548,9 @@ int universe_save(const char *path)
         first = 0;
         fprintf(f, "    { \"name\": ");
         fput_json_str(f, b->name);
-        fprintf(f, ", \"is_star\": %d, \"is_black_hole\": %d, \"parent_index\": %d, \"parent\": ",
-                b->is_star ? 1 : 0, b->is_black_hole ? 1 : 0, parent_slot);
+        fprintf(f, ", \"is_star\": %d, \"is_black_hole\": %d, \"agn_activity\": %.4f, \"disk\": %.4f, \"torus\": %.4f, \"parent_index\": %d, \"parent\": ",
+                b->is_star ? 1 : 0, b->is_black_hole ? 1 : 0, b->agn_activity,
+                b->accretion_disk, b->dust_torus, parent_slot);
         fput_json_str(f, parent);
         fprintf(f, ",\n");
         fprintf(f, "      \"mass\": %.10e, \"radius_km\": %.6f,\n",
@@ -515,6 +564,13 @@ int universe_save(const char *path)
                        "\"intensity\": %.4f, \"scale\": %.4f },\n",
                     b->atm_color[0], b->atm_color[1], b->atm_color[2],
                     b->atm_intensity, b->atm_scale);
+        if (b->is_star)
+            fprintf(f, "      \"star_phase\": %d, \"age_yr\": %.8e, "
+                       "\"ms_lifetime_yr\": %.8e, \"base_radius_m\": %.8e, "
+                       "\"base_color\": [%.4f, %.4f, %.4f],\n",
+                    b->star_phase, fin(b->age_yr), fin(b->ms_lifetime_yr),
+                    fin(b->base_radius),
+                    b->base_col[0], b->base_col[1], b->base_col[2]);
         fprintf(f, "      \"state\": { \"pos_m\": [%.10e, %.10e, %.10e], "
                    "\"vel_ms\": [%.10e, %.10e, %.10e] } }",
                 fin(b->pos[0]), fin(b->pos[1]), fin(b->pos[2]),
@@ -576,6 +632,12 @@ void universe_load(const char *path)
         g_laws.c_light    = json_num(json_get(laws, "c_light"),    g_laws.c_light);
         g_laws.gravity_isolation = json_num(json_get(laws, "gravity_isolation"),
                                             g_laws.gravity_isolation);
+        g_laws.outer_period_divisor = json_num(json_get(laws, "outer_period_divisor"), g_laws.outer_period_divisor);
+        g_laws.inner_period_divisor = json_num(json_get(laws, "inner_period_divisor"), g_laws.inner_period_divisor);
+        g_laws.outer_dt_min         = json_num(json_get(laws, "outer_dt_min"),         g_laws.outer_dt_min);
+        g_laws.inner_dt_min         = json_num(json_get(laws, "inner_dt_min"),         g_laws.inner_dt_min);
+        g_laws.inner_dt_max         = json_num(json_get(laws, "inner_dt_max"),         g_laws.inner_dt_max);
+        g_laws.outer_dt_default     = json_num(json_get(laws, "outer_dt_default"),     g_laws.outer_dt_default);
         fprintf(stdout, "[Boot] Universe laws: G=%.4g softening=%.4g force_exp=%.4g "
                         "lambda=%.4g pn=%.4g\n",
                 g_laws.G, g_laws.softening, g_laws.force_exp,
@@ -613,8 +675,16 @@ void universe_load(const char *path)
      * array: ensure_capacity() grows g_bodies past MAX_BODIES, so an import
      * with >= MAX_BODIES stars would write bv[g_nbodies] off the end of a
      * fixed stack array.  Star slot indices are always < g_nbodies <= n_total. */
-    int n_total = 0;
-    for (JsonNode *bc = bodies_arr->first_child; bc; bc = bc->next) n_total++;
+    int n_total = 0, n_star = 0, n_planet = 0, n_moon = 0;
+    for (JsonNode *bc = bodies_arr->first_child; bc; bc = bc->next) {
+        n_total++;
+        const char *t = json_str(json_get(bc, "type"), "");
+        if (strcmp(t, "star") == 0 || strcmp(t, "black_hole") == 0) n_star++;
+        else if (strcmp(t, "planet") == 0 || strcmp(t, "dwarf_planet") == 0 ||
+                 strcmp(t, "asteroid") == 0) n_planet++;
+        else if (strcmp(t, "moon") == 0) n_moon++;
+    }
+    int done = 0;   /* running body count across passes, for the loading bar */
     double (*bv)[3] = (double(*)[3])calloc((size_t)(n_total > 0 ? n_total : 1),
                                            sizeof(*bv));
     if (!bv) {
@@ -634,11 +704,14 @@ void universe_load(const char *path)
     fflush(stdout);
     {
         JsonNode *bn;
+        int ks = 0;
         for (bn = bodies_arr->first_child; bn; bn = bn->next) {
             const char *type = json_str(json_get(bn, "type"), "");
             /* Black holes are placed and grouped like stars (a massive system
-             * root that bodies orbit); only their rendering differs. */
-            int is_bh = (strcmp(type, "black_hole") == 0);
+             * root that bodies orbit); only their rendering differs. A "quasar"
+             * is a black hole with AGN activity on (bright disk + jets). */
+            int is_quasar = (strcmp(type, "quasar") == 0);
+            int is_bh = (strcmp(type, "black_hole") == 0) || is_quasar;
             if (strcmp(type, "star") != 0 && !is_bh) continue;
 
             const char *name   = json_str(json_get(bn, "name"),      "unknown");
@@ -665,7 +738,18 @@ void universe_load(const char *path)
             bo->col[0]         = col[0]; bo->col[1] = col[1]; bo->col[2] = col[2];
             bo->is_star        = 1;
             bo->is_black_hole  = is_bh;
+            /* AGN activity: quasars default to 1.0; any BH may set "activity". */
+            bo->agn_activity   = (float)json_num(json_get(bn, "activity"),
+                                                 is_quasar ? 1.0 : 0.0);
+            /* Ring-like elements, decoupled from the body type: an accretion
+             * disk (default on for any black hole) and a dust torus (default on
+             * for quasars). Either can be forced with "disk"/"torus". */
+            bo->accretion_disk = (float)json_num(json_get(bn, "disk"),
+                                                 is_bh ? 1.0 : 0.0);
+            bo->dust_torus     = (float)json_num(json_get(bn, "torus"),
+                                                 is_quasar ? 1.0 : 0.0);
             read_rotation(bn, bo);
+            accretion_init_body(bo);   /* seed the gas reservoir from mass + activity */
 
             /* Stash bulk velocity; convert km/s → m/s */
             JsonNode *vn = json_get(bn, "velocity_km_s");
@@ -677,7 +761,11 @@ void universe_load(const char *path)
 
             alloc_trail(bo);
             g_nbodies++;
+            done++; ks++;
+            if ((ks & (LOAD_REPORT_STRIDE - 1)) == 0)
+                load_report("Loading star systems", ks, n_star, done, n_total);
         }
+        load_report("Loading star systems", ks, n_star, done, n_total);
     }
 
     /* ================================================================
@@ -699,6 +787,7 @@ void universe_load(const char *path)
     fflush(stdout);
     {
         JsonNode *bn;
+        int kp = 0;
         for (bn = bodies_arr->first_child; bn; bn = bn->next) {
             const char *type = json_str(json_get(bn, "type"), "");
             if (strcmp(type, "planet") != 0 &&
@@ -754,7 +843,11 @@ void universe_load(const char *path)
             read_rotation(bn, bo);
             read_atmosphere(bn, bo);
             alloc_trail(bo);
+            done++; kp++;
+            if ((kp & (LOAD_REPORT_STRIDE - 1)) == 0)
+                load_report("Generating planets", kp, n_planet, done, n_total);
         }
+        load_report("Generating planets", kp, n_planet, done, n_total);
     }
 
     /* ================================================================
@@ -773,6 +866,7 @@ void universe_load(const char *path)
     fflush(stdout);
     {
         JsonNode *bn;
+        int km = 0;
         for (bn = bodies_arr->first_child; bn; bn = bn->next) {
             const char *type = json_str(json_get(bn, "type"), "");
             if (strcmp(type, "moon") != 0) continue;
@@ -831,7 +925,11 @@ void universe_load(const char *path)
             read_rotation(bn, bo);
             read_atmosphere(bn, bo);
             alloc_trail(bo);
+            done++; km++;
+            if ((km & (LOAD_REPORT_STRIDE - 1)) == 0)
+                load_report("Placing moons", km, n_moon, done, n_total);
         }
+        load_report("Placing moons", km, n_moon, done, n_total);
     }
 
     /* ================================================================
@@ -852,10 +950,15 @@ void universe_load(const char *path)
      * ================================================================ */
     fprintf(stdout, "[Boot] Universe post-processing: system velocities\n");
     fflush(stdout);
+    loading_status("Linking star systems");
+    loading_indeterminate();
+    loading_tick();
     int n_stars = 0;
     for (s = 0; s < g_nbodies; s++) {
         if (!g_bodies[s].is_star) continue;
         n_stars++;
+        if ((n_stars & (LOAD_REPORT_STRIDE - 1)) == 0)
+            loading_tick();
 
         /* CoM correction: zero net internal momentum by adjusting only the star */
         for (i = 0; i < g_nbodies; i++) {
@@ -927,11 +1030,7 @@ int universe_add_body(const BodyCreateSpec *spec)
     idx = find_reusable_body_slot();
     reused_slot = (idx >= 0);
     if (!reused_slot) {
-        if (g_nbodies >= MAX_BODIES) {
-            fprintf(stderr, "[universe] cannot add body '%s': no reusable body slots\n",
-                    spec->name ? spec->name : "unknown");
-            return -1;
-        }
+        /* No dead slot to reuse — grow the heap array, just like the loader. */
         ensure_capacity(g_nbodies + 1);
         idx = g_nbodies++;
     }

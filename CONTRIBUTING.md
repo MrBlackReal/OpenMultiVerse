@@ -1,8 +1,8 @@
-# Contributing to OpenVerse
+# Contributing to OpenMultiVerse
 
 Thanks for your interest in contributing! This document explains the process for reporting bugs, proposing features, and submitting code.
 
-> **Note:** OpenVerse is in early development and we are not strict about following every guideline to the letter — contribute in whatever way works for you. That said, following the conventions below makes reviewing and integrating changes much easier, and it is genuinely appreciated.
+> **Note:** OpenMultiVerse is in early development and we are not strict about following every guideline to the letter — contribute in whatever way works for you. That said, following the conventions below makes reviewing and integrating changes much easier, and it is genuinely appreciated.
 
 For a full technical reference of the codebase (modules, data structures, rendering pipeline, physics), see [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -98,8 +98,12 @@ Other approaches you thought about and why you ruled them out.
 
 ## 5. Submitting a Pull Request
 
-1. Make sure the project builds without warnings (`-Wall -Wextra`).
-2. Test the change at multiple simulation speeds and zoom levels.
+1. Make sure the project builds without warnings (`-Wall -Wextra`). Build both the
+   default (`make`) and, if you touched menu/UI code, the ImGui build (`make IMGUI=1`).
+   Run `make clean` when switching `IMGUI` on/off — the Makefile keys off timestamps,
+   not the flag, so a dirty switch links stale objects.
+2. Test the change at multiple simulation speeds and zoom levels. There are no
+   automated tests; visual/physics changes are verified by running the app.
 3. Open a PR against `main` with the following format:
 
 **Title:** `[type] Short description` — e.g. `[feat] Add Galilean moons for Jupiter`
@@ -137,8 +141,12 @@ How did you verify the change? What did you check for regressions?
 - Does it build cleanly?
 - Are the physics/rendering changes correct?
 - Does it follow the existing code style (snake_case, `g_` globals, C99)?
-- Are new bodies/data added to `assets/universe.json` rather than hardcoded?
-- Does it handle the `alive = 0` body lifecycle correctly?
+- Is content data-driven — new bodies/laws in universe JSON (`assets/universe.json` /
+  `assets/universes/*.json`, registered in `src/presets.c`) rather than hardcoded?
+- Does it handle the `alive = 0` body lifecycle correctly (indices are stable;
+  dead slots get reused — never assume `g_nbodies` is the live count)?
+- Does it stay correct at galaxy scale — no new O(N²) per-frame work, and does it
+  respect the camera-driven active region? (See [docs/SCALING_HANDOFF.md](docs/SCALING_HANDOFF.md).)
 
 ---
 

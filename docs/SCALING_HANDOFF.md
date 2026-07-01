@@ -94,6 +94,31 @@ Phasing:
     target's radius and looks straight at it, so you can reach any of the ~16k
     objects instantly; the destination system becomes active on arrival.
 
+### 6. Runtime body creation works past 128 (`src/universe.c`)
+`universe_add_body()` (build mode, supernova remnants, collision spawns) carried
+three stale `MAX_BODIES` caps left over from before the heap-growth work, so it
+silently returned -1 in the full ~16k catalogue (e.g. the **Trigger Supernova**
+button did nothing). Fixed: `universe_can_add_body()` now always allows (the array
+grows on the heap via `ensure_capacity()`, exactly like the loader),
+`find_reusable_body_slot()` scans all slots (not just the first 128) so retired
+slots anywhere get reused, and the `g_nbodies >= MAX_BODIES` growth guard is gone.
+
+### 7. Stellar lifecycle + supernova run at galaxy scale
+New `src/lifecycle.{c,h}` (main-sequence → giant → white dwarf / neutron star /
+black hole; manual via the Inspect panel or continuous via `g_stellar_years_per_sec`).
+Death routes through `supernova_detonate()`. Two perf passes keep a supernova
+real-time in a 16k-body universe:
+- **Render** — the volumetric cloud raymarch is fragment-bound and fills the
+  screen near the blast. It now renders to a **half-res** target and composites
+  back (`render.c` + `vol_composite.frag`); core/flash stays full-res. (This is
+  the half-res volumetrics follow-up the nebula pass also wants — see
+  VISUALS_ROADMAP; the nebula could reuse the same target.)
+- **Shock physics** — was O(N²): `supernova_step()` scanned all bodies every
+  frame and each kicked body did an O(N) descendant scan. Now the reachable set
+  (bodies within `shock_speed × CLOUD_DURATION`, mass-dependent) is gathered once
+  at detonation into a per-event candidate list, and the subtree ops walk a cached
+  CSR child index (`children_ensure()`), so the whole path is O(N).
+
 ### Earlier correctness fixes (already shipped, for context)
 bv stack overflow, PN softening, JSON-escape/finite-guard on snapshot save,
 `universe_validate()` so a bad menu path doesn't `exit(1)`, rings/belts in
