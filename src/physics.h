@@ -38,6 +38,12 @@ double physics_outer_dt_limit(void);
 double physics_inner_dt_limit(void);
 int    physics_system_count(void);
 int    physics_system_root(int idx);
+
+/* Fill `out` with up to `max` body indices from systems within `radius_m` of
+ * `cam_m` (metres), nearest systems first; returns the count written.  The
+ * camera-following active set used by labels.c. */
+int    physics_active_bodies(const double cam_m[3], double radius_m,
+                             int *out, int max);
 double physics_system_outer_dt_limit(int idx);
 double physics_system_inner_dt_limit(int idx);
 void   physics_advance_time(double dt);

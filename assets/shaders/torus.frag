@@ -115,11 +115,13 @@ void main() {
     /* True per-fragment depth at the first half-opaque dust sample, so the torus
      * sorts against the disk/shadow/jets in real 3D (no coplanar-billboard
      * z-fighting). thit_p is hole-frame Rs units; world = u_center + thit_p·u_rs. */
+    /* Logarithmic depth (shared DEPTH_FAR), consistent with every other pass:
+     * clip.w is the eye-forward distance, same quantity as 1/gl_FragCoord.w. */
     if (thit) {
         vec4 clip = u_vp * vec4(u_center + thit_p * u_rs, 1.0);
-        gl_FragDepth = 0.5 + 0.5 * clip.z / clip.w;
+        gl_FragDepth = log2(max(clip.w, 0.0) + 1.0) / log2(DEPTH_FAR + 1.0);
     } else {
-        gl_FragDepth = gl_FragCoord.z;
+        gl_FragDepth = log2(1.0 / gl_FragCoord.w + 1.0) / log2(DEPTH_FAR + 1.0);
     }
     frag_color = vec4(col, alpha);
 }

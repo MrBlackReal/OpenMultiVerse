@@ -42,6 +42,7 @@
 #include "build.h"
 #include "inspect.h"
 #include "body.h"
+#include "cosmic_field.h"
 #include "gl_utils.h"
 #include "ui_theme.h"
 #include <math.h>
@@ -120,6 +121,7 @@ static TextCache s_tc_move = {0};
 static TextCache s_tc_sim  = {0};
 static TextCache s_tc_fps  = {0};
 static TextCache s_tc_nearest = {0};
+static TextCache s_tc_field   = {0};
 static TextCache s_tc_build_title = {0};
 static TextCache s_tc_build_hint  = {0};
 static TextCache s_tc_build_items[8];
@@ -380,6 +382,21 @@ static void nearest_body_distance_string(char *buf, size_t n)
         format_distance(best_d, dist, sizeof(dist));
         snprintf(buf, n, "%.31s  %.28s", g_bodies[best].name, dist);
     }
+}
+
+/*
+ * cosmic_field_status_string — format the local density-field sample at the
+ * camera for the HUD (roadmap Phase A #3): local body density, clumpiness, and
+ * dominant content class. Updates live as you fly between dense systems and the
+ * sparse interstellar medium.
+ */
+static void cosmic_field_status_string(char *buf, size_t n)
+{
+    CosmicSample s;
+    cosmic_field_sample_camera(&s);
+    snprintf(buf, n, "rho %.2e/ly3  clump %.2f  %s",
+             s.number_density, s.clumpiness,
+             cosmic_field_class_name(s.dominant));
 }
 
 /* ── quad drawing ─────────────────────────────────────────────────────────── */
@@ -961,11 +978,15 @@ void ui_render(void) {
     char nearest_str[64];
     nearest_body_distance_string(nearest_str, sizeof(nearest_str));
 
+    char field_str[64];
+    cosmic_field_status_string(field_str, sizeof(field_str));
+
     SDL_Color white = {255, 255, 255, 220};
     update_text(&s_tc_move, mv_str, white);
     update_text(&s_tc_sim,  ss_str, white);
     update_text(&s_tc_fps,  fps_str, white);
     update_text(&s_tc_nearest, nearest_str, white);
+    update_text(&s_tc_field, field_str, white);
 
     /* Layout */
     const float BH   = (float)BAR_H;
@@ -1024,6 +1045,11 @@ void ui_render(void) {
         draw_tex(&s_tc_nearest, BX, TY, TH);
     }
 
+    /* Cosmic density field — one line below the nearest-body label */
+    if (s_tc_field.tex) {
+        draw_tex(&s_tc_field, BX, TY + TH + 2.0f, TH);
+    }
+
     draw_build_bar(W);
     if (!g_build_mode && g_inspect_mode)
         draw_bottom_mode_label(W, (float)WIN_H, "INSPECT", "click to inspect planet");
@@ -1040,6 +1066,7 @@ void ui_shutdown(void) {
     if (s_tc_sim.tex)  glDeleteTextures(1, &s_tc_sim.tex);
     if (s_tc_fps.tex)  glDeleteTextures(1, &s_tc_fps.tex);
     if (s_tc_nearest.tex) glDeleteTextures(1, &s_tc_nearest.tex);
+    if (s_tc_field.tex) glDeleteTextures(1, &s_tc_field.tex);
     if (s_tc_build_title.tex) glDeleteTextures(1, &s_tc_build_title.tex);
     if (s_tc_build_hint.tex)  glDeleteTextures(1, &s_tc_build_hint.tex);
     for (int i = 0; i < 8; i++)

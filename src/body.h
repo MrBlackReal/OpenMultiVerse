@@ -70,6 +70,12 @@ typedef struct {
     double rotation_angle;  /* current rotation phase, rad (0..2π)          */
     double cloud_rotation;  /* continuous cloud angle, rad (never wrapped)  */
 
+    /* Tidal disruption (set by collision.c when a black hole shreds this body).
+     * tidal_frac ramps 0→1 as the body is devoured; render.c stretches the body
+     * toward g_bodies[tidal_hole] and shrinks it. Only read while tidal_frac>0. */
+    float  tidal_frac;
+    int    tidal_hole;
+
     /* Atmosphere (set by universe loader; zero = no atmosphere) */
     float  atm_color[3];    /* RGB atmosphere rim colour                    */
     float  atm_intensity;   /* peak glow strength (0 = no atmosphere)       */

@@ -36,7 +36,7 @@ uniform vec2  u_screen;
 
 out vec4 frag_color;
 
-const float FAR   = 2000.0;
+const float FAR   = DEPTH_FAR;
 const float BOUND = 1.0;     /* sphere radius in normalised units */
 
 float hash31(vec3 p) {

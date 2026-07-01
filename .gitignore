@@ -67,6 +67,9 @@ dist/
 # Runtime cache written by the in-app "Import real data" feature
 assets/universes/_imported.json
 
+# User-local runtime settings (written by the app on exit / "Save now")
+settings.json
+
 # Source audio/video exports; runtime uses compressed assets such as .ogg
 assets/*.mov
 

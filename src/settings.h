@@ -28,6 +28,25 @@ typedef struct {
     /* ---- far-field fade (AU) ------------------------------------------ */
     float  sys_trail_fade_start, sys_trail_fade_end;
     float  sys_dot_fade_start,   sys_dot_fade_end;
+    float  farfield_horizon_au;  /* far-field dots/glare/BHs fade out & cull past */
+                                 /* this camera distance (AU). Was a hard-coded    */
+                                 /* ~1500 AU pin-to-shell; now a tunable horizon.  */
+
+    /* ---- continuous LOD / representation transitions (render.c) ------- */
+    float  lod_body_fade_start_px; /* dot→sphere crossfade window (projected px) */
+    float  lod_body_fade_end_px;
+    float  lod_glare_full_px;      /* dot→glare crossfade window (glare-bill px) */
+    float  lod_glare_fade_px;
+    float  lod_density_max;        /* cap on the CosmicField density LOD factor  */
+                                   /* that scales the windows above (1 = off)    */
+    float  dot_hide_px;            /* dot overlap dedup: hidden below this ...   */
+    float  dot_excl_px;            /* ... fully separated above this (screen px) */
+    float  near_dot_dist_ly;       /* near/far dot path split distance (ly)      */
+
+    /* ---- labels ------------------------------------------------------- */
+    float  label_max_dist_au;  /* planet/moon labels hidden beyond this (AU); */
+                               /* stars ignore it (shown at any range in the  */
+                               /* camera's active region)                     */
 
     /* ---- starfield ---------------------------------------------------- */
     int    num_stars;          /* procedural skybox count (apply = regen)     */

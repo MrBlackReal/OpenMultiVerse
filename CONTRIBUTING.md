@@ -146,7 +146,7 @@ How did you verify the change? What did you check for regressions?
 - Does it handle the `alive = 0` body lifecycle correctly (indices are stable;
   dead slots get reused — never assume `g_nbodies` is the live count)?
 - Does it stay correct at galaxy scale — no new O(N²) per-frame work, and does it
-  respect the camera-driven active region? (See [docs/SCALING_HANDOFF.md](docs/SCALING_HANDOFF.md).)
+  respect the camera-driven active region? (See [ARCHITECTURE.md](ARCHITECTURE.md) §8.1.)
 
 ---
 

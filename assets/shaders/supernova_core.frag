@@ -28,7 +28,8 @@ uniform vec2  u_screen;
 
 out vec4 frag_color;
 
-const float FAR = 2000.0;
+const float FAR = DEPTH_FAR;      /* depth-buffer range (shared) */
+const float VOL_FAR = 2000.0;     /* absolute AU where the cloud fades out — independent of the depth range */
 
 float hash31(vec3 p) {
     p = fract(p * 0.1031);
@@ -155,7 +156,7 @@ void main() {
     /* Fade against the effective volumetric far limit instead of hard-popping
      * when the reconstructed shell approaches the renderer's depth horizon. */
     accumAlpha *= smoothstep(0.0, 0.018, accumAlpha);
-    accumAlpha *= 1.0 - smoothstep(FAR * 0.82, FAR * 4.60, eye_depth);
+    accumAlpha *= 1.0 - smoothstep(VOL_FAR * 0.82, VOL_FAR * 4.60, eye_depth);
     if (accumAlpha < 0.0008) discard;
 
     eye_depth = min(eye_depth, FAR * 0.9995);

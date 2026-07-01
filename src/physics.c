@@ -110,6 +110,8 @@ static int    *s_body_system_slot    = NULL;   /* [s_cap]   */
 static int    *s_member_off          = NULL;   /* [s_cap+1] */
 static int    *s_member_pool         = NULL;   /* [s_cap]   */
 static int    *s_system_member_count = NULL;   /* [s_cap]   */
+static int    *s_act_slots           = NULL;   /* [s_cap]   scratch: active query */
+static double *s_act_d2              = NULL;   /* [s_cap]   scratch: active query */
 static int     s_nsystems = 0;
 static int     s_cap = 0;
 
@@ -134,9 +136,12 @@ static void physics_ensure_capacity(int nbodies)
     s_member_off          = realloc(s_member_off,    (size_t)(cap + 1) * sizeof(int));
     s_member_pool         = realloc(s_member_pool,         (size_t)cap * sizeof(int));
     s_system_member_count = realloc(s_system_member_count, (size_t)cap * sizeof(int));
+    s_act_slots           = realloc(s_act_slots,           (size_t)cap * sizeof(int));
+    s_act_d2              = realloc(s_act_d2,              (size_t)cap * sizeof(double));
     if (!s_system_roots || !s_system_outer_dt || !s_system_inner_dt ||
         !s_root_to_slot || !s_body_system_slot || !s_member_off ||
-        !s_member_pool || !s_system_member_count) {
+        !s_member_pool || !s_system_member_count ||
+        !s_act_slots || !s_act_d2) {
         fprintf(stderr, "[physics] system-table alloc failed\n");
         exit(1);
     }
@@ -432,6 +437,68 @@ int physics_system_root(int idx)
 {
     if (idx < 0 || idx >= s_nsystems) return -1;
     return s_system_roots[idx];
+}
+
+/*
+ * physics_active_bodies — fill `out` with up to `max` body indices belonging to
+ * star systems whose root is within `radius_m` of `cam_m`, nearest systems
+ * first.  Returns the number written.
+ *
+ * This is the single source of truth for "which bodies are near the camera",
+ * mirroring the active-region test main.c uses to decide which systems to
+ * integrate.  labels.c consumes it so the (fixed) label budget follows the
+ * camera across the galaxy instead of being pinned to the first MAX_BODIES
+ * body indices.  Relies on the CSR member pool built by
+ * physics_refresh_timestep_model(); returns 0 before the first build.
+ */
+int physics_active_bodies(const double cam_m[3], double radius_m, int *out, int max)
+{
+    if (!out || max <= 0 || s_nsystems <= 0) return 0;
+
+    const double r2 = radius_m * radius_m;
+
+    /* Gather in-radius systems with their squared camera distance. */
+    int na = 0;
+    for (int s = 0; s < s_nsystems; s++) {
+        int root = s_system_roots[s];
+        if (root < 0 || root >= g_nbodies || !g_bodies[root].alive) continue;
+        double dx = g_bodies[root].pos[0] - cam_m[0];
+        double dy = g_bodies[root].pos[1] - cam_m[1];
+        double dz = g_bodies[root].pos[2] - cam_m[2];
+        double d2 = dx*dx + dy*dy + dz*dz;
+        if (d2 > r2) continue;
+        s_act_slots[na] = s;
+        s_act_d2[na]    = d2;
+        na++;
+    }
+
+    /* Insertion sort ascending by distance (na is normally tiny — the active
+     * region usually holds a handful of systems). */
+    for (int i = 1; i < na; i++) {
+        int    ts = s_act_slots[i];
+        double td = s_act_d2[i];
+        int k = i;
+        while (k > 0 && s_act_d2[k-1] > td) {
+            s_act_slots[k] = s_act_slots[k-1];
+            s_act_d2[k]    = s_act_d2[k-1];
+            k--;
+        }
+        s_act_slots[k] = ts;
+        s_act_d2[k]    = td;
+    }
+
+    /* Emit members nearest-system-first until the budget is full. */
+    int n = 0;
+    for (int i = 0; i < na && n < max; i++) {
+        int slot = s_act_slots[i];
+        int cnt  = s_system_member_count[slot];
+        for (int k = 0; k < cnt && n < max; k++) {
+            int b = sys_member(slot, k);
+            if (b >= 0 && b < g_nbodies && g_bodies[b].alive)
+                out[n++] = b;
+        }
+    }
+    return n;
 }
 
 double physics_system_outer_dt_limit(int idx)
@@ -809,6 +876,7 @@ void physics_respa_begin_system(int root, double dt_outer) {
         for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
             i = sys_member(slot, mi);
             if (!g_bodies[i].alive) continue;
+            if (g_bodies[i].tidal_frac > 0.0f) continue;  /* shredding: collision.c drives its motion */
             g_bodies[i].vel[0] += 0.5 * g_bodies[i].acc[0] * dt_outer;
             g_bodies[i].vel[1] += 0.5 * g_bodies[i].acc[1] * dt_outer;
             g_bodies[i].vel[2] += 0.5 * g_bodies[i].acc[2] * dt_outer;
@@ -857,6 +925,7 @@ void physics_respa_inner_system(int root, double dt_inner) {
         for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
             i = sys_member(slot, mi);
             if (!g_bodies[i].alive) continue;
+            if (g_bodies[i].tidal_frac > 0.0f) continue;  /* shredding: collision.c drives its motion */
             g_bodies[i].vel[0] += 0.5 * g_bodies[i].fast_acc[0] * dt_inner;
             g_bodies[i].vel[1] += 0.5 * g_bodies[i].fast_acc[1] * dt_inner;
             g_bodies[i].vel[2] += 0.5 * g_bodies[i].fast_acc[2] * dt_inner;
@@ -864,6 +933,7 @@ void physics_respa_inner_system(int root, double dt_inner) {
         for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
             i = sys_member(slot, mi);
             if (!g_bodies[i].alive) continue;
+            if (g_bodies[i].tidal_frac > 0.0f) continue;  /* shredding: collision.c drives its motion */
             g_bodies[i].pos[0] += g_bodies[i].vel[0] * dt_inner;
             g_bodies[i].pos[1] += g_bodies[i].vel[1] * dt_inner;
             g_bodies[i].pos[2] += g_bodies[i].vel[2] * dt_inner;
@@ -883,6 +953,7 @@ void physics_respa_inner_system(int root, double dt_inner) {
         for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
             i = sys_member(slot, mi);
             if (!g_bodies[i].alive) continue;
+            if (g_bodies[i].tidal_frac > 0.0f) continue;  /* shredding: collision.c drives its motion */
             g_bodies[i].vel[0] += 0.5 * g_bodies[i].fast_acc[0] * dt_inner;
             g_bodies[i].vel[1] += 0.5 * g_bodies[i].fast_acc[1] * dt_inner;
             g_bodies[i].vel[2] += 0.5 * g_bodies[i].fast_acc[2] * dt_inner;
@@ -927,6 +998,7 @@ void physics_respa_end_system(int root, double dt_outer) {
         for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
             i = sys_member(slot, mi);
             if (!g_bodies[i].alive) continue;
+            if (g_bodies[i].tidal_frac > 0.0f) continue;  /* shredding: collision.c drives its motion */
             g_bodies[i].vel[0] += 0.5 * g_bodies[i].acc[0] * dt_outer;
             g_bodies[i].vel[1] += 0.5 * g_bodies[i].acc[1] * dt_outer;
             g_bodies[i].vel[2] += 0.5 * g_bodies[i].acc[2] * dt_outer;
@@ -934,6 +1006,7 @@ void physics_respa_end_system(int root, double dt_outer) {
         for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
             i = sys_member(slot, mi);
             if (!g_bodies[i].alive) continue;
+            if (g_bodies[i].tidal_frac > 0.0f) continue;  /* shredding: collision.c drives its motion */
             g_bodies[i].rotation_angle = fmod(
                 g_bodies[i].rotation_angle + g_bodies[i].rotation_rate * dt_outer,
                 2.0 * PI);

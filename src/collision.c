@@ -18,6 +18,7 @@
 #include "collision.h"
 #include "body.h"
 #include "labels.h"
+#include "laws.h"
 #include "physics.h"
 #include "rings.h"
 #include "supernova.h"
@@ -43,6 +44,19 @@
 #define MAX_PERSISTENT_SCARS 128
 #define MAX_COLLISION_PARTICLES 768
 #define STAR_HEAT_START_SCALE 4.0
+
+/* ── tidal disruption (black holes) ─────────────────────────────────────────
+ * A body wandering within a black hole's tidal radius is stretched apart and
+ * devoured. TIDAL_RADIUS_K scales the classic disruption radius
+ *   r_t = K · R_body · (M_bh / M_body)^(1/3)
+ * (K≈1 is where the hole's differential pull matches the body's self-gravity; a
+ * little above 1 gives a visible shredding shell outside the horizon).
+ * TIDAL_CONSUME_SEC is the sim-time to fully devour a shredding body.
+ * TIDAL_DESCENT_SEC is the sim-time for the art-directed spiral to ease the
+ * victim's orbit down to the horizon (see bh_tidal_pass). */
+#define TIDAL_RADIUS_K     1.3
+#define TIDAL_CONSUME_SEC  (DAY * 45.0)
+#define TIDAL_DESCENT_SEC  (DAY * 55.0)
 
 typedef struct {
     int active;
@@ -146,6 +160,9 @@ static int body_is_primary(int idx);
 static void impact_dir_for_pair(int target, int impactor, double dt, double out_dir[3]);
 static int swept_spheres_collide(int a, int b, double dt,
                                  double *out_speed, double *out_hit_t);
+static double tidal_radius(int hole, int i);
+static int    tidal_is_victim(int hole, int i);
+static void   bh_tidal_pass(int hole, double dt);
 
 static void mark_system_dirty(int root, double hot_duration)
 {
@@ -273,6 +290,22 @@ int collision_system_maybe_has_encounter(int root, double dt)
 
             if (dist <= glow_dist) return 1;
             if (swept_spheres_collide(root, i, dt, NULL, NULL)) return 1;
+        }
+    }
+
+    /* Black-hole tidal proximity: run the system so bh_tidal_pass can shred
+     * anything near (or already being shredded by) the hole. Covers stars too,
+     * which the star-glow loop above skips. */
+    if (g_bodies[root].is_black_hole) {
+        for (int i = 0; i < cnb(); i++) {
+            if (!tidal_is_victim(root, i)) continue;
+            if (g_bodies[i].tidal_frac > 0.0f) return 1;
+            double rx = g_bodies[i].pos[0] - g_bodies[root].pos[0];
+            double ry = g_bodies[i].pos[1] - g_bodies[root].pos[1];
+            double rz = g_bodies[i].pos[2] - g_bodies[root].pos[2];
+            double dist = sqrt(rx*rx + ry*ry + rz*rz);
+            double rt = tidal_radius(root, i);
+            if (rt > 0.0 && dist <= rt) return 1;
         }
     }
     return 0;
@@ -1422,6 +1455,154 @@ static void absorb_body_into_star(int star_idx, int body_idx, double rel_speed,
     finalize_absorb_body(star_idx, body_idx, rel_speed, 0, old_radius);
 }
 
+/* Tidal-disruption radius (m) of body `i` around black hole `hole`: where the
+ * hole's differential pull overwhelms the body's self-gravity. */
+static double tidal_radius(int hole, int i)
+{
+    Body *h = &g_bodies[hole], *b = &g_bodies[i];
+    if (b->mass <= 0.0 || b->radius <= 0.0 || h->mass <= 0.0) return 0.0;
+    return TIDAL_RADIUS_K * b->radius * cbrt(h->mass / b->mass);
+}
+
+/* A valid tidal victim: alive, bound to the hole's system, not a hole itself. */
+static int tidal_is_victim(int hole, int i)
+{
+    Body *b = &g_bodies[i];
+    if (i == hole || !b->alive || b->is_black_hole || b->mass <= 0.0) return 0;
+    return body_root_star(i) == hole;
+}
+
+/*
+ * bh_tidal_pass — one tidal-disruption step for black hole `hole` over sim-time
+ * dt.  Any bound body inside the hole's tidal radius is progressively shredded:
+ * mass drains into the hole (growing it and fueling the disk), the body shrinks
+ * (r ∝ m^{1/3}), its orbit is damped so it plunges inward, and it is removed
+ * once devoured.  render.c reads tidal_frac / tidal_hole to draw the stretch.
+ */
+static void bh_tidal_pass(int hole, double dt)
+{
+    Body *h = &g_bodies[hole];
+    if (dt <= 0.0 || !h->alive || !h->is_black_hole) return;
+
+    double horizon = h->radius > 0.0 ? h->radius : 0.0;
+    int fed = 0;
+
+    for (int i = 0; i < cnb(); i++) {
+        if (!tidal_is_victim(hole, i)) continue;
+        Body *b = &g_bodies[i];
+
+        double rx = b->pos[0] - h->pos[0];
+        double ry = b->pos[1] - h->pos[1];
+        double rz = b->pos[2] - h->pos[2];
+        double dist = sqrt(rx*rx + ry*ry + rz*rz);
+        double rt = tidal_radius(hole, i);
+
+        /* A body is shredded once it first crosses r_t; the damage is permanent
+         * (debris doesn't reassemble), so keep consuming even if the orbit swings
+         * back out. */
+        int inside = (rt > 0.0 && dist <= rt);
+        if (!inside && b->tidal_frac <= 0.0f) continue;   /* intact, leave it */
+
+        /* Depth in [0,1]: 0 at/beyond the tidal radius, 1 at the horizon. */
+        double span  = rt - horizon;
+        double depth = (inside && span > 0.0) ? (rt - dist) / span : 0.0;
+        if (depth < 0.0) depth = 0.0;
+        if (depth > 1.0) depth = 1.0;
+
+        /* Consume faster the deeper in (1× at/beyond the edge → 4× near horizon). */
+        double dfrac = dt * (1.0 + 3.0 * depth) / TIDAL_CONSUME_SEC;
+        if (dfrac > 0.5) dfrac = 0.5;
+
+        double old_mass = b->mass;
+        double shed = old_mass * dfrac;
+        b->mass -= shed;
+        b->tidal_hole = hole;
+        double nf = (double)b->tidal_frac + dfrac;
+        b->tidal_frac = (float)(nf > 1.0 ? 1.0 : nf);
+        if (old_mass > 0.0 && b->mass > 0.0)
+            b->radius *= cbrt(b->mass / old_mass);   /* shrink at ~fixed density */
+
+        h->mass          += shed;
+        h->gas_reservoir += shed;
+        fed = 1;
+
+        /* Controlled inspiral.  A close orbit around a supermassive hole is
+         * numerically unstable (relativistic perihelion, coarse steps) — left to
+         * the integrator the victim either plunges instantly or is flung out.  So
+         * once shredding begins the integrator ignores this body (see the
+         * tidal_frac guards in physics.c) and we art-direct its motion here:
+         * ease the orbital radius toward the horizon over TIDAL_DESCENT_SEC while
+         * rotating it around the hole, producing a clean, watchable spiral-in. */
+        double newdist = dist;
+        if (dist > 0.0) {
+            double rhat[3] = { rx/dist, ry/dist, rz/dist };
+            /* tangential direction from current motion (fallback: any perp) */
+            double rel[3] = { b->vel[0]-h->vel[0], b->vel[1]-h->vel[1], b->vel[2]-h->vel[2] };
+            double vr = rel[0]*rhat[0] + rel[1]*rhat[1] + rel[2]*rhat[2];
+            double vt[3] = { rel[0]-vr*rhat[0], rel[1]-vr*rhat[1], rel[2]-vr*rhat[2] };
+            double vtl = sqrt(vt[0]*vt[0] + vt[1]*vt[1] + vt[2]*vt[2]);
+            if (vtl < 1e-3) {
+                double up[3] = { 0.0, 1.0, 0.0 };
+                vt[0] = rhat[1]*up[2] - rhat[2]*up[1];
+                vt[1] = rhat[2]*up[0] - rhat[0]*up[2];
+                vt[2] = rhat[0]*up[1] - rhat[1]*up[0];
+                vtl = sqrt(vt[0]*vt[0] + vt[1]*vt[1] + vt[2]*vt[2]);
+            }
+            if (vtl > 0.0) { vt[0]/=vtl; vt[1]/=vtl; vt[2]/=vtl; }
+
+            /* Radius: ease toward the horizon. */
+            double ease = dt / TIDAL_DESCENT_SEC;
+            if (ease > 0.5) ease = 0.5;
+            newdist = dist + (horizon - dist) * ease;
+            if (newdist < horizon) newdist = horizon;
+
+            /* Angle: rotate the radial direction toward the tangential by ω·dt so
+             * it circles as it falls (physics no longer moves it, so we advance
+             * the angle ourselves).  Capped per step to stay smooth. */
+            double omega = 0.6 * sqrt(g_laws.G * h->mass / (newdist*newdist*newdist));
+            double ang = omega * dt;
+            if (ang > 0.5) ang = 0.5;
+            double ca = cos(ang), sa = sin(ang);
+            double ndir[3] = {
+                rhat[0]*ca + vt[0]*sa,
+                rhat[1]*ca + vt[1]*sa,
+                rhat[2]*ca + vt[2]*sa
+            };
+            double nl = sqrt(ndir[0]*ndir[0] + ndir[1]*ndir[1] + ndir[2]*ndir[2]);
+            if (nl > 0.0) { ndir[0]/=nl; ndir[1]/=nl; ndir[2]/=nl; }
+
+            b->pos[0] = h->pos[0] + ndir[0] * newdist;
+            b->pos[1] = h->pos[1] + ndir[1] * newdist;
+            b->pos[2] = h->pos[2] + ndir[2] * newdist;
+
+            /* Velocity along the new tangent (for trail curve reconstruction). */
+            double nt[3] = { -ndir[0]*sa + vt[0]*ca, -ndir[1]*sa + vt[1]*ca, -ndir[2]*sa + vt[2]*ca };
+            double vmag = omega * newdist;
+            b->vel[0] = h->vel[0] + nt[0] * vmag;
+            b->vel[1] = h->vel[1] + nt[1] * vmag;
+            b->vel[2] = h->vel[2] + nt[2] * vmag;
+        }
+
+        /* Fully devoured: reached the horizon, out of mass, or fraction saturated. */
+        if (b->tidal_frac >= 1.0f || b->mass <= old_mass * 1e-3 ||
+            (horizon > 0.0 && newdist <= horizon * 1.05)) {
+            double old_radius = h->radius;
+            h->mass          += b->mass;
+            h->gas_reservoir += b->mass;
+            b->mass       = 0.0;
+            b->tidal_frac = 0.0f;
+            finalize_absorb_body(hole, i, 0.0, 0, old_radius);
+        }
+    }
+
+    /* A feeding hole lights up: guarantee a visible disk + flare while it eats,
+     * even if the stellar clock (accretion.c) is paused. */
+    if (fed) {
+        if (h->accretion_disk < 1.0f) h->accretion_disk = 1.0f;
+        if (h->agn_activity  < 1.0f) h->agn_activity  = 1.0f;
+    }
+}
+
 static void update_merge_events(double dt)
 {
     for (int i = 0; i < MAX_MERGES; i++) {
@@ -2181,6 +2362,11 @@ void collision_step_system(int root, double dt)
             if (impactor == a) break;
         }
     }
+
+    /* Black holes shred and devour bodies that stray within the tidal radius,
+     * before any horizon contact below. */
+    if (g_bodies[root].is_black_hole)
+        bh_tidal_pass(root, dt);
 
     if (g_bodies[root].is_star) {
         for (int i = 0; i < cnb(); i++) {

@@ -24,6 +24,18 @@ void settings_reset(void)
     g_settings.sys_trail_fade_end   = 1200.0f;
     g_settings.sys_dot_fade_start   = 240.0f;
     g_settings.sys_dot_fade_end     = 1200.0f;
+    g_settings.farfield_horizon_au  = 1.0e6f;  /* ~15.8 ly; far dots/glare/BHs fade & cull past this */
+
+    g_settings.lod_body_fade_start_px = 0.75f;
+    g_settings.lod_body_fade_end_px   = 1.75f;
+    g_settings.lod_glare_full_px      = 1.25f;
+    g_settings.lod_glare_fade_px      = 5.00f;
+    g_settings.lod_density_max        = 4.0f;
+    g_settings.dot_hide_px            = 2.5f;
+    g_settings.dot_excl_px            = 6.0f;
+    g_settings.near_dot_dist_ly       = 3.0f;
+
+    g_settings.label_max_dist_au = 55.0f;
 
     g_settings.num_stars = 4000;
 
@@ -92,6 +104,32 @@ void settings_load(void)
     g_settings.sys_trail_fade_end   = (float)json_num(json_get(root, "sys_trail_fade_end"),   g_settings.sys_trail_fade_end);
     g_settings.sys_dot_fade_start   = (float)json_num(json_get(root, "sys_dot_fade_start"),   g_settings.sys_dot_fade_start);
     g_settings.sys_dot_fade_end     = (float)json_num(json_get(root, "sys_dot_fade_end"),     g_settings.sys_dot_fade_end);
+    g_settings.farfield_horizon_au  = (float)json_num(json_get(root, "farfield_horizon_au"),  g_settings.farfield_horizon_au);
+    /* The far-field horizon must sit inside the depth range or geometry past it
+     * would clip; clamp defensively against a bad hand-edited settings file. */
+    if (g_settings.farfield_horizon_au > RENDER_DEPTH_FAR)
+        g_settings.farfield_horizon_au = RENDER_DEPTH_FAR;
+
+    g_settings.lod_body_fade_start_px = (float)json_num(json_get(root, "lod_body_fade_start_px"), g_settings.lod_body_fade_start_px);
+    g_settings.lod_body_fade_end_px   = (float)json_num(json_get(root, "lod_body_fade_end_px"),   g_settings.lod_body_fade_end_px);
+    g_settings.lod_glare_full_px      = (float)json_num(json_get(root, "lod_glare_full_px"),      g_settings.lod_glare_full_px);
+    g_settings.lod_glare_fade_px      = (float)json_num(json_get(root, "lod_glare_fade_px"),      g_settings.lod_glare_fade_px);
+    g_settings.lod_density_max        = (float)json_num(json_get(root, "lod_density_max"),        g_settings.lod_density_max);
+    g_settings.dot_hide_px            = (float)json_num(json_get(root, "dot_hide_px"),            g_settings.dot_hide_px);
+    g_settings.dot_excl_px            = (float)json_num(json_get(root, "dot_excl_px"),            g_settings.dot_excl_px);
+    g_settings.near_dot_dist_ly       = (float)json_num(json_get(root, "near_dot_dist_ly"),       g_settings.near_dot_dist_ly);
+    /* Keep each crossfade window well-ordered (end > start) so the smoothstep
+     * edges never coincide/cross — guards a hand-edited settings file. */
+    if (g_settings.lod_body_fade_end_px < g_settings.lod_body_fade_start_px + 0.05f)
+        g_settings.lod_body_fade_end_px = g_settings.lod_body_fade_start_px + 0.05f;
+    if (g_settings.lod_glare_fade_px < g_settings.lod_glare_full_px + 0.05f)
+        g_settings.lod_glare_fade_px = g_settings.lod_glare_full_px + 0.05f;
+    if (g_settings.dot_excl_px < g_settings.dot_hide_px + 0.1f)
+        g_settings.dot_excl_px = g_settings.dot_hide_px + 0.1f;
+    if (g_settings.lod_density_max < 1.0f) g_settings.lod_density_max = 1.0f;
+    if (g_settings.near_dot_dist_ly < 0.1f) g_settings.near_dot_dist_ly = 0.1f;
+
+    g_settings.label_max_dist_au = (float)json_num(json_get(root, "label_max_dist_au"), g_settings.label_max_dist_au);
 
     g_settings.num_stars = (int)json_num(json_get(root, "num_stars"), g_settings.num_stars);
 
@@ -163,8 +201,20 @@ int settings_save(void)
 
     fprintf(f, "  \"sys_trail_fade_start\": %.6g, \"sys_trail_fade_end\": %.6g,\n",
             (double)g_settings.sys_trail_fade_start, (double)g_settings.sys_trail_fade_end);
-    fprintf(f, "  \"sys_dot_fade_start\": %.6g, \"sys_dot_fade_end\": %.6g,\n\n",
+    fprintf(f, "  \"sys_dot_fade_start\": %.6g, \"sys_dot_fade_end\": %.6g,\n",
             (double)g_settings.sys_dot_fade_start, (double)g_settings.sys_dot_fade_end);
+    fprintf(f, "  \"farfield_horizon_au\": %.6g,\n\n", (double)g_settings.farfield_horizon_au);
+
+    fprintf(f, "  \"lod_body_fade_start_px\": %.6g, \"lod_body_fade_end_px\": %.6g,\n",
+            (double)g_settings.lod_body_fade_start_px, (double)g_settings.lod_body_fade_end_px);
+    fprintf(f, "  \"lod_glare_full_px\": %.6g, \"lod_glare_fade_px\": %.6g,\n",
+            (double)g_settings.lod_glare_full_px, (double)g_settings.lod_glare_fade_px);
+    fprintf(f, "  \"lod_density_max\": %.6g,\n", (double)g_settings.lod_density_max);
+    fprintf(f, "  \"dot_hide_px\": %.6g, \"dot_excl_px\": %.6g,\n",
+            (double)g_settings.dot_hide_px, (double)g_settings.dot_excl_px);
+    fprintf(f, "  \"near_dot_dist_ly\": %.6g,\n\n", (double)g_settings.near_dot_dist_ly);
+
+    fprintf(f, "  \"label_max_dist_au\": %.6g,\n\n", (double)g_settings.label_max_dist_au);
 
     fprintf(f, "  \"num_stars\": %d,\n\n", g_settings.num_stars);
 

@@ -20,15 +20,38 @@ Replace discrete “planet view / solar system view / galaxy view” modes with 
 
 ### Required primitives
 
-* **Logarithmic spatial transform**
+* **Logarithmic spatial transform** 🟡 *(depth transform landed)*
 
   * preserves precision across extreme scales
   * prevents zoom discontinuities
   * supports planetary → interstellar → galactic → cosmological transitions
-* **Continuous LOD selection**
+  * **Status:** the logarithmic *depth* transform is unified and real. One shared
+    range `RENDER_DEPTH_FAR` (`common.h`, 1e10 AU ≈ 158 kly) drives every
+    depth-writing shader via a `#define DEPTH_FAR` prelude injected in
+    `gl_shader_load()` and the CPU perspective far plane (`main.c`); `bh`/`torus`
+    were converted from standard to log depth and `jet`/`agncore` given a log
+    depth test, so all passes sort on one metric. Volumetric fades kept a
+    separate `VOL_FAR`. The far field no longer pins distant stars/glare/BHs to a
+    ~1500 AU shell — they render at true camera-relative depth and fade/cull at
+    `g_settings.farfield_horizon_au` (live "Far-field horizon" menu slider,
+    persisted). **Remaining for full #1→#2:** continuous LOD selection (below).
+* **Continuous LOD selection** 🟡 *(per-body crossfades + field-driven windows landed)*
 
   * driven by camera distance, local density, and field variance
   * no hard scene mode toggles
+  * **Status:** every per-body representation handoff is now a crossfade, not a
+    pop: dot↔sphere (new `phong.frag u_opacity`, dot alpha = exact complement,
+    transitioning spheres blend without depth writes), dot↔star-glare (billboard
+    fades in over the same window the dot fades out), and the atmosphere glow
+    fades in with the sphere instead of snapping on. The remaining linear fades
+    (`system_dot_fade_for_body`, trail fade) are now smoothstep. The crossfade
+    windows are scaled per frame by a **CosmicField density factor**
+    (`render.c lod_update_density_scale()`: local density × clumpiness,
+    log-compressed, capped ×4) — LOD driven by distance *and* the field.
+    Remaining hard switches are non-visual implementation routing (near/far dot
+    path at 3 ly, supernova/nebula billboard↔fullscreen raster selection).
+    **Remaining for ✅:** cluster/hybrid aggregation (drawing a dense clump as
+    an aggregate impostor instead of N dots) once galaxy-scale presets need it.
 * **Stable floating-origin / camera-relative transforms**
 
   * essential for local precision
@@ -44,7 +67,7 @@ The camera can zoom from a planet’s surface to a galaxy cluster and beyond whi
 
 Introduce a shared abstraction for all universe content:
 
-### `CosmicField`
+### `CosmicField` 🟡 *(density/variance field landed)*
 
 Everything in the engine resolves to one of three categories:
 
@@ -57,6 +80,15 @@ Everything in the engine resolves to one of three categories:
 * **Hybrid structures**
 
   * star clusters, spiral arms, accretion regions, galaxy cores
+
+**Status:** the first iteration is implemented as `src/cosmic_field.{c,h}` — a
+queryable spatial field (uniform spatial hash over `g_bodies` + nebular fill)
+exposing `cosmic_field_sample(pos, radius) → {number/mass density, clumpiness,
+continuous fill, dominant DISCRETE/CONTINUOUS/HYBRID class}`. This was built
+*ahead of #2* precisely so continuous LOD has the "local density and field
+variance" it needs. Verified via a live HUD readout and a headless
+`[CosmicField]` print. **Remaining:** #2 LOD consumer; and richer content
+tagging / hybrid structures as later presets need them.
 
 ### Why this matters
 
@@ -445,8 +477,25 @@ Eddington ratio, Ṁ, and reservoir.
   12 M☉ hole fed by a giant donor; verified numerically (donor 5.00→4.91 M☉,
   reservoir sustained, a* climbing, mass conserved).
 
+* **Tidal disruption events (TDE).** `collision.c bh_tidal_pass()` shreds any body
+  that strays within a black hole's tidal radius (`r_t = 1.3·R·(M_bh/M_body)^⅓`):
+  mass drains into the hole (growing it + fueling the disk/flare), the body shrinks
+  (`r ∝ m^⅓`), and it is consumed. Because a close orbit around a supermassive hole
+  is numerically unstable (relativistic perihelion, coarse steps), a shredding body
+  is removed from the integrator (`tidal_frac` guards in `physics.c`'s RESPA loops)
+  and collision art-directs a smooth spiral-in instead. Render: the victim draws as
+  a prolate ellipsoid stretched along the line to the hole (spaghettification) with
+  a hot glow (`phong.frag`/`.vert` `u_stretch_*`/`u_tidal_glow`; per-body state
+  `Body.tidal_frac`/`tidal_hole`), force-rendered at a minimum on-screen size so the
+  strand stays visible at black-hole-viewing distances. Demo: the "Doomed" body in
+  `black_hole.json` on a plunging orbit. Tunables at the top of `collision.c`
+  (`TIDAL_RADIUS_K`, `TIDAL_CONSUME_SEC`, `TIDAL_DESCENT_SEC`).
+
 **Still deferred:** Bondi accretion from an ambient gas field (needs a gas
-density field — ties into the `CosmicField` work); TDE-style feeding for SMBHs.
+density field — ties into the `CosmicField` work). TDE feeding is now handled for
+bodies on plunging orbits (above); a general "orbits gradually decay" drag for all
+BH-bound bodies is still not implemented — real orbits are stable, so disruption
+requires a plunging trajectory (as in nature).
 
 ### TODO / deferred (introduced by this work)
 
@@ -515,7 +564,7 @@ sped up — evolution runs on its own clock.
 
 Galaxy-scale safe: blast reach is bounded by mass and gathered into a per-event
 candidate list; subtree ops use a cached child index, so the path is O(N) not
-O(N²). See `docs/SCALING_HANDOFF.md`.
+O(N²). See ARCHITECTURE.md §8.1.
 
 ---
 
@@ -770,11 +819,14 @@ covering most classes below; only metallic worlds and methane seas remain.
 
 ## Phase A — Foundation for scale continuity
 
-1. Logarithmic spatial transform
-2. Continuous LOD system
-3. Unified `CosmicField` abstraction
-4. Shared `RadianceField` abstraction
+1. Logarithmic spatial transform 🟡 (depth transform + true-depth far field done)
+3. Unified `CosmicField` abstraction ✅ (density/variance field landed — built ahead of #2)
+2. Continuous LOD system 🟡 (per-body crossfades + CosmicField-driven windows landed;
+   cluster/hybrid aggregation remains for dense galaxy presets)
+4. Shared `RadianceField` abstraction ← next foundation step
 5. Universe field graph
+
+*(Note: #3 was built before #2 — continuous LOD needs a density/variance field, which #3 provides.)*
 
 ## Phase B — Visual realism completion
 

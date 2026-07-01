@@ -51,6 +51,7 @@
 #include "supernova.h"
 #include "lifecycle.h"
 #include "accretion.h"
+#include "cosmic_field.h"
 #include "audio.h"
 #include "presets.h"
 #include "menu.h"
@@ -401,6 +402,8 @@ static void init_runtime_world(void) {
     loading_phase("Building acceleration structures");
     boot_log("Refreshing physics timestep model");
     physics_refresh_timestep_model();
+    boot_log("Building cosmic density field");
+    cosmic_field_rebuild();
     warmup_universe();
     boot_log("Runtime world ready");
     loading_end();
@@ -568,6 +571,7 @@ static void app_quit(void) {
     menu_shutdown();
     loading_shutdown();
     ui_shutdown();
+    cosmic_field_shutdown();
     shutdown_runtime_world();
     SDL_GL_DeleteContext(s_ctx);
     SDL_DestroyWindow(s_win);
@@ -1055,6 +1059,8 @@ int main(int argc, char **argv) {
     collision_reset();
     boot_log("Resetting supernova state");
     supernova_reset();
+    boot_log("Initializing cosmic field");
+    cosmic_field_init();
     boot_log("Initializing UI");
     ui_init();
     sync_pause_menu_ui();
@@ -1069,6 +1075,20 @@ int main(int argc, char **argv) {
         g_cam.pos[2] = cam_pos[2];
         g_cam.yaw    = cam_yaw;
         g_cam.pitch  = cam_pitch;
+    }
+
+    /* Headless: print a grep-able cosmic-field sample at the (possibly
+     * overridden) camera, so the density field is verifiable without pixels. */
+    if (headless) {
+        CosmicSample cs;
+        cosmic_field_rebuild();          /* reflect post-warmup positions       */
+        cosmic_field_sample_camera(&cs);
+        fprintf(stdout,
+                "[CosmicField] n=%d rho=%.3e/ly3 mass=%.3e/ly3 clump=%.3f "
+                "fill=%.3f nebulae=%d class=%s\n",
+                cs.body_count, cs.number_density, cs.mass_density,
+                cs.clumpiness, cs.continuous_fill, cs.nebulae_hit,
+                cosmic_field_class_name(cs.dominant));
     }
 
     /* Timing */
@@ -1200,6 +1220,10 @@ int main(int argc, char **argv) {
         if (!s_pause_menu_open && g_inspect_orbit_mode)
             inspect_orbit_update(dt);
 
+        /* Refresh the cosmic density field (throttled; rebuilds on body-set
+         * change). Queried by the HUD and, later, continuous LOD. */
+        cosmic_field_tick(dt);
+
         /* Build matrices.
          * view_rot: rotation-only lookAt (origin as eye). Used for all distant
          *           geometry via vp_camrel = proj × view_rot.
@@ -1208,7 +1232,11 @@ int main(int argc, char **argv) {
         Mat4 proj, view, view_rot;
 
         float aspect = (float)WIN_W / (float)WIN_H;
-        mat4_perspective(proj, FOV, aspect, 0.0001f, 2000.0f);
+        /* Far plane = the shared logarithmic-depth range (common.h). Log depth in
+         * the fragment shaders preserves near precision across this huge range, so
+         * geometry from planet surface to interstellar distance sorts in one pass
+         * with no mode switch. The matrix far now governs only clip-plane culling. */
+        mat4_perspective(proj, FOV, aspect, 0.0001f, RENDER_DEPTH_FAR);
 
         float fdx, fdy, fdz;
         cam_get_dir(&fdx, &fdy, &fdz);

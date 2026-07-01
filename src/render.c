@@ -34,12 +34,21 @@
  * correct size in clip space using the camera right/up basis vectors and the
  * projected sphere radius.  No per-body vertex buffer needed.
  *
- * ── Dot–sphere transition ────────────────────────────────────────────────
+ * ── Dot–sphere transition (continuous LOD) ──────────────────────────────
  *
- * Each body alternates between a dot (GL_POINT) and a sphere (billboard):
- *   px < BODY_SPHERE_APPEAR_PX (1.25)  → dot only (sphere billboard skipped)
- *   px ∈ [DOT_FADE_START, DOT_FADE_END] (0.75..1.75) → dot fades out
- *   px ≥ DOT_FADE_END (1.75)           → dot fully hidden, sphere only
+ * Each body crossfades between a dot (GL_POINT) and a sphere (billboard) over
+ * one shared pixel window [BODY_DOT_FADE_START_PX, BODY_DOT_FADE_END_PX]
+ * (0.75..1.75 px, scaled by the density LOD factor below): the sphere's
+ * opacity is smoothstep(px) and the dot's alpha is its exact complement, so
+ * the handoff is a constant-energy blend with no pop.  Star glare does the
+ * same against the star dot over [STAR_DOT_FULL_GLARE_PX,
+ * STAR_DOT_FADE_START_GLARE_PX].  info[i].show stays a *binary* routing flag
+ * (px < BODY_SPHERE_APPEAR_PX) for picking and the far dot pass.
+ *
+ * Windows are scaled once per frame by s_lod_scale, sampled from the
+ * CosmicField at the camera (local density × clumpiness): in dense fields
+ * representations resolve later, spreading the detail budget across more
+ * bodies — LOD driven by camera distance AND the field (roadmap Phase A #2).
  *
  * eye_z (depth along view axis) is used for px computation instead of
  * Euclidean dcam.  dcam = eye_z / cos(θ) — rotating the camera changes θ
@@ -49,6 +58,7 @@
 #include "render.h"
 #include "body.h"
 #include "camera.h"
+#include "cosmic_field.h"
 #include "starfield.h"
 #include "nebula.h"
 #include "trails.h"
@@ -105,6 +115,11 @@ static GLint  s_sp_impact_prog  = -1;
 static GLint  s_sp_impact_seed  = -1;
 static GLint  s_sp_impact_kind  = -1;
 static GLint  s_sp_use_fullscreen = -1; /* 1 when billboard would degenerate (camera near body) */
+static GLint  s_sp_stretch_dir   = -1;  /* tidal spaghettification axis + factors */
+static GLint  s_sp_stretch_along = -1;
+static GLint  s_sp_stretch_perp  = -1;
+static GLint  s_sp_tidal_glow    = -1;
+static GLint  s_sp_opacity       = -1;  /* continuous-LOD dot→sphere fade-in */
 
 /*
  * get_planet_type — map body name to a procedural texture variant index.
@@ -308,16 +323,42 @@ static GLint  s_vol_comp_tex = -1;
 static GLuint s_vol_quad_vao = 0, s_vol_quad_vbo = 0;
 
 /* Glare billboard is STAR_GLARE_BILL_SCALE × the star's visual radius.
- * This constant is also used to compute when the dot fades as the glare grows. */
+ * This constant is also used to compute when the dot fades as the glare grows.
+ * NOTE: mirrored by `const float BILL_SCALE` in star_glare.frag — the two must
+ * stay synchronized, which is why this one is NOT a live setting. */
 static const float STAR_GLARE_BILL_SCALE      = 15.0f;
-/* Sphere appears when its projected radius reaches this many pixels */
+/* Sphere-vs-dot *routing* threshold (binary info[i].show for picking and the
+ * far dot pass); the visual handoff is the crossfade window below. */
 static const float BODY_SPHERE_APPEAR_PX      = 1.25f;
-/* Dot fade range: [start, end] pixels of projected radius */
-static const float BODY_DOT_FADE_START_PX     = 0.75f;
-static const float BODY_DOT_FADE_END_PX       = 1.75f;
-/* Star dot fully visible / starts fading as glare bill grows (in pixels) */
-static const float STAR_DOT_FULL_GLARE_PX     = 1.25f;
-static const float STAR_DOT_FADE_START_GLARE_PX = 5.00f;
+/* Crossfade windows + dot-dedup radii are live settings (U menu → Settings →
+ * Detail transitions), persisted in settings.json. */
+#define BODY_DOT_FADE_START_PX        (g_settings.lod_body_fade_start_px)
+#define BODY_DOT_FADE_END_PX          (g_settings.lod_body_fade_end_px)
+#define STAR_DOT_FULL_GLARE_PX        (g_settings.lod_glare_full_px)
+#define STAR_DOT_FADE_START_GLARE_PX  (g_settings.lod_glare_fade_px)
+
+/* ── continuous LOD density factor (Phase A #2) ──────────────────────────────
+ * Sampled once per frame from the CosmicField at the camera.  Scales the
+ * dot↔sphere and dot↔glare crossfade windows: in dense/clumped fields the
+ * factor rises above 1 so per-body billboards/spheres resolve at a larger
+ * projected size — fewer expensive representations contend for the screen at
+ * once, and the detail budget follows the field instead of being fixed.
+ * 1.0 in empty space; capped so the transition never moves absurdly far. */
+static float s_lod_scale = 1.0f;
+
+static void lod_update_density_scale(void)
+{
+    CosmicSample cs;
+    cosmic_field_sample_camera(&cs);
+    /* log-compressed density so the factor reacts over orders of magnitude;
+     * clumpiness weights it up — a tight cluster contends for the same pixels
+     * where uniform scatter spreads out.  The cap is a live setting
+     * (g_settings.lod_density_max); 1 disables density-driven scaling. */
+    double f = 1.0 + (0.5 + 0.5 * cs.clumpiness) * log10(1.0 + cs.number_density);
+    if (f < 1.0) f = 1.0;
+    if (f > (double)g_settings.lod_density_max) f = (double)g_settings.lod_density_max;
+    s_lod_scale = (float)f;
+}
 
 /* ------------------------------------------------------------------ build preview */
 
@@ -553,6 +594,21 @@ static int supernova_far_raster_local(const float center[3],
     return eye_z + half_extent >= far_guard;
 }
 
+/* Far-field horizon fade (true-depth falloff): 1 inside the horizon, ramping to
+ * 0 over the last 15% and culled beyond it.  Replaces the old pin-to-shell clamp
+ * so distant stars/glare/BHs recede at their real camera distance instead of
+ * being pasted onto a fixed ~1500 AU shell.  `dist` is in AU (= dcam), matching
+ * g_settings.farfield_horizon_au. */
+static float farfield_horizon_fade(float dist)
+{
+    float h = (float)g_settings.farfield_horizon_au;
+    if (h <= 0.0f)     return 1.0f;
+    float start = h * 0.85f;
+    if (dist <= start) return 1.0f;
+    if (dist >= h)     return 0.0f;
+    return 1.0f - (float)smoothstepd(start, h, dist);
+}
+
 static float supernova_distance_fade_local(float dist, float radius)
 {
     float fade_start = 2600.0f + radius * 2.5f;
@@ -769,10 +825,8 @@ static float system_dot_fade_for_body(int body_idx)
         double bz = g_bodies[body_idx].pos[2] * RS - g_cam.pos[2];
         double dist_body = sqrt(bx*bx + by*by + bz*bz);
 
-        dot_fade = 1.0f - (float)((dist_body - FREE_DOT_FADE_START)
-                                / (FREE_DOT_FADE_END - FREE_DOT_FADE_START));
-        if (dot_fade > 1.0f) dot_fade = 1.0f;
-        if (dot_fade < 0.0f) dot_fade = 0.0f;
+        dot_fade = 1.0f - (float)smoothstepd(FREE_DOT_FADE_START,
+                                             FREE_DOT_FADE_END, dist_body);
         return dot_fade;
     }
 
@@ -782,10 +836,10 @@ static float system_dot_fade_for_body(int body_idx)
     sdz = g_cam.pos[2] - g_bodies[ref_star].pos[2] * RS;
     dist_star = sqrt(sdx*sdx + sdy*sdy + sdz*sdz);
 
-    dot_fade = 1.0f - (float)((dist_star - SYS_DOT_FADE_START)
-                            / (SYS_DOT_FADE_END - SYS_DOT_FADE_START));
-    if (dot_fade > 1.0f) dot_fade = 1.0f;
-    if (dot_fade < 0.0f) dot_fade = 0.0f;
+    /* Smooth (Hermite) fade — same endpoints as before, but eases in/out so
+     * the system's dots dim without a visible fade-rate kink (continuous LOD). */
+    dot_fade = 1.0f - (float)smoothstepd(SYS_DOT_FADE_START,
+                                         SYS_DOT_FADE_END, dist_star);
     return dot_fade;
 }
 
@@ -880,6 +934,11 @@ void render_init(void) {
     s_sp_impact_seed  = glGetUniformLocation(s_sphere_shader, "u_impact_seed[0]");
     s_sp_impact_kind  = glGetUniformLocation(s_sphere_shader, "u_impact_kind[0]");
     s_sp_use_fullscreen = glGetUniformLocation(s_sphere_shader, "u_use_fullscreen");
+    s_sp_stretch_dir    = glGetUniformLocation(s_sphere_shader, "u_stretch_dir");
+    s_sp_stretch_along  = glGetUniformLocation(s_sphere_shader, "u_stretch_along");
+    s_sp_stretch_perp   = glGetUniformLocation(s_sphere_shader, "u_stretch_perp");
+    s_sp_tidal_glow     = glGetUniformLocation(s_sphere_shader, "u_tidal_glow");
+    s_sp_opacity        = glGetUniformLocation(s_sphere_shader, "u_opacity");
 
     /* Frame-constant uniforms (fov_tan, aspect, screen do not change at runtime) */
     glUseProgram(s_sphere_shader);
@@ -1433,6 +1492,7 @@ static void render_build_preview(const float vp_camrel[16])
 static int             s_rs_cap = 0;
 static BodyRenderInfo *s_rs_info = NULL;
 static float          *s_rs_body_px = NULL;
+static float          *s_rs_sphere_alpha = NULL;  /* continuous-LOD blend: sphere in / dot out */
 static int            *s_rs_dot_order = NULL, *s_rs_dot_stars = NULL,
                       *s_rs_dot_planets = NULL, *s_rs_dot_moons = NULL;
 static float          *s_rs_dot_sx = NULL, *s_rs_dot_sy = NULL,
@@ -1448,6 +1508,7 @@ static void render_scratch_ensure(int n)
     while (c < n) c *= 2;
     s_rs_info              = realloc(s_rs_info,              (size_t)c * sizeof(*s_rs_info));
     s_rs_body_px           = realloc(s_rs_body_px,           (size_t)c * sizeof(float));
+    s_rs_sphere_alpha      = realloc(s_rs_sphere_alpha,      (size_t)c * sizeof(float));
     s_rs_dot_order         = realloc(s_rs_dot_order,         (size_t)c * sizeof(int));
     s_rs_dot_stars         = realloc(s_rs_dot_stars,         (size_t)c * sizeof(int));
     s_rs_dot_planets       = realloc(s_rs_dot_planets,       (size_t)c * sizeof(int));
@@ -1459,7 +1520,7 @@ static void render_scratch_ensure(int n)
     s_rs_dot_vis           = realloc(s_rs_dot_vis,           (size_t)c * sizeof(int));
     s_rs_dot_data          = realloc(s_rs_dot_data,     (size_t)c * 8 * sizeof(float));
     s_rs_occluders         = realloc(s_rs_occluders,        (size_t)c * sizeof(int));
-    if (!s_rs_info || !s_rs_body_px || !s_rs_dot_order || !s_rs_dot_stars ||
+    if (!s_rs_info || !s_rs_body_px || !s_rs_sphere_alpha || !s_rs_dot_order || !s_rs_dot_stars ||
         !s_rs_dot_planets || !s_rs_dot_moons || !s_rs_dot_sx || !s_rs_dot_sy ||
         !s_rs_dot_overlap_alpha || !s_rs_dot_candidate || !s_rs_dot_vis ||
         !s_rs_dot_data || !s_rs_occluders) {
@@ -1512,6 +1573,14 @@ void render_frame(const float view[16], const float proj[16],
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
 
+    /* Continuous LOD: refresh the density factor that scales the crossfade
+     * windows this frame (see the block comment at the top of the file). */
+    lod_update_density_scale();
+    const float lod_body_lo  = BODY_DOT_FADE_START_PX * s_lod_scale;
+    const float lod_body_hi  = BODY_DOT_FADE_END_PX   * s_lod_scale;
+    const float lod_glare_lo = STAR_DOT_FULL_GLARE_PX * s_lod_scale;
+    const float lod_glare_hi = STAR_DOT_FADE_START_GLARE_PX * s_lod_scale;
+
     glUseProgram(s_sphere_shader);
     /* vp_camrel: body centre will be passed as camera-relative (u_center = -u_oc)
      * so all vertex positions in phong.vert are free of float32 cancellation. */
@@ -1538,6 +1607,7 @@ void render_frame(const float view[16], const float proj[16],
         if (!b->alive) {
             memset(&info[i], 0, sizeof(info[i]));
             info[i].show = 1;
+            s_rs_sphere_alpha[i] = 0.0f;
             continue;
         }
 
@@ -1587,12 +1657,37 @@ void render_frame(const float view[16], const float proj[16],
         body_px[i]   = px;
         info[i].show = (!use_fullscreen && px < BODY_SPHERE_APPEAR_PX) ? 1 : 0;
 
-        if (!g_bodies[i].alive || info[i].show) continue;
+        /* A body being tidally shredded must stay visible even when it would
+         * normally be a sub-pixel far-field dot (which can't show the stretch):
+         * force it to a sphere with a minimum on-screen size.  The shed debris
+         * spreads out and glows far brighter than the intact planet, so drawing
+         * it larger than its shrinking body is physically fair, not a cheat. */
+        if (b->tidal_frac > 0.0f) {
+            const float TIDAL_MIN_PX = 8.0f;
+            if (px < TIDAL_MIN_PX && eye_z > 0.0f) {
+                float dr_min = TIDAL_MIN_PX * eye_z * half_fov_tan() / (WIN_H / 2.0f);
+                if (dr_min > dr) { dr = dr_min; info[i].dr = dr; }
+            }
+            info[i].show = 0;
+        }
+
+        /* Continuous LOD blend: the sphere fades in over the (density-scaled)
+         * pixel window the dot fades out over — the dot pass uses the exact
+         * complement of this value, so the handoff conserves brightness. */
+        {
+            float a = (float)smoothstepd(lod_body_lo, lod_body_hi, px);
+            if (b->tidal_frac > 0.0f) a = 1.0f;   /* shredding: always a sphere */
+            s_rs_sphere_alpha[i] = a;
+        }
+
+        if (!g_bodies[i].alive || s_rs_sphere_alpha[i] <= 0.0f) continue;
         if (b->is_star) continue;   /* stars rendered as glare only, not Phong spheres */
 
         /* This body renders as a Phong sphere, so it can occlude dots behind
-         * it.  Record it for body_point_occluded_by_body()'s fast path. */
-        s_rs_occluders[s_rs_nocc++] = i;
+         * it.  Only a fully-resolved (opaque) sphere occludes — a transitioning
+         * mostly-transparent one must not swallow the dots behind it. */
+        if (s_rs_sphere_alpha[i] >= 1.0f)
+            s_rs_occluders[s_rs_nocc++] = i;
 
         /* u_oc: camera − body, computed in double then cast to float.
          * u_center = −u_oc so the phong.vert billboard is camera-relative. */
@@ -1660,7 +1755,50 @@ void render_frame(const float view[16], const float proj[16],
         }
 
         glUniform1i(s_sp_use_fullscreen, use_fullscreen);
-        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+
+        /* Tidal disruption: stretch the body into a strand pointing at the hole
+         * (elongate along the radial line, squash across it) and add a hot glow. */
+        if (b->tidal_frac > 0.0f && b->tidal_hole >= 0 &&
+            b->tidal_hole < g_nbodies && g_bodies[b->tidal_hole].alive) {
+            Body *hole = &g_bodies[b->tidal_hole];
+            float sx = (float)((hole->pos[0] - b->pos[0]) * RS);
+            float sy = (float)((hole->pos[1] - b->pos[1]) * RS);
+            float sz = (float)((hole->pos[2] - b->pos[2]) * RS);
+            float len = sqrtf(sx*sx + sy*sy + sz*sz);
+            if (len > 1e-9f) { sx/=len; sy/=len; sz/=len; }
+            else             { sx=0.0f; sy=0.0f; sz=1.0f; }
+            float tf = b->tidal_frac;
+            glUniform3f(s_sp_stretch_dir,   sx, sy, sz);
+            glUniform1f(s_sp_stretch_along, 1.0f + 3.0f * tf);   /* up to 4× long */
+            glUniform1f(s_sp_stretch_perp,  1.0f - 0.55f * tf);  /* thins to ~0.45× */
+            glUniform1f(s_sp_tidal_glow,    tf);
+        } else {
+            glUniform3f(s_sp_stretch_dir,   0.0f, 0.0f, 1.0f);
+            glUniform1f(s_sp_stretch_along, 1.0f);
+            glUniform1f(s_sp_stretch_perp,  1.0f);
+            glUniform1f(s_sp_tidal_glow,    0.0f);
+        }
+
+        /* Continuous LOD: a transitioning sphere alpha-blends over its own
+         * fading dot and must not write depth (a near-transparent disc would
+         * depth-kill the dot and other points behind it).  Fully-resolved
+         * spheres take the normal opaque, depth-writing path.  The transition
+         * set is tiny (bodies within a ~1px window), so the state churn is
+         * negligible. */
+        {
+            float op = s_rs_sphere_alpha[i];
+            glUniform1f(s_sp_opacity, op);
+            if (op < 1.0f) {
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                glDepthMask(GL_FALSE);
+            }
+            glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+            if (op < 1.0f) {
+                glDisable(GL_BLEND);
+                glDepthMask(GL_TRUE);
+            }
+        }
     }
     glBindVertexArray(0);
 
@@ -1688,7 +1826,10 @@ void render_frame(const float view[16], const float proj[16],
 
         for (int i = 0; i < g_nbodies; i++) {
             if (!g_bodies[i].alive) continue;
-            if (info[i].show) continue;   /* sub-pixel body, skip glow */
+            /* Continuous LOD: the glow fades in with the sphere (same blend)
+             * instead of snapping on the instant the body resolves. */
+            float lod_a = s_rs_sphere_alpha[i];
+            if (lod_a <= 0.0f) continue;   /* still a dot — no sphere, no glow */
             float intensity = g_bodies[i].atm_intensity;
             float scale     = g_bodies[i].atm_scale;
             float glow_color[3];
@@ -1698,7 +1839,7 @@ void render_frame(const float view[16], const float proj[16],
             float final_intensity;
             float final_scale;
             collision_body_heat_glow(i, glow_color, &glow_intensity, &glow_scale);
-            final_intensity = intensity + glow_intensity;
+            final_intensity = (intensity + glow_intensity) * lod_a;
             final_scale = glow_scale > scale ? glow_scale : scale;
             if (final_intensity <= 0.0f) continue;
             {
@@ -1978,8 +2119,8 @@ void render_frame(const float view[16], const float proj[16],
      * IMPORTANT: positions are computed as camera-relative doubles cast to
      * float, used with vp_camrel (no translation).  Using the full float VP
      * with float world positions loses 4-5 digits at 4+ ly → visible jitter. */
-#define DOT_EXCL_PX 6.0f   /* fully separated below this screen distance */
-#define DOT_HIDE_PX 2.5f   /* fully hidden when centers are this close */
+#define DOT_EXCL_PX (g_settings.dot_excl_px)  /* fully separated above this screen distance */
+#define DOT_HIDE_PX (g_settings.dot_hide_px)  /* fully hidden when centers are this close */
 
     /* Near/far split (Phase 3 — galaxy-scale far field).
      * Only bodies within NEAR_DOT_DIST of the camera get the full per-dot
@@ -1991,7 +2132,7 @@ void render_frame(const float view[16], const float proj[16],
      * O(N^2) per frame just to place star points that are a static backdrop.
      * NEAR_DOT_DIST is a few light-years (world units are AU, RS = 1/AU) so it
      * comfortably spans the active system and its nearest neighbours. */
-    const float NEAR_DOT_DIST = (float)(3.0 * LY * RS);
+    const float NEAR_DOT_DIST = (float)((double)g_settings.near_dot_dist_ly * LY * RS);
 
     int *dot_order = s_rs_dot_order;
     int dot_ns = 0, dot_np = 0, dot_nm = 0;
@@ -2040,7 +2181,6 @@ void render_frame(const float view[16], const float proj[16],
     memset(dot_vis, 0, (size_t)g_nbodies * sizeof(int));
 
     {
-        const float DOT_CLAMP_DIST_OV = 1500.0f;
         double cx2 = g_cam.pos[0];
         double cy2 = g_cam.pos[1];
         double cz2 = g_cam.pos[2];
@@ -2048,13 +2188,15 @@ void render_frame(const float view[16], const float proj[16],
         for (int oi = 0; oi < dot_total; oi++) {
             int i = dot_order[oi];
             if (!g_bodies[i].alive) continue;
+            /* Beyond the far-field horizon: culled (true-depth falloff) */
+            if (info[i].dcam > g_settings.farfield_horizon_au) continue;
             /* Pre-filter: fully occluded by a star's glare corona */
             if (body_point_star_glare_visibility(i) <= 0.02f) continue;
             /* Pre-filter: star has grown large enough that its glare disc replaces its dot */
             if (g_bodies[i].is_star &&
-                body_px[i] * STAR_GLARE_BILL_SCALE >= STAR_DOT_FADE_START_GLARE_PX) continue;
+                body_px[i] * STAR_GLARE_BILL_SCALE >= lod_glare_hi) continue;
             /* Pre-filter: non-star body is large enough to be rendered as a sphere */
-            if (!g_bodies[i].is_star && body_px[i] >= BODY_DOT_FADE_END_PX)
+            if (!g_bodies[i].is_star && body_px[i] >= lod_body_hi)
                 continue;
             if (body_point_occluded_by_body(i, info)) continue;
             Body *bi = &g_bodies[i];
@@ -2062,14 +2204,6 @@ void render_frame(const float view[16], const float proj[16],
             float rx = (float)(bi->pos[0] * RS - cx2);
             float ry = (float)(bi->pos[1] * RS - cy2);
             float rz = (float)(bi->pos[2] * RS - cz2);
-            /* Clamp distant stars to near sphere so they remain on-screen at warp */
-            if (bi->is_star) {
-                float d = sqrtf(rx*rx + ry*ry + rz*rz);
-                if (d > DOT_CLAMP_DIST_OV && d > 1e-6f) {
-                    float s = DOT_CLAMP_DIST_OV / d;
-                    rx *= s; ry *= s; rz *= s;
-                }
-            }
 
             float sx, sy;
             if (!mat4_project(vp_camrel, rx, ry, rz, WIN_W, WIN_H, &sx, &sy)) continue;
@@ -2102,15 +2236,15 @@ void render_frame(const float view[16], const float proj[16],
     }
 
     /* Build the GPU upload buffer for surviving dots.
-     * Stars beyond DOT_CLAMP_DIST are clamped to remain renderable at warp speed.
-     * Alpha = system_dot_fade × overlap_fade × glare_visibility × sphere-approach fade. */
+     * Dots render at their true camera-relative position and fade out toward the
+     * far-field horizon (no pin-to-shell); beyond it they are culled.
+     * Alpha = system_dot_fade × overlap_fade × glare_visibility × horizon_fade × sphere-approach fade. */
     float *dot_data = s_rs_dot_data;
     int   dot_count = 0;
     {
         double cx = g_cam.pos[0];
         double cy = g_cam.pos[1];
         double cz = g_cam.pos[2];
-        const float DOT_CLAMP_DIST = 1500.0f;
 
         for (int oi = 0; oi < dot_total; oi++) {
             int i = dot_order[oi];
@@ -2121,40 +2255,27 @@ void render_frame(const float view[16], const float proj[16],
             float f = b->is_star ? 1.0f : system_dot_fade_for_body(i);
             f *= dot_overlap_alpha[i];
             f *= body_point_star_glare_visibility(i);
+            f *= farfield_horizon_fade(info[i].dcam);
+            if (f <= 0.0f) continue;
 
-            /* Star: fade dot as glare billboard grows large enough to represent it */
+            /* Star: dot fades out as the glare billboard fades in — the exact
+             * complement of the glare pass's smoothstep over the same
+             * (density-scaled) window, so the handoff conserves brightness. */
             if (b->is_star) {
                 float glare_px = body_px[i] * STAR_GLARE_BILL_SCALE;
-                if (glare_px > STAR_DOT_FULL_GLARE_PX) {
-                    float t = (glare_px - STAR_DOT_FULL_GLARE_PX)
-                            / (STAR_DOT_FADE_START_GLARE_PX - STAR_DOT_FULL_GLARE_PX);
-                    if (t > 1.0f) t = 1.0f;
-                    f *= 1.0f - t;
-                }
+                f *= 1.0f - (float)smoothstepd(lod_glare_lo, lod_glare_hi, glare_px);
             }
             if (f <= 0.0f) continue;
 
-            /* Non-star: overlap the dot with the first sphere pixels during the transition */
-            float px_i = body_px[i];
-            if (!b->is_star && px_i > BODY_DOT_FADE_START_PX) {
-                float t = (px_i - BODY_DOT_FADE_START_PX)
-                        / (BODY_DOT_FADE_END_PX - BODY_DOT_FADE_START_PX);
-                if (t > 1.0f) t = 1.0f;
-                f *= 1.0f - t;
-            }
+            /* Non-star: dot alpha is the exact complement of the sphere's
+             * fade-in opacity (continuous LOD crossfade). */
+            if (!b->is_star)
+                f *= 1.0f - s_rs_sphere_alpha[i];
             if (f <= 0.0f) continue;
 
             float bx = (float)(b->pos[0] * RS - cx);
             float by = (float)(b->pos[1] * RS - cy);
             float bz = (float)(b->pos[2] * RS - cz);
-            /* Clamp star position so it stays within the far plane */
-            if (b->is_star) {
-                float d = sqrtf(bx*bx + by*by + bz*bz);
-                if (d > DOT_CLAMP_DIST && d > 1e-6f) {
-                    float s = DOT_CLAMP_DIST / d;
-                    bx *= s; by *= s; bz *= s;
-                }
-            }
             dot_data[dot_count*8+0] = bx;
             dot_data[dot_count*8+1] = by;
             dot_data[dot_count*8+2] = bz;
@@ -2179,27 +2300,21 @@ void render_frame(const float view[16], const float proj[16],
         double cx = g_cam.pos[0];
         double cy = g_cam.pos[1];
         double cz = g_cam.pos[2];
-        const float DOT_CLAMP_DIST = 1500.0f;
 
         for (int i = 0; i < g_nbodies; i++) {
             Body *b = &g_bodies[i];
             if (!b->alive || !info[i].show) continue;     /* spheres drawn elsewhere */
             if (b->is_black_hole) continue;               /* drawn by the BH pass */
             if (info[i].dcam < NEAR_DOT_DIST) continue;    /* near → handled above */
+            if (info[i].dcam > g_settings.farfield_horizon_au) continue; /* past horizon → culled */
 
             float f = b->is_star ? 1.0f : system_dot_fade_for_body(i);
+            f *= farfield_horizon_fade(info[i].dcam);
             if (f <= 0.0f) continue;
 
             float bx = (float)(b->pos[0] * RS - cx);
             float by = (float)(b->pos[1] * RS - cy);
             float bz = (float)(b->pos[2] * RS - cz);
-            if (b->is_star) {
-                float d = sqrtf(bx*bx + by*by + bz*bz);
-                if (d > DOT_CLAMP_DIST && d > 1e-6f) {
-                    float s = DOT_CLAMP_DIST / d;
-                    bx *= s; by *= s; bz *= s;
-                }
-            }
             dot_data[dot_count*8+0] = bx;
             dot_data[dot_count*8+1] = by;
             dot_data[dot_count*8+2] = bz;
@@ -2258,11 +2373,9 @@ void render_frame(const float view[16], const float proj[16],
      * Drawn after trails so stellar corona covers orbit lines inside the glow disc.
      * Additive blend (GL_ONE / GL_ONE) accumulates glow from multiple stars.
      * Depth-tested (GL_LEQUAL) so glare is eclipsed by foreground opaque bodies.
-     * Stars beyond GLARE_MAX_DIST are scaled toward the camera so the billboards
-     * remain within the view frustum and glare remains visible at warp distances. */
+     * Glare is drawn at the star's true camera-relative position and faded out
+     * toward the far-field horizon (no pin-to-shell); beyond it it is culled. */
     if (s_glare_shader) {
-        const float GLARE_MAX_DIST = 1500.0f;
-
         glUseProgram(s_glare_shader);
         glUniformMatrix4fv(s_gl_vp, 1, GL_FALSE, vp_camrel);
         glUniform3f(s_gl_right, cam_right[0], cam_right[1], cam_right[2]);
@@ -2289,7 +2402,14 @@ void render_frame(const float view[16], const float proj[16],
              * (the dot/glare handoff in the dot pass uses the same threshold),
              * so dropping the billboard here is visually consistent and turns a
              * per-star draw-call storm into just the few nearby stars. */
-            if (body_px[i] * STAR_GLARE_BILL_SCALE < STAR_DOT_FULL_GLARE_PX) continue;
+            /* Continuous LOD: the billboard fades in over the (density-scaled)
+             * window the star dot fades out over, instead of popping in at
+             * full brightness.  Below the window the dot alone represents the
+             * star and the draw call is skipped entirely (perf-critical at
+             * galaxy scale). */
+            float glare_fade = (float)smoothstepd(lod_glare_lo, lod_glare_hi,
+                                                  body_px[i] * STAR_GLARE_BILL_SCALE);
+            if (glare_fade <= 0.0f) continue;
 
             float rx = (float)(g_bodies[i].pos[0] * RS - g_cam.pos[0]);
             float ry = (float)(g_bodies[i].pos[1] * RS - g_cam.pos[1]);
@@ -2300,17 +2420,17 @@ void render_frame(const float view[16], const float proj[16],
 
             float dist   = sqrtf(rx*rx + ry*ry + rz*rz);
             float radius = (float)(g_bodies[i].radius * RS);
-            /* Scale down glare for very distant stars so it stays on-screen */
-            if (dist > GLARE_MAX_DIST && dist > 1e-6f) {
-                float s = GLARE_MAX_DIST / dist;
-                rx *= s; ry *= s; rz *= s;
-                radius *= s;
-            }
+            /* True-depth falloff: cull past the horizon, fade the additive glow
+             * (via colour) over the approach so it doesn't pop out.  The LOD
+             * crossfade factor composes the same way. */
+            float hf = farfield_horizon_fade(dist);
+            if (hf <= 0.0f) continue;
+            hf *= glare_fade;
 
             glUniform3f(s_gl_center, rx, ry, rz);
             glUniform1f(s_gl_radius, radius);
             glUniform3f(s_gl_color,
-                        g_bodies[i].col[0], g_bodies[i].col[1], g_bodies[i].col[2]);
+                        g_bodies[i].col[0] * hf, g_bodies[i].col[1] * hf, g_bodies[i].col[2] * hf);
             glUniform1f(s_gl_seed, (float)(i % 1024) * 0.1013f);
             glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
         }
@@ -2325,10 +2445,8 @@ void render_frame(const float view[16], const float proj[16],
      * Shadow + accretion disk billboards, alpha-blended (the shadow is opaque
      * so it occludes the background; the disk/ring write HDR-bright colour that
      * bloom turns into a glow).  Depth-tested so a nearer body occludes the BH;
-     * distant ones are scaled toward the camera to stay on screen, like glare. */
+     * drawn at true camera-relative depth and culled past the far-field horizon. */
     if (s_bh_shader) {
-        const float BH_MAX_DIST = 1500.0f;
-
         glUseProgram(s_bh_shader);
         glUniformMatrix4fv(s_bh_vp, 1, GL_FALSE, vp_camrel);
         glUniform3f(s_bh_right, cam_right[0], cam_right[1], cam_right[2]);
@@ -2351,13 +2469,10 @@ void render_frame(const float view[16], const float proj[16],
             if (rx*cam_fwd[0] + ry*cam_fwd[1] + rz*cam_fwd[2] < 0.0f) continue;
 
             float dist   = sqrtf(rx*rx + ry*ry + rz*rz);
+            if (dist > g_settings.farfield_horizon_au) continue;  /* past horizon → culled */
             double rs_m, a_star, isco_rs;
             bh_scales(&g_bodies[i], &rs_m, &a_star, &isco_rs);
             float radius = (float)(rs_m * RS);   /* horizon radius from mass */
-            if (dist > BH_MAX_DIST && dist > 1e-6f) {
-                float s = BH_MAX_DIST / dist;
-                rx *= s; ry *= s; rz *= s; radius *= s;
-            }
 
             glUniform3f(s_bh_center, rx, ry, rz);
             glUniform1f(s_bh_radius, radius);
@@ -2419,7 +2534,6 @@ void render_frame(const float view[16], const float proj[16],
 
     /* ---------------------------------- 6.4b. AGN relativistic jets (additive) */
     if (s_jet_shader) {
-        const float BH_MAX_DIST = 1500.0f;
         glUseProgram(s_jet_shader);
         glUniformMatrix4fv(s_jet_vp, 1, GL_FALSE, vp_camrel);
         glUniform1f(s_jet_time, (float)SDL_GetTicks() * 0.001f);
@@ -2439,13 +2553,10 @@ void render_frame(const float view[16], const float proj[16],
             float ry = (float)(g_bodies[i].pos[1] * RS - g_cam.pos[1]);
             float rz = (float)(g_bodies[i].pos[2] * RS - g_cam.pos[2]);
             float dist   = sqrtf(rx * rx + ry * ry + rz * rz);
+            if (dist > g_settings.farfield_horizon_au) continue;  /* past horizon → culled */
             double rs_m, a_star, isco_rs;
             bh_scales(&g_bodies[i], &rs_m, &a_star, &isco_rs);
             float radius = (float)(rs_m * RS);
-            if (dist > BH_MAX_DIST && dist > 1e-6f) {
-                float s = BH_MAX_DIST / dist;
-                rx *= s; ry *= s; rz *= s; radius *= s;
-            }
 
             /* Blandford–Znajek: jets are powered by spin, so length and strength
              * scale with a* — a non-spinning hole barely jets even when accreting. */
@@ -2477,7 +2588,6 @@ void render_frame(const float view[16], const float proj[16],
 
     /* -------------------------------------- 6.4c. AGN dust torus (alpha-over) */
     if (s_torus_shader) {
-        const float BH_MAX_DIST = 1500.0f;
         const float RMAJ = 14.0f, RMIN = 6.0f;   /* in Rs units */
         glUseProgram(s_torus_shader);
         glUniformMatrix4fv(s_torus_vp, 1, GL_FALSE, vp_camrel);
@@ -2502,13 +2612,10 @@ void render_frame(const float view[16], const float proj[16],
             float ry = (float)(g_bodies[i].pos[1] * RS - g_cam.pos[1]);
             float rz = (float)(g_bodies[i].pos[2] * RS - g_cam.pos[2]);
             float dist   = sqrtf(rx * rx + ry * ry + rz * rz);
+            if (dist > g_settings.farfield_horizon_au) continue;  /* past horizon → culled */
             double rs_m, a_star, isco_rs;
             bh_scales(&g_bodies[i], &rs_m, &a_star, &isco_rs);
             float radius = (float)(rs_m * RS);
-            if (dist > BH_MAX_DIST && dist > 1e-6f) {
-                float s = BH_MAX_DIST / dist;
-                rx *= s; ry *= s; rz *= s; radius *= s;
-            }
             double ob = g_bodies[i].obliquity * (PI / 180.0);
 
             /* Dust sublimation radius grows with luminosity (~accretion): a more
@@ -2546,7 +2653,6 @@ void render_frame(const float view[16], const float proj[16],
 
     /* -------------------------------- 6.4d. AGN beamed core (blazar, additive) */
     if (s_agncore_shader) {
-        const float BH_MAX_DIST = 1500.0f;
         glUseProgram(s_agncore_shader);
         glUniformMatrix4fv(s_agncore_vp, 1, GL_FALSE, vp_camrel);
         glUniform3f(s_agncore_right, cam_right[0], cam_right[1], cam_right[2]);
@@ -2567,13 +2673,10 @@ void render_frame(const float view[16], const float proj[16],
             float ry = (float)(g_bodies[i].pos[1] * RS - g_cam.pos[1]);
             float rz = (float)(g_bodies[i].pos[2] * RS - g_cam.pos[2]);
             float dist = sqrtf(rx * rx + ry * ry + rz * rz);
+            if (dist > g_settings.farfield_horizon_au) continue;  /* past horizon → culled */
             double rs_m, a_star, isco_rs;
             bh_scales(&g_bodies[i], &rs_m, &a_star, &isco_rs);
             float radius = (float)(rs_m * RS);
-            if (dist > BH_MAX_DIST && dist > 1e-6f) {
-                float s = BH_MAX_DIST / dist;
-                rx *= s; ry *= s; rz *= s; radius *= s;
-            }
 
             /* Beamed core lights up when the jet points at the camera (pole-on),
              * scaled by activity and spin (jet power). */

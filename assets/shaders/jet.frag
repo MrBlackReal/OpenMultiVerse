@@ -88,5 +88,9 @@ void main() {
 
     float I = emit * beam * clamp(u_activity, 0.0, 2.0) * 1.25 * sideness;
     if (I < 0.002) discard;
+    /* Logarithmic depth for the depth TEST (mask is off, so this doesn't write):
+     * keeps the additive glow consistent with the log-depth scene, else standard
+     * depth saturates at the far plane and the jets fail the test. */
+    gl_FragDepth = log2(1.0 / gl_FragCoord.w + 1.0) / log2(DEPTH_FAR + 1.0);
     frag_color = vec4(col * I, I);
 }

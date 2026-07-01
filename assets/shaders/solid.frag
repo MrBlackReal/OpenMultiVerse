@@ -12,7 +12,7 @@ out vec4 frag_color;
 void main() {
     /* Logarithmic depth — consistent with phong.frag.
      * gl_FragCoord.w = 1/t for perspective, so t = 1/gl_FragCoord.w.   */
-    const float FAR = 2000.0;
+    const float FAR = DEPTH_FAR;
     gl_FragDepth = log2(1.0 / gl_FragCoord.w + 1.0) / log2(FAR + 1.0);
     frag_color = vec4(u_color.rgb, u_color.a * v_alpha);
 }

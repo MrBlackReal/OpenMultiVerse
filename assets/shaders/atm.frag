@@ -112,7 +112,7 @@ void main() {
      * back face (t_atm_back) is always behind any solid object that sits
      * inside the atmosphere shell, so the depth test correctly rejects the
      * glow at pixels occupied by a closer solid body.                    */
-    const float FAR = 2000.0;
+    const float FAR = DEPTH_FAR;
     float t_atm_back = -b + sqrt(max(0.0, R_atm * R_atm - p2));
     float eye_depth  = t_atm_back * dot(ray_dir, u_cam_fwd);
     gl_FragDepth = log2(eye_depth + 1.0) / log2(FAR + 1.0);

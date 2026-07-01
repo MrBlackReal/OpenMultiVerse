@@ -228,8 +228,8 @@ Small real samples live in `assets/catalogs/`, and the bundled presets
 **Known Universe** preset merges the Solar System with the full NASA Exoplanet +
 Gaia catalogs into a single ~16,000-body universe — generate or resize it with
 `python3 tools/build_known_universe.py --max-systems N` (`N=0` = everything). See
-[docs/SCALING_HANDOFF.md](docs/SCALING_HANDOFF.md) for how the renderer keeps that
-many bodies real-time.
+[ARCHITECTURE.md](ARCHITECTURE.md) §8.1 for how the renderer keeps that many
+bodies real-time.
 
 ---
 

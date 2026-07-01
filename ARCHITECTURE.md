@@ -11,7 +11,8 @@ selectable "multiverse"), **real-astronomical-data import**, **galaxy-scale
 rendering** (camera-driven active region + far-field points, ~16k bodies in real
 time), a **stellar lifecycle** system, and visual systems (HDR bloom, volumetric
 nebulae, black holes). Forward-looking plans and in-progress work live in `docs/`
-(`SCALING_HANDOFF.md`, `UNIFIED_ROADMAP_REFINED.md`, `VISUALS_ROADMAP.md`).
+(`UNIFIED_ROADMAP_REFINED.md` — the single unified roadmap; it absorbed the former
+`SCALING_HANDOFF.md` and `VISUALS_ROADMAP.md`).
 
 ---
 
@@ -80,7 +81,7 @@ OpenMultiVerse/
 ├── README.md
 ├── ARCHITECTURE.md
 ├── CONTRIBUTING.md
-├── docs/                   In-progress + planned work (SCALING_HANDOFF, roadmaps, VISUALS)
+├── docs/                   In-progress + planned work (UNIFIED_ROADMAP_REFINED.md)
 ├── tools/                  catalogtool.c (offline) + build_known_universe.py
 ├── extern/cimgui/          Dear ImGui C binding submodule (only used by IMGUI=1)
 ├── assets/
@@ -775,11 +776,36 @@ are exposed via `post_get/set_bloom()` (Visuals menu). Targets rebuild on resize
 
 Real-catalogue nebulae as world-space volumetric raymarched clouds. Each has a
 true J2000 position + physical radius; one representation at all ranges (a soft
-blob when far, an enveloping volume when flown into — no LOD switch). Beyond the
-render far-plane the centre/radius are clamped to a shell preserving angular size
-(same trick as the star-dot and black-hole passes). Drawn camera-relative after
+blob when far, an enveloping volume when flown into — no LOD switch). Beyond
+`NEBULA_MAX_DIST` the centre/radius are clamped to a shell preserving angular
+size, so distant nebulae stay legible as backdrops. (The star-dot / glare /
+black-hole passes formerly did the same but now render at true depth and
+fade/cull at `farfield_horizon_au` — nebulae keep the shell clamp by design.)
+Drawn camera-relative after
 opaque geometry with depth test on / writes off. Exposes a Visuals toggle +
 density/steps and a Navigate-tab enumeration.
+
+### `cosmic_field.c` / `cosmic_field.h`
+
+The unified **CosmicField** density/variance field (roadmap Phase A #3): one
+queryable spatial field over all content, classifying it as discrete /
+continuous / hybrid and reporting local number/mass density, a clumpiness
+(spatial-variance) metric, and nebular medium fill at any point. It is the
+foundation the continuous-LOD selection (Phase A #2) will consume for its
+"local density and field variance" inputs.
+
+Internals: a uniform spatial **hash** over `g_bodies` (open-addressed table of
+occupied cells + a CSR body-index pool, built by counting-sort exactly like
+`physics.c`'s member-pool build), so only occupied cells cost memory — empty
+interstellar space is free. Cells are 1 ly on a side; positions are SI metres
+(double), accumulation done in light-years for precision. Rebuilt O(N) on
+universe load and throttled per frame (`cosmic_field_tick`, immediate on a
+body-count change). Nebulae contribute a continuous `fill` term (linear scan of
+the 18), so the abstraction genuinely unifies discrete points with volumetric
+fields. Query (`cosmic_field_sample`) walks the sample sphere's cell box (linear
+fallback for degenerate huge radii). **Main-thread only** — never call inside the
+physics OpenMP warmup. Verified by a live HUD line (`ui.c`) and a headless
+`[CosmicField] …` stdout print (`main.c`, `--headless`).
 
 ### `menu.c` / `menu.h`
 
@@ -1038,8 +1064,8 @@ physically standard.
 
 A live N-body sim can't brute-force a galaxy. The model (Space Engine / Celestia
 style): star systems are gravitationally independent islands, so only the camera's
-neighbourhood is fully simulated and everything else is a cheap point. See
-`docs/SCALING_HANDOFF.md` for the full status; the essentials:
+neighbourhood is fully simulated and everything else is a cheap point. The
+essentials:
 
 - **Gravity isolation** (`g_laws.gravity_isolation`, default on): a body only feels
   others in its own system, turning the force kernel from O(active × N) into
@@ -1053,10 +1079,20 @@ neighbourhood is fully simulated and everything else is a cheap point. See
   (priority sort, overlap dedup, glare occlusion); the ~16k far bodies go through
   one O(N) pass projected camera-relative in *double* (floating origin), emitted
   into the dot VBO with a single draw call.
-- **Caveat**: collision and labels still use fixed `[MAX_BODIES]` tables and cover
-  the first 128 body *indices*, not the 128 nearest the camera — so they don't yet
-  follow you across the galaxy (handoff TODO "B2"). **Do not just raise
-  `MAX_BODIES`** — `collision.c` has `[MAX_BODIES][MAX_BODIES]` stack arrays.
+- **Labels follow the camera** (B2-labels ✅): `physics_active_bodies()` is the
+  single source of truth for "which bodies are near the camera" (built from the
+  CSR member pools, nearest systems first); `labels.c` treats its fixed
+  `MAX_BODIES` arrays as a slot *cache* keyed by cache slot, evicting slots as
+  bodies leave the active region — so any of the ~16k systems gets labelled as
+  you approach.
+- **Caveat (B2-collision, still TODO)**: `collision.c` still uses fixed
+  `[MAX_BODIES]` tables covering the first 128 body *indices*, not the 128
+  nearest the camera — collisions don't yet follow you across the galaxy. Its
+  per-pair state (`s_pair_next[MAX_BODIES][MAX_BODIES]` cooldowns, rollback
+  snapshots) is index-keyed and must survive across frames, so the labels-style
+  slot-cache remap doesn't apply; it needs sparse per-pair tables first.
+  **Do not just raise `MAX_BODIES`** — `collision.c` has
+  `[MAX_BODIES][MAX_BODIES]` *stack* arrays that would explode.
 
 ---
 
@@ -1172,17 +1208,42 @@ floating-origin trick described above.)
 
 Depth and blending:
 
-- Spheres and many world passes use logarithmic depth in shaders.
+- Spheres and all world passes use logarithmic depth in shaders, normalised
+  against a single shared range: `RENDER_DEPTH_FAR` (`src/common.h`, currently
+  1e10 AU ≈ 158 kly). `gl_shader_load()` (`src/gl_utils.c`) splices `#define
+  DEPTH_FAR <value>` after each shader's `#version` line, so every depth-writing
+  pass — including `bh.frag`/`torus.frag` (now log, previously standard
+  `0.5+0.5·z/w`) and the additive `jet.frag`/`agncore.frag` depth *tests* —
+  sorts on the identical metric. The CPU perspective far plane (`main.c`) uses
+  the same `RENDER_DEPTH_FAR`; log depth preserves near precision across the huge
+  range, so geometry from planet surface to interstellar distance renders in one
+  pass with no mode switch. The three volumetric shaders (`nebula`,
+  `supernova_core`, `supernova_cloud`) keep a separate `VOL_FAR` (2000 AU) for
+  their opacity/fade falloff — decoupled from the depth range so raising the
+  latter doesn't push their fades out.
 - Additive effects use `GL_SRC_ALPHA, GL_ONE` or `GL_ONE, GL_ONE`.
 - Labels/UI use alpha blending.
 - Some overlays disable depth testing by design.
 - `GL_DEPTH_CLAMP` is enabled so nearby billboard spheres do not clip through
   the near plane.
 
-Small-body rendering:
+Small-body rendering (continuous LOD):
 
-- Bodies transition between ray-sphere rendering and dot rendering based on
-  projected pixel size.
+- Bodies **crossfade** between dot and ray-sphere rendering based on projected
+  pixel size: the sphere's opacity (`phong.frag u_opacity`) is a smoothstep over
+  the `BODY_DOT_FADE_START/END_PX` window and the dot's alpha is its exact
+  complement, so the handoff conserves brightness — no pop. A transitioning
+  sphere alpha-blends without writing depth (so it can't depth-kill its own
+  fading dot); only a fully-resolved sphere writes depth and occludes dots.
+  Star glare crossfades against the star dot the same way over the
+  `STAR_DOT_*_GLARE_PX` window, and the atmosphere glow fades in with the
+  sphere instead of snapping on. `info[i].show` remains a binary routing flag
+  (picking, far dot pass).
+- The crossfade windows are scaled once per frame by a **density LOD factor**
+  (`lod_update_density_scale()` in `render.c`), sampled from the CosmicField at
+  the camera (local density × clumpiness, log-compressed, capped): in dense
+  fields representations resolve later so the detail budget follows the field
+  — LOD driven by camera distance *and* the field (roadmap Phase A #2).
 - Dots split near vs. far by camera distance (`NEAR_DOT_DIST`). **Near** dots get
   the full treatment: priority-ordered overlap dedup (stars, planets, moons),
   glare occlusion, dot↔sphere fade. **Far** dots (the ~16k bulk) go through one
@@ -1190,7 +1251,12 @@ Small-body rendering:
   no O(N²) work, one draw call.
 - Star dots are sized per-point (`star_dot.vert`) from an apparent-magnitude
   estimate, so brighter/nearer stars read larger.
-- Stars can be clamped toward the far plane for visibility during warp travel.
+- Distant stars, glare, and black holes render at their **true** camera-relative
+  depth and fade/cull past `g_settings.farfield_horizon_au` (a live, persisted
+  menu setting, "Far-field horizon" under *Far-field fade*). This replaces the old
+  pin-to-shell clamp that pasted far objects onto a fixed ~1500 AU shell; see
+  `farfield_horizon_fade()` in `render.c`. The horizon is clamped ≤
+  `RENDER_DEPTH_FAR` so nothing renders past the depth range.
 
 ---
 

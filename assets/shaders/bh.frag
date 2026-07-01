@@ -247,9 +247,11 @@ void main() {
      * bodies in real 3D, without the faint lensed disk rim writing an opaque
      * depth that would punch black holes in the torus dust behind it. hit_p is
      * hole-frame Rs units; world_camrel = u_center + hit_p·Rs (matches bh.vert). */
+    /* Logarithmic depth (shared DEPTH_FAR): clip.w is the eye-forward distance,
+     * the same quantity the rasterised passes feed through 1/gl_FragCoord.w. */
     if (swallowed || (hit && disk_a > 0.5)) {
         vec4 clip = u_vp * vec4(u_center + hit_p * Rs, 1.0);
-        gl_FragDepth = 0.5 + 0.5 * clip.z / clip.w;
+        gl_FragDepth = log2(max(clip.w, 0.0) + 1.0) / log2(DEPTH_FAR + 1.0);
     } else {
         gl_FragDepth = 1.0;                 /* transparent: never occlude behind */
     }

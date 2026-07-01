@@ -38,17 +38,31 @@
  * Moon labels are rendered in italic to visually distinguish them from planets.
  * Label color is body_col × 1.4 + 0.15, clamped to 1.0 — brightened above
  * the body's diffuse color so labels remain legible against dark backgrounds.
+ *
+ * ── Camera-following slot cache (galaxy scale) ─────────────────────────────
+ *
+ * There are only MAX_BODIES texture/state slots but a galaxy holds ~16k bodies,
+ * so slots are a *cache keyed by cache-slot index, not body index*.  Each frame
+ * physics_active_bodies() returns the bodies in systems near the camera; every
+ * active body is assigned a slot (its name texture built lazily on first use),
+ * and slots holding bodies that have left the active region are evicted to make
+ * room.  The result: labels follow the camera across the galaxy — a system gets
+ * labelled as you approach and releases its slots as you leave — instead of
+ * being pinned to the first MAX_BODIES body indices.  s_slot_body[slot] records
+ * which body each slot holds (-1 = empty); everything below is indexed by slot.
  */
 #include "labels.h"
 #include "body.h"
 #include "camera.h"
 #include "gl_utils.h"
 #include "math3d.h"
+#include "physics.h"
+#include "settings.h"
 #include "ui_theme.h"
 
-/* Hard far cutoff: non-star labels are suppressed beyond this distance (AU).
- * Stars are always shown regardless of distance (they are visible at any range). */
-#define MAX_LABEL_DIST   55.0f
+/* Hard far cutoff: non-star labels are suppressed beyond g_settings.label_max_dist_au
+ * (AU), adjustable in the menu.  Stars are always shown regardless of distance
+ * (they are visible at any range within the camera's active region). */
 
 /* Close cutoff in body radii: suppresses the label when the camera is too close
  * to the body disc.  Stars use a larger threshold because glare dominates earlier. */
@@ -71,10 +85,13 @@ static GLint  s_loc_right  = -1;
 static GLint  s_loc_up     = -1;
 static GLint  s_loc_tex    = -1;
 
-/* Per-body SDL_TTF-rendered name textures */
+/* Per-slot SDL_TTF-rendered name textures (see "slot cache" note above). */
 static GLuint s_tex[MAX_BODIES];
 static int    s_tex_w[MAX_BODIES];
 static int    s_tex_h[MAX_BODIES];
+
+/* Body index occupying each cache slot, or -1 when the slot is empty. */
+static int    s_slot_body[MAX_BODIES];
 
 /* ── Hysteresis state ───────────────────────────────────────────────────── */
 /*
@@ -93,9 +110,9 @@ static int    s_tex_h[MAX_BODIES];
 #define SHOW_DELAY 0.20f
 #define HIDE_DELAY 0.06f
 
-static float s_show_accum[MAX_BODIES];
-static float s_hide_accum[MAX_BODIES];
-static int   s_active[MAX_BODIES];
+static float s_show_accum[MAX_BODIES];   /* indexed by cache slot */
+static float s_hide_accum[MAX_BODIES];   /* indexed by cache slot */
+static int   s_active[MAX_BODIES];       /* indexed by cache slot */
 
 static TTF_Font *s_font = NULL;
 
@@ -122,7 +139,8 @@ static GLuint surface_to_texture(SDL_Surface *surf, int *w, int *h) {
 }
 
 /*
- * build_label_texture — render the body name into s_tex[i] via SDL_TTF.
+ * build_label_texture — render body `b`'s name into cache slot `slot` via
+ * SDL_TTF.
  *
  * Color: body_col × 1.4 + 0.15 clamped to [0,1], converted to uint8.
  * Brightens the body color so the label is legible on dark backgrounds.
@@ -130,29 +148,56 @@ static GLuint surface_to_texture(SDL_Surface *surf, int *w, int *h) {
  * Style: moons (parent exists and parent is not a star) are rendered italic
  * to visually distinguish them from planets and stars.
  *
- * Any previous texture for this index is deleted before the new one is created.
+ * Any previous texture in this slot is deleted before the new one is created.
  */
-static void build_label_texture(int i)
+static void build_label_texture(int slot, int b)
 {
-    if (i < 0 || i >= MAX_BODIES || i >= g_nbodies || !s_font) return;
+    if (slot < 0 || slot >= MAX_BODIES) return;
+    if (b < 0 || b >= g_nbodies || !s_font) return;
 
-    if (s_tex[i]) {
-        glDeleteTextures(1, &s_tex[i]);
-        s_tex[i] = 0;
+    if (s_tex[slot]) {
+        glDeleteTextures(1, &s_tex[slot]);
+        s_tex[slot] = 0;
     }
 
     SDL_Color col;
-    col.r = (Uint8)(fminf(g_bodies[i].col[0]*1.4f+0.15f, 1.0f)*255);
-    col.g = (Uint8)(fminf(g_bodies[i].col[1]*1.4f+0.15f, 1.0f)*255);
-    col.b = (Uint8)(fminf(g_bodies[i].col[2]*1.4f+0.15f, 1.0f)*255);
+    col.r = (Uint8)(fminf(g_bodies[b].col[0]*1.4f+0.15f, 1.0f)*255);
+    col.g = (Uint8)(fminf(g_bodies[b].col[1]*1.4f+0.15f, 1.0f)*255);
+    col.b = (Uint8)(fminf(g_bodies[b].col[2]*1.4f+0.15f, 1.0f)*255);
     col.a = 255;
-    int is_moon = (g_bodies[i].parent >= 0 &&
-                   !g_bodies[g_bodies[i].parent].is_star);
+    int is_moon = (g_bodies[b].parent >= 0 &&
+                   !g_bodies[g_bodies[b].parent].is_star);
     TTF_SetFontStyle(s_font, is_moon ? TTF_STYLE_ITALIC : TTF_STYLE_NORMAL);
-    SDL_Surface *surf = TTF_RenderText_Blended(s_font, g_bodies[i].name, col);
+    SDL_Surface *surf = TTF_RenderText_Blended(s_font, g_bodies[b].name, col);
     if (!surf) { TTF_SetFontStyle(s_font, TTF_STYLE_NORMAL); return; }
-    s_tex[i] = surface_to_texture(surf, &s_tex_w[i], &s_tex_h[i]);
+    s_tex[slot] = surface_to_texture(surf, &s_tex_w[slot], &s_tex_h[slot]);
     TTF_SetFontStyle(s_font, TTF_STYLE_NORMAL);
+}
+
+/* Cache slot currently holding body `b`, or -1 if none.  Linear scan over the
+ * MAX_BODIES-entry cache — cheap since the cache is small and bounded. */
+static int slot_of_body(int b)
+{
+    if (b < 0) return -1;
+    for (int s = 0; s < MAX_BODIES; s++)
+        if (s_slot_body[s] == b) return s;
+    return -1;
+}
+
+/* Free a cache slot: drop its texture and reset its per-slot state. */
+static void free_slot(int slot)
+{
+    if (slot < 0 || slot >= MAX_BODIES) return;
+    if (s_tex[slot]) {
+        glDeleteTextures(1, &s_tex[slot]);
+        s_tex[slot] = 0;
+    }
+    s_tex_w[slot]     = 0;
+    s_tex_h[slot]     = 0;
+    s_slot_body[slot] = -1;
+    s_show_accum[slot] = 0.0f;
+    s_hide_accum[slot] = 0.0f;
+    s_active[slot]     = 0;
 }
 
 /* ── public API ─────────────────────────────────────────────────────────── */
@@ -197,39 +242,39 @@ void labels_init(void) {
         return;
     }
 
+    /* The cache starts empty; slot textures are built lazily in labels_render
+     * as bodies enter the camera's active region. */
     memset(s_tex,        0, sizeof(s_tex));
     memset(s_tex_w,      0, sizeof(s_tex_w));
     memset(s_tex_h,      0, sizeof(s_tex_h));
     memset(s_show_accum, 0, sizeof(s_show_accum));
     memset(s_hide_accum, 0, sizeof(s_hide_accum));
     memset(s_active,     0, sizeof(s_active));
-    for (int i = 0; i < g_nbodies; i++)
-        if (g_bodies[i].alive) build_label_texture(i);
+    for (int s = 0; s < MAX_BODIES; s++) s_slot_body[s] = -1;
 }
 
-/* Register a newly added body and generate its label texture. */
+/* Register a newly added body.  Its texture is normally built lazily when the
+ * body enters the camera's active region; but body indices are reused, so if a
+ * cache slot still holds this index (from a previously-freed body) its texture
+ * is stale — rebuild it now so the label reflects the new body. */
 void labels_add_body(int body_idx)
 {
-    if (body_idx < 0 || body_idx >= MAX_BODIES) return;
-    s_show_accum[body_idx] = 0.0f;
-    s_hide_accum[body_idx] = 0.0f;
-    s_active[body_idx] = 0;
-    build_label_texture(body_idx);
+    if (body_idx < 0 || body_idx >= g_nbodies) return;
+    int slot = slot_of_body(body_idx);
+    if (slot < 0) return;   /* not cached — lazy path will build it */
+    s_show_accum[slot] = 0.0f;
+    s_hide_accum[slot] = 0.0f;
+    s_active[slot]     = 0;
+    build_label_texture(slot, body_idx);
 }
 
-/* Deregister a body (e.g. after collision merge) and free its texture. */
+/* Deregister a body (e.g. after collision merge): release its cache slot so the
+ * stale texture is freed and the reusable body index starts clean. */
 void labels_remove_body(int body_idx)
 {
-    if (body_idx < 0 || body_idx >= MAX_BODIES) return;
-    s_show_accum[body_idx] = 0.0f;
-    s_hide_accum[body_idx] = 0.0f;
-    s_active[body_idx] = 0;
-    if (s_tex[body_idx]) {
-        glDeleteTextures(1, &s_tex[body_idx]);
-        s_tex[body_idx] = 0;
-    }
-    s_tex_w[body_idx] = 0;
-    s_tex_h[body_idx] = 0;
+    if (body_idx < 0) return;
+    int slot = slot_of_body(body_idx);
+    if (slot >= 0) free_slot(slot);
 }
 
 void labels_render(const float view[16], const float proj[16],
@@ -245,10 +290,49 @@ void labels_render(const float view[16], const float proj[16],
 
     float half_fov_tan = tanf(FOV * 0.5f * (float)(PI / 180.0));
 
-    /* Labels use fixed MAX_BODIES scratch and per-body texture slots, so only
-     * the first MAX_BODIES bodies are labelled.  The camera-driven active set
-     * (a later phase) will choose *which* bodies occupy those slots. */
-    const int nb = g_nbodies < MAX_BODIES ? g_nbodies : MAX_BODIES;
+    /* ---- Step 0: refresh the camera-following slot cache ----
+     * Ask physics which bodies are in systems near the camera, then ensure each
+     * holds a cache slot (building its name texture on first use).  Slots whose
+     * body has left the active region are evicted to make room.  Everything
+     * below is indexed by cache slot, with s_slot_body[slot] giving the body. */
+    int active[MAX_BODIES];
+    double cam_m[3] = { (double)g_cam.pos[0] * AU,
+                        (double)g_cam.pos[1] * AU,
+                        (double)g_cam.pos[2] * AU };
+    int n_active = physics_active_bodies(cam_m,
+                                         g_settings.active_radius_ly * LY,
+                                         active, MAX_BODIES);
+
+    /* slot_needed[s] = slot s holds a body in this frame's active set. */
+    int slot_needed[MAX_BODIES];
+    memset(slot_needed, 0, sizeof(slot_needed));
+
+    /* Active bodies without a slot yet; assigned to free/evictable slots below. */
+    int pending[MAX_BODIES];
+    int n_pending = 0;
+    for (int a = 0; a < n_active; a++) {
+        int b = active[a];
+        int slot = slot_of_body(b);
+        if (slot >= 0) slot_needed[slot] = 1;
+        else           pending[n_pending++] = b;
+    }
+
+    /* Assign each pending body a slot: prefer an empty slot, else evict one
+     * whose occupant is not in this frame's active set.  Room is guaranteed:
+     * n_active <= MAX_BODIES, so (needed + pending) <= MAX_BODIES. */
+    {
+        int scan = 0;
+        for (int p = 0; p < n_pending; p++) {
+            while (scan < MAX_BODIES &&
+                   s_slot_body[scan] != -1 && slot_needed[scan]) scan++;
+            if (scan >= MAX_BODIES) break;      /* defensive; shouldn't happen */
+            int slot = scan++;
+            if (s_slot_body[slot] != -1) free_slot(slot);   /* evict occupant */
+            s_slot_body[slot] = pending[p];
+            build_label_texture(slot, pending[p]);
+            slot_needed[slot] = 1;
+        }
+    }
 
     /* ---- Step 1: project anchor to screen and build label AABB ---- */
     float lsx[MAX_BODIES], lsy[MAX_BODIES];
@@ -256,29 +340,30 @@ void labels_render(const float view[16], const float proj[16],
     int   lvis[MAX_BODIES];
     int   order[MAX_BODIES];
 
-    for (int i = 0; i < nb; i++) {
-        order[i]   = i;
-        lvis[i]    = 0;
-        if (!g_bodies[i].alive) continue;
-        if (!s_tex[i]) continue;
+    for (int s = 0; s < MAX_BODIES; s++) {
+        lvis[s] = 0;
+        if (!slot_needed[s]) continue;
+        int b = s_slot_body[s];
+        if (b < 0 || !g_bodies[b].alive) continue;
+        if (!s_tex[s]) continue;
         /* Far cutoff: planet/moon labels are only useful in their local system */
-        if (!g_bodies[i].is_star && info[i].dcam > MAX_LABEL_DIST) continue;
+        if (!g_bodies[b].is_star && info[b].dcam > g_settings.label_max_dist_au) continue;
 
         /* Close cutoff: hide label when camera is inside the body's glow region */
         {
-            float min_radii = g_bodies[i].is_star
+            float min_radii = g_bodies[b].is_star
                             ? (float)STAR_MIN_LABEL_RADII
                             : (float)MIN_LABEL_RADII;
-            if (info[i].dcam < min_radii * info[i].dr) continue;
+            if (info[b].dcam < min_radii * info[b].dr) continue;
         }
 
         /* Camera-relative anchor in double → float.  vp is proj×view_rot (no translation). */
         double cx = (double)g_cam.pos[0];
         double cy = (double)g_cam.pos[1];
         double cz = (double)g_cam.pos[2];
-        float ax = (float)(g_bodies[i].pos[0] * RS - cx);
-        float ay = (float)(g_bodies[i].pos[1] * RS - cy) + info[i].dr * 1.4f;
-        float az = (float)(g_bodies[i].pos[2] * RS - cz);
+        float ax = (float)(g_bodies[b].pos[0] * RS - cx);
+        float ay = (float)(g_bodies[b].pos[1] * RS - cy) + info[b].dr * 1.4f;
+        float az = (float)(g_bodies[b].pos[2] * RS - cz);
 
         float sx, sy;
         if (!mat4_project(vp, ax, ay, az, WIN_W, WIN_H, &sx, &sy)) continue;
@@ -287,53 +372,56 @@ void labels_render(const float view[16], const float proj[16],
         float screen_y = (float)WIN_H - sy;
 
         float ph = LABEL_PX_H;
-        float pw = ph * (float)s_tex_w[i] / (float)s_tex_h[i];
+        float pw = ph * (float)s_tex_w[s] / (float)s_tex_h[s];
 
-        lsx[i] = sx;
-        lsy[i] = screen_y - ph;
-        lsw[i] = pw + LBL_PAD;
-        lsh[i] = ph + LBL_PAD;
-        lvis[i] = 1;
+        lsx[s] = sx;
+        lsy[s] = screen_y - ph;
+        lsw[s] = pw + LBL_PAD;
+        lsh[s] = ph + LBL_PAD;
+        lvis[s] = 1;
     }
 
-    /* ---- Step 2: priority order (stars > planets > moons, nearest first) ---- */
+    /* ---- Step 2: priority order (stars > planets > moons, nearest first) ----
+     * Tiers hold cache-slot indices, sorted by the occupant body's dcam. */
     {
         int ns = 0, np = 0, nm = 0;
         int stars[MAX_BODIES], planets[MAX_BODIES], moons[MAX_BODIES];
-        for (int i = 0; i < nb; i++) {
-            if (!g_bodies[i].alive) continue;
-            if      (g_bodies[i].is_star) stars[ns++] = i;
-            else if (g_bodies[i].parent < 0 ||
-                     g_bodies[g_bodies[i].parent].is_star) planets[np++] = i;
-            else                                           moons[nm++] = i;
+        for (int s = 0; s < MAX_BODIES; s++) {
+            if (!slot_needed[s]) continue;
+            int b = s_slot_body[s];
+            if (b < 0 || !g_bodies[b].alive) continue;
+            if      (g_bodies[b].is_star) stars[ns++] = s;
+            else if (g_bodies[b].parent < 0 ||
+                     g_bodies[g_bodies[b].parent].is_star) planets[np++] = s;
+            else                                           moons[nm++] = s;
         }
-        /* Insertion sort each tier by dcam ascending */
+        /* Insertion sort each tier by the occupant body's dcam ascending */
         for (int i = 1; i < ns; i++) {
             int tmp = stars[i], k = i;
-            while (k > 0 && info[stars[k-1]].dcam > info[tmp].dcam)
+            while (k > 0 && info[s_slot_body[stars[k-1]]].dcam > info[s_slot_body[tmp]].dcam)
                 { stars[k] = stars[k-1]; k--; }
             stars[k] = tmp;
         }
         for (int i = 1; i < np; i++) {
             int tmp = planets[i], k = i;
-            while (k > 0 && info[planets[k-1]].dcam > info[tmp].dcam)
+            while (k > 0 && info[s_slot_body[planets[k-1]]].dcam > info[s_slot_body[tmp]].dcam)
                 { planets[k] = planets[k-1]; k--; }
             planets[k] = tmp;
         }
         for (int i = 1; i < nm; i++) {
             int tmp = moons[i], k = i;
-            while (k > 0 && info[moons[k-1]].dcam > info[tmp].dcam)
+            while (k > 0 && info[s_slot_body[moons[k-1]]].dcam > info[s_slot_body[tmp]].dcam)
                 { moons[k] = moons[k-1]; k--; }
             moons[k] = tmp;
         }
         for (int i = 0; i < ns; i++) order[i]          = stars[i];
         for (int i = 0; i < np; i++) order[ns + i]      = planets[i];
         for (int i = 0; i < nm; i++) order[ns + np + i] = moons[i];
-        for (int i = ns + np + nm; i < nb; i++) order[i] = -1;
+        for (int i = ns + np + nm; i < MAX_BODIES; i++) order[i] = -1;
     }
 
-    /* ---- Step 3: greedy AABB overlap removal ---- */
-    for (int i = 0; i < nb; i++) {
+    /* ---- Step 3: greedy AABB overlap removal (order[] holds slot indices) ---- */
+    for (int i = 0; i < MAX_BODIES; i++) {
         int idx = order[i];
         if (idx < 0) continue;
         if (!lvis[idx]) continue;
@@ -351,19 +439,26 @@ void labels_render(const float view[16], const float proj[16],
         }
     }
 
-    /* ---- Step 4: hysteresis debounce ---- */
-    for (int i = 0; i < nb; i++) {
-        if (!g_bodies[i].alive) continue;
-        if (lvis[i]) {
-            s_show_accum[i] += dt;
-            s_hide_accum[i]  = 0.0f;
-            if (s_show_accum[i] >= SHOW_DELAY)
-                s_active[i] = 1;
+    /* ---- Step 4: hysteresis debounce (per slot) ---- */
+    for (int s = 0; s < MAX_BODIES; s++) {
+        /* Slots not in the active set this frame are not drawn; reset their
+         * debounce so re-entering the region starts cleanly (SHOW_DELAY again). */
+        if (!slot_needed[s]) {
+            s_show_accum[s] = 0.0f;
+            s_hide_accum[s] = 0.0f;
+            s_active[s]     = 0;
+            continue;
+        }
+        if (lvis[s]) {
+            s_show_accum[s] += dt;
+            s_hide_accum[s]  = 0.0f;
+            if (s_show_accum[s] >= SHOW_DELAY)
+                s_active[s] = 1;
         } else {
-            s_hide_accum[i] += dt;
-            s_show_accum[i]  = 0.0f;
-            if (s_hide_accum[i] >= HIDE_DELAY)
-                s_active[i] = 0;
+            s_hide_accum[s] += dt;
+            s_show_accum[s]  = 0.0f;
+            if (s_hide_accum[s] >= HIDE_DELAY)
+                s_active[s] = 0;
         }
     }
 
@@ -380,18 +475,19 @@ void labels_render(const float view[16], const float proj[16],
 
     glBindVertexArray(s_vao);
 
-    for (int i = 0; i < nb; i++) {
-        if (!g_bodies[i].alive) continue;
-        if (!s_active[i]) continue;
-        if (!s_tex[i])    continue;
+    for (int s = 0; s < MAX_BODIES; s++) {
+        if (!s_active[s]) continue;
+        if (!s_tex[s])    continue;
+        int b = s_slot_body[s];
+        if (b < 0 || !g_bodies[b].alive) continue;
 
         /* Camera-relative body anchor in double → float */
         double cx2 = (double)g_cam.pos[0];
         double cy2 = (double)g_cam.pos[1];
         double cz2 = (double)g_cam.pos[2];
-        float bx = (float)(g_bodies[i].pos[0] * RS - cx2);
-        float by = (float)(g_bodies[i].pos[1] * RS - cy2);
-        float bz = (float)(g_bodies[i].pos[2] * RS - cz2);
+        float bx = (float)(g_bodies[b].pos[0] * RS - cx2);
+        float by = (float)(g_bodies[b].pos[1] * RS - cy2);
+        float bz = (float)(g_bodies[b].pos[2] * RS - cz2);
 
         /* eye_z: forward-axis depth.  Stable under rotation (dcam is not). */
         float eye_z = bx*cam_fwd[0] + by*cam_fwd[1] + bz*cam_fwd[2];
@@ -399,12 +495,12 @@ void labels_render(const float view[16], const float proj[16],
 
         /* World-space dimensions: constant pixel height regardless of distance */
         float fh = (eye_z * 2.0f * LABEL_PX_H * half_fov_tan) / (float)WIN_H;
-        float fw = fh * (float)s_tex_w[i] / (float)s_tex_h[i];
+        float fw = fh * (float)s_tex_w[s] / (float)s_tex_h[s];
 
         /* Anchor: body centre + up×dr_off, then nudge by right+up so the quad
          * sits clear of the body disc.  Vector math avoids per-component jumps
          * when the camera is tilted (a tilt changes all three components together). */
-        float dr_off = info[i].dr * 1.4f;
+        float dr_off = info[b].dr * 1.4f;
         float ax = bx + cam_up[0]*dr_off + cam_right[0]*(fw*0.1f) + cam_up[0]*(fh*0.1f);
         float ay = by + cam_up[1]*dr_off + cam_right[1]*(fw*0.1f) + cam_up[1]*(fh*0.1f);
         float az = bz + cam_up[2]*dr_off + cam_right[2]*(fw*0.1f) + cam_up[2]*(fh*0.1f);
@@ -417,7 +513,7 @@ void labels_render(const float view[16], const float proj[16],
         glUniform3f(s_loc_right,  right_scaled[0], right_scaled[1], right_scaled[2]);
         glUniform3f(s_loc_up,     up_scaled[0],    up_scaled[1],    up_scaled[2]);
 
-        glBindTexture(GL_TEXTURE_2D, s_tex[i]);
+        glBindTexture(GL_TEXTURE_2D, s_tex[s]);
         glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
     }
 

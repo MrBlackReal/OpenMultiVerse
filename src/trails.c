@@ -209,9 +209,13 @@ void trails_render(const float vp[16])
         float sdy = (float)(g_cam.pos[1] - g_bodies[star].pos[1] * RS);
         float sdz = (float)(g_cam.pos[2] - g_bodies[star].pos[2] * RS);
         float dist = sqrtf(sdx*sdx + sdy*sdy + sdz*sdz);
-        trail_fade = 1.0f - (dist - SYS_TRAIL_FADE_START)
-                          / (SYS_TRAIL_FADE_END - SYS_TRAIL_FADE_START);
-        if (trail_fade > 1.0f) trail_fade = 1.0f;
+        /* Smooth (Hermite) fade, same endpoints as the old linear ramp —
+         * eases in/out so the fade rate has no visible kink (continuous LOD). */
+        float t = (dist - SYS_TRAIL_FADE_START)
+                / (SYS_TRAIL_FADE_END - SYS_TRAIL_FADE_START);
+        if (t < 0.0f) t = 0.0f;
+        if (t > 1.0f) t = 1.0f;
+        trail_fade = 1.0f - t * t * (3.0f - 2.0f * t);
         if (trail_fade <= 0.0f) return;   /* fully faded — skip all work */
     }
 

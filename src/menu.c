@@ -422,8 +422,60 @@ static void menu_render_settings(void)
         igSliderFloat("Trail fade end",   &g_settings.sys_trail_fade_end,   0.0f, 8000.0f, "%.0f", 0);
         igSliderFloat("Dot fade start",   &g_settings.sys_dot_fade_start,   0.0f, 5000.0f, "%.0f", 0);
         igSliderFloat("Dot fade end",     &g_settings.sys_dot_fade_end,     0.0f, 8000.0f, "%.0f", 0);
+        igSliderFloat("Far-field horizon", &g_settings.farfield_horizon_au,
+                      1.0e3f, 1.0e9f, "%.0f AU", ImGuiSliderFlags_Logarithmic);
+        if (g_settings.farfield_horizon_au > RENDER_DEPTH_FAR)
+            g_settings.farfield_horizon_au = RENDER_DEPTH_FAR;
         igPopItemWidth();
-        igSetItemTooltip("Distance (AU) over which system trails / non-star dots fade out.");
+        igSetItemTooltip("Distance (AU) over which system trails / non-star dots fade out.\n"
+                         "Far-field horizon: distant stars, glare and black holes render at\n"
+                         "their true depth and fade/cull past this distance (1 ly = 63241 AU).");
+    }
+
+    igSpacing();
+    if (igCollapsingHeader_TreeNodeFlags("Detail transitions (LOD)", 0)) {
+        igPushItemWidth(igGetContentRegionAvail().x * w);
+        igSliderFloat("Sphere fade start", &g_settings.lod_body_fade_start_px,
+                      0.1f, 10.0f, "%.2f px", ImGuiSliderFlags_Logarithmic);
+        igSliderFloat("Sphere fade end",   &g_settings.lod_body_fade_end_px,
+                      0.2f, 20.0f, "%.2f px", ImGuiSliderFlags_Logarithmic);
+        igSliderFloat("Glare fade start",  &g_settings.lod_glare_full_px,
+                      0.1f, 10.0f, "%.2f px", ImGuiSliderFlags_Logarithmic);
+        igSliderFloat("Glare fade end",    &g_settings.lod_glare_fade_px,
+                      0.2f, 40.0f, "%.2f px", ImGuiSliderFlags_Logarithmic);
+        igSliderFloat("Density LOD cap",   &g_settings.lod_density_max,
+                      1.0f, 10.0f, "%.1fx", 0);
+        igSliderFloat("Dot overlap hide",  &g_settings.dot_hide_px,
+                      0.0f, 20.0f, "%.1f px", 0);
+        igSliderFloat("Dot overlap free",  &g_settings.dot_excl_px,
+                      0.5f, 40.0f, "%.1f px", 0);
+        igSliderFloat("Near-dot range",    &g_settings.near_dot_dist_ly,
+                      0.5f, 50.0f, "%.1f ly", ImGuiSliderFlags_Logarithmic);
+        /* Keep each window well-ordered live (end > start) so the smoothstep
+         * edges never coincide/cross while a slider is being dragged. */
+        if (g_settings.lod_body_fade_end_px < g_settings.lod_body_fade_start_px + 0.05f)
+            g_settings.lod_body_fade_end_px = g_settings.lod_body_fade_start_px + 0.05f;
+        if (g_settings.lod_glare_fade_px < g_settings.lod_glare_full_px + 0.05f)
+            g_settings.lod_glare_fade_px = g_settings.lod_glare_full_px + 0.05f;
+        if (g_settings.dot_excl_px < g_settings.dot_hide_px + 0.1f)
+            g_settings.dot_excl_px = g_settings.dot_hide_px + 0.1f;
+        igPopItemWidth();
+        igSetItemTooltip("Continuous-LOD crossfades: a body's dot fades out exactly as its\n"
+                         "sphere (or a star's glare billboard) fades in over these projected-\n"
+                         "pixel windows. 'Density LOD cap' bounds the CosmicField factor that\n"
+                         "widens the windows in dense/clumped regions (1 = disable). Dot\n"
+                         "overlap hide/free control screen-space dot dedup; near-dot range is\n"
+                         "the radius of the full per-dot treatment (beyond it: cheap far dots).");
+    }
+
+    igSpacing();
+    if (igCollapsingHeader_TreeNodeFlags("Labels", 0)) {
+        igPushItemWidth(igGetContentRegionAvail().x * w);
+        igSliderFloat("Max label distance", &g_settings.label_max_dist_au,
+                      5.0f, 5000.0f, "%.0f AU", ImGuiSliderFlags_Logarithmic);
+        igPopItemWidth();
+        igSetItemTooltip("Planet/moon name labels are hidden beyond this distance.\n"
+                         "Stars are always labelled within the active region.");
     }
 
     igSpacing();

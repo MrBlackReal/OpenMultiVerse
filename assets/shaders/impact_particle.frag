@@ -8,7 +8,7 @@ in float v_size;
 out vec4 frag_color;
 
 void main() {
-    const float FAR = 2000.0;
+    const float FAR = DEPTH_FAR;
     vec2 uv = gl_PointCoord * 2.0 - 1.0;
     float r = length(uv);
     if (r > 1.0) discard;

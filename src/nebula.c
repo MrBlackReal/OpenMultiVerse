@@ -8,10 +8,13 @@
  *
  * Rendering mirrors the supernova volumetric pass: a screen-space raymarch
  * (nebula.frag) carried by a camera-facing billboard, or a fullscreen quad when
- * the camera is near/inside the volume.  Distances dwarf the 2000 AU render
- * far-plane, so — exactly like the star-dot and black-hole passes — a nebula
- * beyond NEBULA_MAX_DIST is pulled to that shell with its radius scaled by the
- * same factor, preserving angular size.  The clamp is the identity at the
+ * the camera is near/inside the volume.  A nebula beyond NEBULA_MAX_DIST is
+ * pulled to that shell with its radius scaled by the same factor, preserving
+ * angular size, so distant nebulae stay legible as backdrops.  (The star-dot and
+ * black-hole passes formerly used this same shell trick but now render at true
+ * depth — see farfield_horizon_fade() in render.c — nebulae keep the clamp by
+ * design, as visitable volumes that must remain visible from far away.)
+ * The clamp is the identity at the
  * boundary, so flying in from the far blob to the enveloping volume is
  * seamless: one raymarch representation, no LOD pop.
  *

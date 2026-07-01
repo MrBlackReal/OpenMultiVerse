@@ -82,6 +82,18 @@ extern int g_win_h;
 
 #define LY  9.461e15   /* meters per light-year */
 
+/* ------------------------------------------------------------------ render depth
+ * RENDER_DEPTH_FAR is the single source of truth for the logarithmic depth range:
+ * both the CPU perspective far plane (main.c) and every depth-writing shader's
+ * `gl_FragDepth = log2(eye+1)/log2(FAR+1)` normalisation (injected as DEPTH_FAR by
+ * gl_shader_load) use it. Log depth keeps near-field precision even with a huge far
+ * plane, so this can span planet → interstellar scale in one continuous transform.
+ * Units: GL units (= AU, since RS = 1/AU). ~1.6e5 ly. Distant catalog stars can sit
+ * light-years out (millions of AU) and still be inside this range.
+ * NOTE: shader-side floats can't represent 1e10 exactly, but the log() of it is fine;
+ * keep it a round power-friendly magnitude. */
+#define RENDER_DEPTH_FAR  1.0e10f
+
 /* ------------------------------------------------------------------ system LOD (AU)
  * Distances at which rendering elements fade when flying away from the system. */
 #define SYS_TRAIL_FADE_START  (g_settings.sys_trail_fade_start)

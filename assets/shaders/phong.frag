@@ -57,6 +57,19 @@ uniform float u_impact_progress[32];
 uniform float u_impact_seed[32];
 uniform int   u_impact_kind[32];
 
+/* Tidal disruption: when a black hole shreds this body it is drawn as a prolate
+ * ellipsoid stretched along u_stretch_dir (spaghettification) and tinted with a
+ * hot glow.  u_stretch_along==1 && u_stretch_perp==1 → unchanged sphere. */
+uniform vec3  u_stretch_dir;    /* unit elongation axis (camera-relative)     */
+uniform float u_stretch_along;  /* >=1 stretch factor along the axis          */
+uniform float u_stretch_perp;   /* <=1 squash factor perpendicular            */
+uniform float u_tidal_glow;     /* 0..1 hot shredding glow                    */
+
+/* Continuous LOD: sphere opacity during the dot->sphere crossfade (1 = fully
+ * resolved).  render.c blends the sphere in exactly as the dot fades out, so
+ * the representation handoff never pops. */
+uniform float u_opacity;
+
 out vec4 frag_color;
 
 /* ======================================================================
@@ -508,18 +521,44 @@ void main() {
                            + u_cam_right * (ndc.x * u_aspect * u_fov_tan)
                            + u_cam_up    * (ndc.y * u_fov_tan));
 
-    /* ---- ray-sphere intersection --------------------------------------- */
-    float b_   = dot(u_oc, ray_dir);
-    float c_   = dot(u_oc, u_oc) - u_radius * u_radius;
-    float disc = b_ * b_ - c_;
-    if (disc < 0.0) discard;
-
-    float t = -b_ - sqrt(disc);
-    if (t < 0.0) t = -b_ + sqrt(disc);
-    if (t < 0.0) discard;
-
-    vec3 hit_rel = u_oc + t * ray_dir;
-    vec3 N       = normalize(hit_rel);
+    /* ---- ray-body intersection ----------------------------------------- */
+    vec3  hit_rel;
+    vec3  N;
+    float t;
+    if (u_stretch_along > 1.001 || u_stretch_perp < 0.999) {
+        /* Prolate ellipsoid (tidal spaghettification): semi-axis A along
+         * u_stretch_dir, B perpendicular.  Solve the quadratic for the ray in
+         * the ellipsoid's principal frame; reduces exactly to the sphere when
+         * A==B. */
+        vec3  s  = normalize(u_stretch_dir);
+        float A  = u_radius * u_stretch_along;
+        float B  = u_radius * u_stretch_perp;
+        float A2 = A * A, B2 = B * B;
+        float oa = dot(u_oc, s), da = dot(ray_dir, s);
+        float oo = dot(u_oc, u_oc), od = dot(u_oc, ray_dir);
+        float qa = (B2 - A2) * da * da + A2;
+        float qb = 2.0 * ((B2 - A2) * oa * da + A2 * od);
+        float qc = (B2 - A2) * oa * oa + A2 * oo - A2 * B2;
+        float disc = qb * qb - 4.0 * qa * qc;
+        if (disc < 0.0) discard;
+        float sq = sqrt(disc);
+        t = (-qb - sq) / (2.0 * qa);
+        if (t < 0.0) t = (-qb + sq) / (2.0 * qa);
+        if (t < 0.0) discard;
+        hit_rel = u_oc + t * ray_dir;
+        float wa = dot(hit_rel, s);
+        N = normalize(wa * (1.0 / A2 - 1.0 / B2) * s + hit_rel / B2);
+    } else {
+        float b_   = dot(u_oc, ray_dir);
+        float c_   = dot(u_oc, u_oc) - u_radius * u_radius;
+        float disc = b_ * b_ - c_;
+        if (disc < 0.0) discard;
+        t = -b_ - sqrt(disc);
+        if (t < 0.0) t = -b_ + sqrt(disc);
+        if (t < 0.0) discard;
+        hit_rel = u_oc + t * ray_dir;
+        N       = normalize(hit_rel);
+    }
 
     /* ---- logarithmic depth — consistent with solid.frag / color.frag
      * All shaders must use the same depth metric: view-direction depth
@@ -531,7 +570,7 @@ void main() {
      *
      * eye_depth = t * dot(ray_dir, u_cam_fwd)  [= t * cos(θ) off-axis]
      * This equals 1/gl_FragCoord.w for all non-raycast geometry.         */
-    const float FAR  = 2000.0;
+    const float FAR  = DEPTH_FAR;
     float eye_depth  = t * dot(ray_dir, u_cam_fwd);
     gl_FragDepth = log2(eye_depth + 1.0) / log2(FAR + 1.0);
 
@@ -568,7 +607,7 @@ void main() {
             col = mix(col, col * vec3(0.32, 0.24, 0.22), spot);
         }
 
-        frag_color = vec4(col, 1.0);
+        frag_color = vec4(col, u_opacity);
         return;
     }
 
@@ -974,5 +1013,14 @@ void main() {
                         day) * u_ambient;
 
     vec3 lighting = amb_col + sun_col * ((1.0 - u_ambient) * day);
-    frag_color = vec4(surface * lighting + lava_emit, 1.0);
+    vec3 col_out  = surface * lighting + lava_emit;
+
+    /* Tidal shredding: matter torn off heats up, so add a hot incandescent glow,
+     * brightest on the limb so the stretched strand reads as glowing gas. */
+    if (u_tidal_glow > 0.0) {
+        float limb = pow(1.0 - max(dot(N, -ray_dir), 0.0), 2.0);
+        vec3  hot  = mix(vec3(1.0, 0.42, 0.14), vec3(1.0, 0.88, 0.65), limb);
+        col_out += hot * u_tidal_glow * (0.45 + 0.9 * limb);
+    }
+    frag_color = vec4(col_out, u_opacity);
 }

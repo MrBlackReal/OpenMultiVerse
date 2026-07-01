@@ -17,5 +17,8 @@ void main() {
     float core = pow(1.0 - r, 14.0) * 3.0;
     float I = (halo + core) * u_intensity;
     if (I < 0.002) discard;
+    /* Logarithmic depth for the depth TEST (mask off), consistent with the
+     * log-depth scene — see jet.frag. */
+    gl_FragDepth = log2(1.0 / gl_FragCoord.w + 1.0) / log2(DEPTH_FAR + 1.0);
     frag_color = vec4(u_color * I, I);
 }

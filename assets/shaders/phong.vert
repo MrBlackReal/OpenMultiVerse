@@ -25,6 +25,7 @@ uniform float u_radius;
 uniform vec3  u_cam_right;
 uniform vec3  u_cam_up;
 uniform int   u_use_fullscreen;   /* 1 when the billboard would degenerate */
+uniform float u_stretch_along;    /* tidal elongation factor (>=1); enlarges quad */
 
 out vec2 v_uv;
 
@@ -39,9 +40,12 @@ void main() {
         return;
     }
 
+    /* A tidally stretched body extends past the sphere billboard; grow the quad
+     * by the elongation factor so the strand is never clipped. */
+    float ext = u_radius * BILL_SCALE * max(u_stretch_along, 1.0);
     vec3 world = u_center
-               + u_cam_right * (off.x * u_radius * BILL_SCALE)
-               + u_cam_up    * (off.y * u_radius * BILL_SCALE);
+               + u_cam_right * (off.x * ext)
+               + u_cam_up    * (off.y * ext);
 
     gl_Position = u_vp * vec4(world, 1.0);
 }

@@ -31,6 +31,45 @@ static char *read_file(const char *path) {
     return buf;
 }
 
+/* Splice a shared prelude of #defines right after the "#version ..." line so every
+ * shader draws its constants from one place. Currently exposes DEPTH_FAR — the single
+ * source of truth for the logarithmic-depth range (see RENDER_DEPTH_FAR in common.h),
+ * so all depth-writing passes normalise gl_FragDepth identically and sort together.
+ *
+ * Returns a newly malloc'd NUL-terminated string the caller must free. On any failure
+ * it returns a plain copy of src (never NULL unless src is NULL). GLSL requires
+ * #version to be the first token, so the prelude is inserted after that line; if no
+ * #version line is present it is prepended. */
+static char *inject_prelude(const char *src) {
+    if (!src) return NULL;
+    char prelude[128];
+    int plen = snprintf(prelude, sizeof(prelude),
+                        "#define DEPTH_FAR %.8e\n", (double)RENDER_DEPTH_FAR);
+    if (plen < 0 || plen >= (int)sizeof(prelude)) plen = 0;  /* fall back to plain copy */
+
+    size_t slen = strlen(src);
+    char *out = (char *)malloc(slen + (size_t)plen + 1);
+    if (!out) return NULL;
+
+    /* Find the end of the #version line (insertion point) */
+    const char *ins = src;
+    if (plen > 0) {
+        const char *v = strstr(src, "#version");
+        if (v) {
+            const char *nl = strchr(v, '\n');
+            ins = nl ? nl + 1 : src + slen;   /* after the newline, or EOF */
+        } else {
+            ins = src;                        /* no #version — prepend */
+        }
+    }
+
+    size_t head = (size_t)(ins - src);
+    memcpy(out, src, head);
+    if (plen > 0) memcpy(out + head, prelude, (size_t)plen);
+    memcpy(out + head + (size_t)plen, ins, slen - head + 1);  /* +1 copies the NUL */
+    return out;
+}
+
 /* Compile a single shader stage and return its handle, or 0 on failure.
  * The info log (up to 1 KB) is printed to stderr on compile error.
  * path is used only for the error message — it is not re-read here. */
@@ -56,8 +95,14 @@ static GLuint compile_shader(GLenum type, const char *src, const char *path) {
  * Shader objects are deleted after linking — only the program handle survives.
  * Returns the linked program, or 0 on any failure. */
 GLuint gl_shader_load(const char *vert_path, const char *frag_path) {
-    char *vsrc = read_file(vert_path);
-    char *fsrc = read_file(frag_path);
+    char *vraw = read_file(vert_path);
+    char *fraw = read_file(frag_path);
+    if (!vraw || !fraw) { free(vraw); free(fraw); return 0; }
+
+    /* Splice the shared prelude (DEPTH_FAR, …) after each stage's #version line. */
+    char *vsrc = inject_prelude(vraw);
+    char *fsrc = inject_prelude(fraw);
+    free(vraw); free(fraw);
     if (!vsrc || !fsrc) { free(vsrc); free(fsrc); return 0; }
 
     GLuint vs = compile_shader(GL_VERTEX_SHADER,   vsrc, vert_path);
