@@ -81,6 +81,12 @@ float fbm3(vec3 p) {
     return v / 0.875;
 }
 
+float fbm2(vec3 p) {
+    float v = vnoise(p) * 0.6;
+    p = p * 2.11 + vec3(4.1, 2.3, 3.4);  v += vnoise(p) * 0.3;
+    return v / 0.9;
+}
+
 /* Emission density at unit-sphere position p — a reduced port of
  * galaxy.frag's galaxy_sample() (no dust, no colour): the two must stay in
  * step or stars detach from the glow they are supposed to resolve. Also
@@ -103,11 +109,22 @@ float star_density(vec3 p, float rr, vec3 seedv, out float bulge_w, out float kn
     float phi = atan(dot(pr, t2), dot(pr, t1));
 
     if (u_type == 2) {                               /* IRREGULAR */
-        float env = exp(-pow(r / 0.62, 2.0) - pow(h / 0.34, 2.0));
+        /* Keep in step with galaxy.frag: lump-warped envelope, off-centre
+         * stellar bar, patchy clumps + HII complexes. */
+        float x1 = dot(pr, t1), x2 = dot(pr, t2);
+        float lump = fbm2(p * 2.1 + seedv * 1.7);
+        float env  = exp(-pow(r / (0.42 + 0.30 * lump), 2.2)
+                         - pow(h / 0.30, 2.0));
+        float bar  = 1.5 * exp(-pow((x1 - 0.07) / 0.34, 2.0)
+                               - pow( x2         / 0.115, 2.0)
+                               - pow( h          / 0.13,  2.0));
         float n   = fbm3(p * 3.2 + seedv);
-        float k   = smoothstep(0.42, 0.85, n);
-        knots = k;
-        return env * (0.20 + 1.6 * k * k) * 1.15;
+        float k   = smoothstep(0.48, 0.85, n);
+        float hii = smoothstep(0.68, 0.86, fbm2(p * 4.6 - seedv));
+        float dens = env * (0.05 + 1.9 * k * k + 2.6 * hii) + bar;
+        knots   = k;
+        bulge_w = clamp(bar / max(dens, 1e-5), 0.0, 1.0);
+        return dens;
     }
 
     /* SPIRAL — same shear/arm/disc/bulge terms as the volume shader. */
@@ -119,17 +136,21 @@ float star_density(vec3 p, float rr, vec3 seedv, out float bulge_w, out float kn
 
     float disc  = exp(-r / 0.30) * exp(-abs(h) / (0.035 + 0.09 * r * r))
                 * smoothstep(1.0, 0.85, rr);
-    float bulge = 1.9 * exp(-pow(rr / 0.13, 2.0));
+    float bulge = 2.4 * exp(-pow(rr / 0.14, 2.0));
 
     float cr = cos(rot), sr = sin(rot);
     vec3  prot = pr * cr + cross(u_axis, pr) * sr + u_axis * h;
     float n     = fbm3(prot * 4.6 + seedv);
     float kn    = smoothstep(0.55, 0.88, n) * arm;
 
+    /* Star-cloud mottling — the stars ARE the clouds, so placement follows
+     * the same factor the volume glow uses. */
+    float cloud = 0.60 + 0.80 * fbm2(prot * 3.1 + seedv * 1.3);
+
     knots   = kn;
-    bulge_w = clamp(bulge / max(disc * (0.38 + 2.8 * arm + 3.8 * kn) + bulge, 1e-5),
-                    0.0, 1.0);
-    return disc * (0.38 + 2.8 * arm + 3.8 * kn) + bulge;
+    bulge_w = clamp(bulge / max(disc * cloud * (0.38 + 2.8 * arm + 3.8 * kn)
+                                + bulge, 1e-5), 0.0, 1.0);
+    return disc * cloud * (0.38 + 2.8 * arm + 3.8 * kn) + bulge;
 }
 
 void main() {
@@ -196,6 +217,10 @@ void main() {
     vec3 cool = mix(vec3(1.00, 0.82, 0.62), vec3(0.72, 0.80, 1.00), hcol);
     vec3 col  = mix(cool, vec3(1.00, 0.90, 0.72), bulge_w * 0.8);
     col = mix(col, vec3(0.70, 0.78, 1.00), knots * 0.5);
+
+    /* HDR lift for the rare bright members — the bloom pass blazes them in
+     * their own colour, matching the body-dot/skybox overbright treatment. */
+    col *= 1.0 + min(b * 0.10, 4.0);
 
     v_color      = vec4(col, a);
     gl_PointSize = size;

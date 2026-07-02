@@ -54,6 +54,8 @@ typedef struct {
 
     /* ---- starfield ---------------------------------------------------- */
     int    num_stars;          /* procedural skybox count (apply = regen)     */
+    int    bg_star_count;      /* faint background star-dust layer count      */
+                               /* (0 = off; apply = regen)                    */
 
     /* ---- post-processing / tonemap ----------------------------------- */
     int    tonemap_mode;       /* 0 = off (linear), 1 = ACES, 2 = Reinhard    */
@@ -62,6 +64,7 @@ typedef struct {
     float  chromatic_aberration; /* lateral CA strength (0 = off)             */
     float  vignette;           /* corner darkening 0..1 (0 = off)             */
     float  lens_spikes;        /* star-glare diffraction spike strength (0=off)*/
+    float  lens_flare;         /* sun lens-flare overlay strength (0 = off)   */
     float  relativistic;       /* relativistic aberration/Doppler at warp 0..1 */
 
     /* ---- stellar appearance ------------------------------------------ */

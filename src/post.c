@@ -35,16 +35,31 @@ static float  s_rel_beta  = 0.0f;    /* relativistic optics 0..1 (set per frame)
 static float  s_rel_cx    = 0.5f;    /* heading point in UV (velocity vector)   */
 static float  s_rel_cy    = 0.5f;
 
+/* Lens flare (set per frame by render.c; intensity 0 = pass skipped). */
+static float  s_flare_x = 0.0f, s_flare_y = 0.0f;   /* light NDC          */
+static float  s_flare_depth = 1.0f;                 /* light log depth    */
+static float  s_flare_i = 0.0f;                     /* setting × flux ramp */
+static float  s_flare_col[3] = { 1.0f, 1.0f, 1.0f };
+
 static int    s_w = 0, s_h = 0;    /* size the targets were built for */
-static int    s_bw = 0, s_bh = 0;  /* half-res blur size */
+
+/* Multi-scale bloom: three blur levels at 1/2, 1/4 and 1/8 resolution.
+ * The wide component of a photographic halo is blurred at low res (cheap and
+ * genuinely smooth); the composite recombines the levels with fixed weights.
+ * Each level is a ping-pong FBO pair like the old single half-res chain. */
+#define BLOOM_LEVELS 3
+static int    s_bw[BLOOM_LEVELS], s_bh[BLOOM_LEVELS];
 
 static GLuint s_scene_fbo = 0, s_scene_tex = 0, s_scene_depth = 0;
-static GLuint s_blur_fbo[2] = {0, 0}, s_blur_tex[2] = {0, 0};
+static GLuint s_blur_fbo[BLOOM_LEVELS][2], s_blur_tex[BLOOM_LEVELS][2];
 
-static GLuint s_sh_bright = 0, s_sh_blur = 0, s_sh_comp = 0;
+static GLuint s_sh_bright = 0, s_sh_blur = 0, s_sh_comp = 0, s_sh_flare = 0;
+static GLint  s_u_fl_depth, s_u_fl_light_uv, s_u_fl_light_depth;
+static GLint  s_u_fl_intensity, s_u_fl_color, s_u_fl_aspect;
 static GLint  s_u_bright_scene, s_u_bright_thresh;
 static GLint  s_u_blur_tex, s_u_blur_dir;
-static GLint  s_u_comp_scene, s_u_comp_bloom, s_u_comp_intensity;
+static GLint  s_u_comp_scene, s_u_comp_intensity;
+static GLint  s_u_comp_bloom[BLOOM_LEVELS], s_u_comp_bloom_w;
 static GLint  s_u_comp_exposure, s_u_comp_tonemap;
 static GLint  s_u_comp_chromatic, s_u_comp_vignette, s_u_comp_rel_beta;
 static GLint  s_u_comp_rel_center;
@@ -69,9 +84,11 @@ static void destroy_targets(void)
     if (s_scene_tex)   { glDeleteTextures(1, &s_scene_tex);   s_scene_tex = 0; }
     if (s_scene_depth) { glDeleteTextures(1, &s_scene_depth); s_scene_depth = 0; }
     if (s_scene_fbo)   { glDeleteFramebuffers(1, &s_scene_fbo);    s_scene_fbo = 0; }
-    for (int i = 0; i < 2; i++) {
-        if (s_blur_tex[i]) { glDeleteTextures(1, &s_blur_tex[i]);     s_blur_tex[i] = 0; }
-        if (s_blur_fbo[i]) { glDeleteFramebuffers(1, &s_blur_fbo[i]); s_blur_fbo[i] = 0; }
+    for (int l = 0; l < BLOOM_LEVELS; l++) {
+        for (int i = 0; i < 2; i++) {
+            if (s_blur_tex[l][i]) { glDeleteTextures(1, &s_blur_tex[l][i]);     s_blur_tex[l][i] = 0; }
+            if (s_blur_fbo[l][i]) { glDeleteFramebuffers(1, &s_blur_fbo[l][i]); s_blur_fbo[l][i] = 0; }
+        }
     }
 }
 
@@ -79,8 +96,10 @@ static int create_targets(int w, int h)
 {
     destroy_targets();
     s_w = w; s_h = h;
-    s_bw = w / 2 > 1 ? w / 2 : 1;
-    s_bh = h / 2 > 1 ? h / 2 : 1;
+    for (int l = 0; l < BLOOM_LEVELS; l++) {
+        s_bw[l] = w >> (l + 1) > 1 ? w >> (l + 1) : 1;
+        s_bh[l] = h >> (l + 1) > 1 ? h >> (l + 1) : 1;
+    }
 
     /* Full-res HDR scene target with depth (the scene pass needs depth). */
     glGenFramebuffers(1, &s_scene_fbo);
@@ -107,17 +126,19 @@ static int create_targets(int w, int h)
         return 0;
     }
 
-    /* Half-res ping-pong blur targets (colour only). */
-    for (int i = 0; i < 2; i++) {
-        glGenFramebuffers(1, &s_blur_fbo[i]);
-        glBindFramebuffer(GL_FRAMEBUFFER, s_blur_fbo[i]);
-        s_blur_tex[i] = make_color_tex(s_bw, s_bh);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                               GL_TEXTURE_2D, s_blur_tex[i], 0);
-        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-            fprintf(stderr, "[post] blur FBO incomplete; bloom disabled\n");
-            glBindFramebuffer(GL_FRAMEBUFFER, 0);
-            return 0;
+    /* Ping-pong blur targets per bloom level (colour only). */
+    for (int l = 0; l < BLOOM_LEVELS; l++) {
+        for (int i = 0; i < 2; i++) {
+            glGenFramebuffers(1, &s_blur_fbo[l][i]);
+            glBindFramebuffer(GL_FRAMEBUFFER, s_blur_fbo[l][i]);
+            s_blur_tex[l][i] = make_color_tex(s_bw[l], s_bh[l]);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                   GL_TEXTURE_2D, s_blur_tex[l][i], 0);
+            if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+                fprintf(stderr, "[post] blur FBO incomplete; bloom disabled\n");
+                glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                return 0;
+            }
         }
     }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -137,12 +158,28 @@ void post_init(void)
         s_ok = 0;
         return;
     }
+    /* Lens flare is optional: a load failure only loses the flare overlay. */
+    s_sh_flare = gl_shader_load("assets/shaders/post_quad.vert",
+                                "assets/shaders/lens_flare.frag");
+    if (s_sh_flare) {
+        s_u_fl_depth       = glGetUniformLocation(s_sh_flare, "u_depth");
+        s_u_fl_light_uv    = glGetUniformLocation(s_sh_flare, "u_light_uv");
+        s_u_fl_light_depth = glGetUniformLocation(s_sh_flare, "u_light_depth");
+        s_u_fl_intensity   = glGetUniformLocation(s_sh_flare, "u_intensity");
+        s_u_fl_color       = glGetUniformLocation(s_sh_flare, "u_color");
+        s_u_fl_aspect      = glGetUniformLocation(s_sh_flare, "u_aspect");
+    } else {
+        fprintf(stderr, "[post] lens flare shader failed; flare disabled\n");
+    }
     s_u_bright_scene   = glGetUniformLocation(s_sh_bright, "u_scene");
     s_u_bright_thresh  = glGetUniformLocation(s_sh_bright, "u_threshold");
     s_u_blur_tex       = glGetUniformLocation(s_sh_blur,   "u_tex");
     s_u_blur_dir       = glGetUniformLocation(s_sh_blur,   "u_dir");
     s_u_comp_scene     = glGetUniformLocation(s_sh_comp,   "u_scene");
-    s_u_comp_bloom     = glGetUniformLocation(s_sh_comp,   "u_bloom");
+    s_u_comp_bloom[0]  = glGetUniformLocation(s_sh_comp,   "u_bloom0");
+    s_u_comp_bloom[1]  = glGetUniformLocation(s_sh_comp,   "u_bloom1");
+    s_u_comp_bloom[2]  = glGetUniformLocation(s_sh_comp,   "u_bloom2");
+    s_u_comp_bloom_w   = glGetUniformLocation(s_sh_comp,   "u_bloom_w");
     s_u_comp_intensity = glGetUniformLocation(s_sh_comp,   "u_intensity");
     s_u_comp_exposure  = glGetUniformLocation(s_sh_comp,   "u_exposure");
     s_u_comp_tonemap   = glGetUniformLocation(s_sh_comp,   "u_tonemap");
@@ -220,6 +257,18 @@ void post_set_relativistic(float beta, float cx, float cy)
     s_rel_cy   = cy;
 }
 
+void post_set_lens_flare(float ndc_x, float ndc_y, float log_depth,
+                         float intensity, const float col[3])
+{
+    s_flare_x     = ndc_x;
+    s_flare_y     = ndc_y;
+    s_flare_depth = log_depth;
+    s_flare_i     = intensity < 0.0f ? 0.0f : intensity;
+    s_flare_col[0] = col ? col[0] : 1.0f;
+    s_flare_col[1] = col ? col[1] : 1.0f;
+    s_flare_col[2] = col ? col[2] : 1.0f;
+}
+
 /* Auto-exposure: average the scene luminance from the 1x1 top mip, then ease a
  * normalised factor toward a target so going from a dark void to a bright field
  * self-balances.  Result multiplies the manual exposure, so the user's exposure
@@ -283,9 +332,9 @@ void post_end(void)
         exposure *= auto_exposure_factor();
     }
 
-    /* 1. Bright-pass: full-res scene -> half-res blur[0]. */
-    glViewport(0, 0, s_bw, s_bh);
-    glBindFramebuffer(GL_FRAMEBUFFER, s_blur_fbo[0]);
+    /* 1. Bright-pass: full-res scene -> level-0 (half-res) blur[0]. */
+    glViewport(0, 0, s_bw[0], s_bh[0]);
+    glBindFramebuffer(GL_FRAMEBUFFER, s_blur_fbo[0][0]);
     glUseProgram(s_sh_bright);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, s_scene_tex);
@@ -293,34 +342,56 @@ void post_end(void)
     glUniform1f(s_u_bright_thresh, s_threshold);
     draw_quad();
 
-    /* 2. Separable Gaussian, ping-ponging between the two blur targets. */
+    /* 2. Multi-scale separable Gaussian.  Each level ping-pongs its own pair;
+     * levels 1/2 are seeded by running the *horizontal* pass onto the smaller
+     * target — the linear fetches make that one draw a combined
+     * downsample + blur — then continue alternating starting vertical. */
     glUseProgram(s_sh_blur);
     glUniform1i(s_u_blur_tex, 0);
-    GLuint src_tex = s_blur_tex[0];
-    int    dst     = 1;
-    const int PASSES = 10;   /* 5 horizontal + 5 vertical, interleaved */
-    for (int i = 0; i < PASSES; i++) {
-        glBindFramebuffer(GL_FRAMEBUFFER, s_blur_fbo[dst]);
-        float dx = (i % 2 == 0) ? 1.0f / (float)s_bw : 0.0f;
-        float dy = (i % 2 == 0) ? 0.0f : 1.0f / (float)s_bh;
-        glUniform2f(s_u_blur_dir, dx, dy);
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, src_tex);
-        draw_quad();
-        src_tex = s_blur_tex[dst];
-        dst     = 1 - dst;
+    glActiveTexture(GL_TEXTURE0);
+    static const int LEVEL_PASSES[BLOOM_LEVELS] = { 4, 3, 5 };
+    GLuint level_final[BLOOM_LEVELS];
+    GLuint src_tex = s_blur_tex[0][0];   /* bright-pass result */
+    for (int l = 0; l < BLOOM_LEVELS; l++) {
+        glViewport(0, 0, s_bw[l], s_bh[l]);
+        if (l > 0) {
+            glBindFramebuffer(GL_FRAMEBUFFER, s_blur_fbo[l][0]);
+            glUniform2f(s_u_blur_dir, 1.0f / (float)s_bw[l], 0.0f);
+            glBindTexture(GL_TEXTURE_2D, level_final[l - 1]);
+            draw_quad();
+            src_tex = s_blur_tex[l][0];
+        }
+        int dst   = 1;
+        int axis0 = (l == 0) ? 0 : 1;    /* seeded levels already did an H */
+        for (int i = 0; i < LEVEL_PASSES[l]; i++) {
+            glBindFramebuffer(GL_FRAMEBUFFER, s_blur_fbo[l][dst]);
+            int horiz = ((i + axis0) % 2 == 0);
+            glUniform2f(s_u_blur_dir,
+                        horiz ? 1.0f / (float)s_bw[l] : 0.0f,
+                        horiz ? 0.0f : 1.0f / (float)s_bh[l]);
+            glBindTexture(GL_TEXTURE_2D, src_tex);
+            draw_quad();
+            src_tex = s_blur_tex[l][dst];
+            dst     = 1 - dst;
+        }
+        level_final[l] = src_tex;
     }
 
-    /* 3. Composite scene + blurred glow to the default framebuffer. */
+    /* 3. Composite scene + the three glow scales to the default framebuffer. */
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, WIN_W, WIN_H);
     glUseProgram(s_sh_comp);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, s_scene_tex);
     glUniform1i(s_u_comp_scene, 0);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, src_tex);
-    glUniform1i(s_u_comp_bloom, 1);
+    for (int l = 0; l < BLOOM_LEVELS; l++) {
+        glActiveTexture(GL_TEXTURE1 + l);
+        glBindTexture(GL_TEXTURE_2D, level_final[l]);
+        glUniform1i(s_u_comp_bloom[l], 1 + l);
+    }
+    /* Sum-normalised weights: total bloom energy stays ~equal to the old
+     * single-level chain, only the halo *shape* widens. */
+    glUniform3f(s_u_comp_bloom_w, 0.50f, 0.30f, 0.20f);
     glUniform1f(s_u_comp_intensity, s_intensity);
     glUniform1f(s_u_comp_exposure, exposure);
     glUniform1i(s_u_comp_tonemap, s_tonemap);
@@ -329,6 +400,28 @@ void post_end(void)
     glUniform1f(s_u_comp_rel_beta, s_rel_beta);
     glUniform2f(s_u_comp_rel_center, s_rel_cx, s_rel_cy);
     draw_quad();
+
+    /* 4. Lens flare: additive LDR overlay on top of the tonemapped image (a
+     * lens artifact happens after the "film").  The scene depth texture is
+     * sampled for occlusion — legal here because the default framebuffer is
+     * bound, so it is no longer a render-target attachment.  Skipped entirely
+     * at zero intensity: the composite above stays byte-identical. */
+    if (s_sh_flare && s_flare_i > 1e-4f) {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_ONE, GL_ONE);
+        glUseProgram(s_sh_flare);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, s_scene_depth);
+        glUniform1i(s_u_fl_depth, 0);
+        glUniform2f(s_u_fl_light_uv, s_flare_x * 0.5f + 0.5f,
+                                     s_flare_y * 0.5f + 0.5f);
+        glUniform1f(s_u_fl_light_depth, s_flare_depth);
+        glUniform1f(s_u_fl_intensity, s_flare_i);
+        glUniform3f(s_u_fl_color, s_flare_col[0], s_flare_col[1], s_flare_col[2]);
+        glUniform1f(s_u_fl_aspect, (float)WIN_W / (float)WIN_H);
+        draw_quad();
+        glDisable(GL_BLEND);
+    }
 
     /* Restore state expected by the UI / next frame. */
     glActiveTexture(GL_TEXTURE0);

@@ -45,3 +45,11 @@ void post_set_optics(int auto_exposure, float chromatic, float vignette);
  * (cx, cy) is the heading point in UV (0.5, 0.5 = look axis) — the camera's
  * velocity vector projected to screen space, toward which the field bunches. */
 void post_set_relativistic(float beta, float cx, float cy);
+
+/* Lens flare feed for this frame (render.c projects the dominant emitter).
+ * (ndc_x, ndc_y) = light in NDC, log_depth = its log-encoded depth (same
+ * formula the depth-writing shaders use), intensity 0 = no flare (the pass is
+ * skipped entirely — byte-identical output), col = light chromaticity.
+ * Must be called every frame; the value does not persist. */
+void post_set_lens_flare(float ndc_x, float ndc_y, float log_depth,
+                         float intensity, const float col[3]);

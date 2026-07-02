@@ -114,6 +114,14 @@ static float fbm3f(float x, float y, float z)
     return v / 0.875f;
 }
 
+static float fbm2f(float x, float y, float z)
+{
+    float v = vnoisef(x, y, z) * 0.6f;
+    x = x * 2.11f + 4.1f; y = y * 2.11f + 2.3f; z = z * 2.11f + 3.4f;
+    v += vnoisef(x, y, z) * 0.3f;
+    return v / 0.9f;
+}
+
 static void cross3(const float a[3], const float b[3], float out[3])
 {
     out[0] = a[1] * b[2] - a[2] * b[1];
@@ -145,21 +153,37 @@ static float density_cpu(int gal, const float p[3], float rr, float time_s)
     float pr[3] = { p[0] - axis[0]*h, p[1] - axis[1]*h, p[2] - axis[2]*h };
     float r  = sqrtf(pr[0]*pr[0] + pr[1]*pr[1] + pr[2]*pr[2]);
 
-    if (type == 2) {                                 /* IRREGULAR */
-        float env = expf(-powf(r / 0.62f, 2.0f) - powf(h / 0.34f, 2.0f));
-        float n   = fbm3f(p[0]*3.2f + sv0, p[1]*3.2f + sv1, p[2]*3.2f + sv2);
-        float k   = (n - 0.42f) / (0.85f - 0.42f);
-        if (k < 0.0f) k = 0.0f;
-        if (k > 1.0f) k = 1.0f;
-        k = k * k * (3.0f - 2.0f * k);
-        return env * (0.20f + 1.6f * k * k) * 1.15f;
-    }
-
-    /* SPIRAL */
     float ref[3] = { 0.31f, 1.0f, 0.71f };
     float t1[3], t2[3];
     cross3(axis, ref, t1); norm3(t1);
     cross3(axis, t1, t2);
+
+    if (type == 2) {                                 /* IRREGULAR */
+        /* Keep in step with galaxy_stars.vert: lump-warped envelope,
+         * off-centre stellar bar, patchy clumps + HII complexes. */
+        float x1 = pr[0]*t1[0] + pr[1]*t1[1] + pr[2]*t1[2];
+        float x2 = pr[0]*t2[0] + pr[1]*t2[1] + pr[2]*t2[2];
+        float lump = fbm2f(p[0]*2.1f + sv0*1.7f, p[1]*2.1f + sv1*1.7f,
+                           p[2]*2.1f + sv2*1.7f);
+        float env  = expf(-powf(r / (0.42f + 0.30f * lump), 2.2f)
+                          - powf(h / 0.30f, 2.0f));
+        float bar  = 1.5f * expf(-powf((x1 - 0.07f) / 0.34f, 2.0f)
+                                 - powf( x2          / 0.115f, 2.0f)
+                                 - powf( h           / 0.13f,  2.0f));
+        float n = fbm3f(p[0]*3.2f + sv0, p[1]*3.2f + sv1, p[2]*3.2f + sv2);
+        float k = (n - 0.48f) / (0.85f - 0.48f);
+        if (k < 0.0f) k = 0.0f;
+        if (k > 1.0f) k = 1.0f;
+        k = k * k * (3.0f - 2.0f * k);
+        float hn  = fbm2f(p[0]*4.6f - sv0, p[1]*4.6f - sv1, p[2]*4.6f - sv2);
+        float hii = (hn - 0.68f) / (0.86f - 0.68f);
+        if (hii < 0.0f) hii = 0.0f;
+        if (hii > 1.0f) hii = 1.0f;
+        hii = hii * hii * (3.0f - 2.0f * hii);
+        return env * (0.05f + 1.9f * k * k + 2.6f * hii) + bar;
+    }
+
+    /* SPIRAL */
     float phi = atan2f(pr[0]*t2[0] + pr[1]*t2[1] + pr[2]*t2[2],
                        pr[0]*t1[0] + pr[1]*t1[1] + pr[2]*t1[2]);
 
@@ -175,7 +199,7 @@ static float density_cpu(int gal, const float p[3], float rr, float time_s)
     rimf = rimf * rimf * (3.0f - 2.0f * rimf);
     float disc  = expf(-r / 0.30f)
                 * expf(-fabsf(h) / (0.035f + 0.09f * r * r)) * rimf;
-    float bulge = 1.9f * expf(-powf(rr / 0.13f, 2.0f));
+    float bulge = 2.4f * expf(-powf(rr / 0.14f, 2.0f));
 
     float cr = cosf(rot), sr = sinf(rot);
     float axp[3];
@@ -190,7 +214,12 @@ static float density_cpu(int gal, const float p[3], float rr, float time_s)
     kn = kn * kn * (3.0f - 2.0f * kn);
     kn *= arm;
 
-    return disc * (0.38f + 2.8f * arm + 3.8f * kn) + bulge;
+    /* Star-cloud mottling — same factor as galaxy_stars.vert/galaxy.frag. */
+    float cloud = 0.60f + 0.80f * fbm2f(prot[0]*3.1f + sv0*1.3f,
+                                        prot[1]*3.1f + sv1*1.3f,
+                                        prot[2]*3.1f + sv2*1.3f);
+
+    return disc * cloud * (0.38f + 2.8f * arm + 3.8f * kn) + bulge;
 }
 
 /* ── deterministic system generator ──────────────────────────────────────── */

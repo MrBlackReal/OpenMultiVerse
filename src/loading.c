@@ -234,7 +234,7 @@ static void present(void) {
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, WIN_W, WIN_H);
-    glClearColor(0.0f, 0.0f, 0.02f, 1.0f);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     draw_overlay();
     SDL_GL_SwapWindow(s_win);

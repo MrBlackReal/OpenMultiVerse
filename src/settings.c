@@ -39,7 +39,8 @@ void settings_reset(void)
     g_settings.label_pin_planets = 3;
     g_settings.label_pin_systems = 3;
 
-    g_settings.num_stars = 4000;
+    g_settings.num_stars     = 4000;
+    g_settings.bg_star_count = 18000;
 
     g_settings.tonemap_mode     = 1;        /* ACES */
     g_settings.tonemap_exposure = 0.76f;
@@ -47,11 +48,12 @@ void settings_reset(void)
     g_settings.chromatic_aberration = 0.0f;
     g_settings.vignette             = 0.0f;
     g_settings.lens_spikes          = 0.0f;
+    g_settings.lens_flare           = 0.25f;
     g_settings.relativistic         = 0.5f;
 
     g_settings.star_twinkle = 0.4f;
     g_settings.star_corona  = 0.4f;
-    g_settings.starspots    = 0.0f;   /* off: not visibly working yet (TODO) */
+    g_settings.starspots    = 0.35f;
 
     g_settings.fov               = 60.0f;
     g_settings.warp_speed_min_au = 200.0f;
@@ -140,7 +142,10 @@ void settings_load(void)
     if (g_settings.label_pin_systems < 0)  g_settings.label_pin_systems = 0;
     if (g_settings.label_pin_systems > 16) g_settings.label_pin_systems = 16;
 
-    g_settings.num_stars = (int)json_num(json_get(root, "num_stars"), g_settings.num_stars);
+    g_settings.num_stars     = (int)json_num(json_get(root, "num_stars"),     g_settings.num_stars);
+    g_settings.bg_star_count = (int)json_num(json_get(root, "bg_star_count"), g_settings.bg_star_count);
+    if (g_settings.bg_star_count < 0)      g_settings.bg_star_count = 0;
+    if (g_settings.bg_star_count > 200000) g_settings.bg_star_count = 200000;
 
     g_settings.tonemap_mode     = (int)json_num(json_get(root, "tonemap_mode"),       g_settings.tonemap_mode);
     g_settings.tonemap_exposure = (float)json_num(json_get(root, "tonemap_exposure"), g_settings.tonemap_exposure);
@@ -148,6 +153,7 @@ void settings_load(void)
     g_settings.chromatic_aberration = (float)json_num(json_get(root, "chromatic_aberration"),   g_settings.chromatic_aberration);
     g_settings.vignette             = (float)json_num(json_get(root, "vignette"),               g_settings.vignette);
     g_settings.lens_spikes          = (float)json_num(json_get(root, "lens_spikes"),            g_settings.lens_spikes);
+    g_settings.lens_flare           = (float)json_num(json_get(root, "lens_flare"),             g_settings.lens_flare);
     g_settings.relativistic         = (float)json_num(json_get(root, "relativistic"),           g_settings.relativistic);
     g_settings.star_twinkle = (float)json_num(json_get(root, "star_twinkle"), g_settings.star_twinkle);
     g_settings.star_corona  = (float)json_num(json_get(root, "star_corona"),  g_settings.star_corona);
@@ -228,14 +234,16 @@ int settings_save(void)
     fprintf(f, "  \"label_pin_planets\": %d, \"label_pin_systems\": %d,\n\n",
             g_settings.label_pin_planets, g_settings.label_pin_systems);
 
-    fprintf(f, "  \"num_stars\": %d,\n\n", g_settings.num_stars);
+    fprintf(f, "  \"num_stars\": %d, \"bg_star_count\": %d,\n\n",
+            g_settings.num_stars, g_settings.bg_star_count);
 
     fprintf(f, "  \"tonemap_mode\": %d, \"tonemap_exposure\": %.6g,\n",
             g_settings.tonemap_mode, (double)g_settings.tonemap_exposure);
     fprintf(f, "  \"auto_exposure\": %d, \"chromatic_aberration\": %.6g,\n",
             g_settings.auto_exposure, (double)g_settings.chromatic_aberration);
-    fprintf(f, "  \"vignette\": %.6g, \"lens_spikes\": %.6g, \"relativistic\": %.6g,\n",
+    fprintf(f, "  \"vignette\": %.6g, \"lens_spikes\": %.6g, \"lens_flare\": %.6g, \"relativistic\": %.6g,\n",
             (double)g_settings.vignette, (double)g_settings.lens_spikes,
+            (double)g_settings.lens_flare,
             (double)g_settings.relativistic);
     fprintf(f, "  \"star_twinkle\": %.6g, \"star_corona\": %.6g, \"starspots\": %.6g,\n\n",
             (double)g_settings.star_twinkle, (double)g_settings.star_corona,

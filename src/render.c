@@ -109,6 +109,13 @@ static GLint  s_sp_ambient     = -1;
 static GLint  s_sp_sun_world   = -1;
 static GLint  s_sp_rotation      = -1;
 static GLint  s_sp_cloud_rotation = -1;
+static GLint  s_sp_cloud_amount  = -1;
+static GLint  s_sp_ring          = -1;
+static GLint  s_sp_ring_pole     = -1;
+static GLint  s_sp_ecl_count     = -1;
+static GLint  s_sp_ecl           = -1;
+static GLint  s_sp_sun_radius    = -1;
+static GLint  s_sp_time          = -1;
 static GLint  s_sp_obliquity   = -1;
 static GLint  s_sp_ptype       = -1;   /* procedural texture variant index */
 static GLint  s_sp_star_heat   = -1;
@@ -227,6 +234,7 @@ static GLint  s_gl_spike     = -1;
 static GLint  s_gl_corona    = -1;
 static GLint  s_gl_time      = -1;
 static GLint  s_gl_seed      = -1;
+static GLint  s_gl_resolve   = -1;
 
 /* Black-hole billboard — accretion disk + shadow, alpha-blended. */
 static GLuint s_bh_shader = 0;
@@ -771,11 +779,8 @@ static int  s_rs_nocc      = 0;
  * sized by their real distance even though their draw position is clamped.
  * Non-stars get a fixed small dot.
  */
-static float star_dot_pixel_size(int idx, float dcam)
+static float star_dot_apparent_mag(int idx, float dcam)
 {
-    const float BASE_DOT_PX = 2.3f;
-    if (!g_bodies[idx].is_star) return BASE_DOT_PX;
-
     const double R_SUN_M   = 6.957e8;
     const double AU_PER_PC = 206264.806;
     const double M_SUN     = 4.83;
@@ -786,11 +791,37 @@ static float star_dot_pixel_size(int idx, float dcam)
     double d_pc = (double)dcam / AU_PER_PC;
     if (!(d_pc > 1e-9)) d_pc = 1e-9;
 
-    double m = M_SUN - 2.5 * log10(L) + 5.0 * log10(d_pc) - 5.0;
-    float size = (float)(7.0 - 0.45 * (m + 1.0));   /* m≈−1 → 7px ; m≈+12 → ~1px */
+    return (float)(M_SUN - 2.5 * log10(L) + 5.0 * log10(d_pc) - 5.0);
+}
+
+static float star_dot_pixel_size(int idx, float dcam)
+{
+    const float BASE_DOT_PX = 2.3f;
+    if (!g_bodies[idx].is_star) return BASE_DOT_PX;
+
+    float m    = star_dot_apparent_mag(idx, dcam);
+    float size = 7.0f - 0.45f * (m + 1.0f);   /* m≈−1 → 7px ; m≈+12 → ~1px */
     if (size < 1.4f) size = 1.4f;
     if (size > 7.0f) size = 7.0f;
     return size;
+}
+
+/*
+ * star_dot_hdr_gain — HDR colour gain for the naked-eye bright end.
+ *
+ * Below apparent magnitude 2.5 the dot's colour keeps rising past 1.0 on the
+ * real (compressed-exponent) magnitude scale, so the bloom pass blazes bright
+ * stars in their own colour instead of capping them at an LDR dot.  The curve
+ * is identical to starfield.c display_brightness_from_mag()'s overbright term
+ * so body dots and the painted-skybox stars brighten consistently.
+ */
+static float star_dot_hdr_gain(int idx, float dcam)
+{
+    if (!g_bodies[idx].is_star) return 1.0f;
+    float m = star_dot_apparent_mag(idx, dcam);
+    if (m >= 2.5f) return 1.0f;
+    float g = powf(10.0f, 0.28f * (2.5f - m));
+    return g > 6.0f ? 6.0f : g;
 }
 
 /*
@@ -990,6 +1021,13 @@ void render_init(void) {
     s_sp_screen    = glGetUniformLocation(s_sphere_shader, "u_screen");
     s_sp_rotation        = glGetUniformLocation(s_sphere_shader, "u_rotation");
     s_sp_cloud_rotation  = glGetUniformLocation(s_sphere_shader, "u_cloud_rotation");
+    s_sp_cloud_amount    = glGetUniformLocation(s_sphere_shader, "u_cloud_amount");
+    s_sp_ring            = glGetUniformLocation(s_sphere_shader, "u_ring");
+    s_sp_ring_pole       = glGetUniformLocation(s_sphere_shader, "u_ring_pole");
+    s_sp_ecl_count       = glGetUniformLocation(s_sphere_shader, "u_ecl_count");
+    s_sp_ecl             = glGetUniformLocation(s_sphere_shader, "u_ecl[0]");
+    s_sp_sun_radius      = glGetUniformLocation(s_sphere_shader, "u_sun_radius");
+    s_sp_time            = glGetUniformLocation(s_sphere_shader, "u_time");
     s_sp_obliquity = glGetUniformLocation(s_sphere_shader, "u_obliquity");
     s_sp_ptype     = glGetUniformLocation(s_sphere_shader, "u_planet_type");
     s_sp_star_heat = glGetUniformLocation(s_sphere_shader, "u_star_heat");
@@ -1048,6 +1086,7 @@ void render_init(void) {
         s_gl_corona = glGetUniformLocation(s_glare_shader, "u_corona");
         s_gl_time   = glGetUniformLocation(s_glare_shader, "u_time");
         s_gl_seed   = glGetUniformLocation(s_glare_shader, "u_seed");
+        s_gl_resolve= glGetUniformLocation(s_glare_shader, "u_resolve");
     }
 
     /* --- Black-hole shader --- */
@@ -1679,6 +1718,7 @@ void render_frame(const float view[16], const float proj[16],
     glUniform3f(s_sp_cam_right,  cam_right[0], cam_right[1], cam_right[2]);
     glUniform3f(s_sp_cam_up,     cam_up[0],    cam_up[1],    cam_up[2]);
     glUniform3f(s_sp_cam_fwd,    cam_fwd[0],   cam_fwd[1],   cam_fwd[2]);
+    glUniform1f(s_sp_time,       (float)SDL_GetTicks() * 0.001f);
 
     glBindVertexArray(s_sphere_vao);
 
@@ -1769,7 +1809,12 @@ void render_frame(const float view[16], const float proj[16],
         }
 
         if (!g_bodies[i].alive || s_rs_sphere_alpha[i] <= 0.0f) continue;
-        if (b->is_star) continue;   /* stars rendered as glare only, not Phong spheres */
+        /* Black holes are raymarched in their own pass.  Stars DO take the
+         * sphere path (emissive branch: limb darkening, granulation, spots) —
+         * the old "glare only" skip meant a resolved star had no photosphere
+         * at all, which is why starspots never showed (the glare billboard
+         * now clears its wash off the disc face via u_resolve). */
+        if (b->is_black_hole) continue;
 
         /* This body renders as a Phong sphere, so it can occlude dots behind
          * it.  Only a fully-resolved (opaque) sphere occludes — a transitioning
@@ -1808,7 +1853,63 @@ void render_frame(const float view[16], const float proj[16],
         glUniform1f(s_sp_rotation,        (float)fmod(b->rotation_angle, 2.0 * PI));
         glUniform1f(s_sp_cloud_rotation,  (float)b->cloud_rotation);
         glUniform1f(s_sp_obliquity, (float)(b->obliquity * (PI / 180.0)));
-        glUniform1i(s_sp_ptype,     get_planet_type(b->name));
+        int ptype = get_planet_type(b->name);
+        glUniform1i(s_sp_ptype,     ptype);
+        /* Cloud coverage is data-driven: solid worlds with an authored
+         * atmosphere get a procedural deck scaled by its intensity.  Gas
+         * giants / Venus / Titan already ARE cloud recipes — excluded. */
+        {
+            int solid = (ptype == 0 || ptype == 1 || ptype == 2 ||
+                         ptype == 7 || ptype == 9 || ptype == 10);
+            float cloud_amt = solid ? b->atm_intensity : 0.0f;
+            if (cloud_amt > 1.0f) cloud_amt = 1.0f;
+            if (cloud_amt < 0.0f) cloud_amt = 0.0f;
+            glUniform1f(s_sp_cloud_amount, cloud_amt);
+        }
+        /* Ring shadow: ringed planets get the annulus striped across the
+         * globe by the sphere shader (radii/pole from the ring system). */
+        {
+            float rg_in, rg_out, rg_pole[3];
+            if (rings_query(i, &rg_in, &rg_out, rg_pole)) {
+                glUniform4f(s_sp_ring, rg_in, rg_out, 0.85f, 0.0f);
+                glUniform3f(s_sp_ring_pole, rg_pole[0], rg_pole[1], rg_pole[2]);
+            } else {
+                glUniform4f(s_sp_ring, 0.0f, 0.0f, 0.0f, 0.0f);
+            }
+        }
+        /* Eclipse occluders: family bodies (parent, children, siblings) that
+         * can block the sun.  Family-only keeps the scan O(N) int compares —
+         * it covers every physically plausible eclipse (a foreign system's
+         * body subtends nothing at interstellar range). */
+        {
+            float ecl[6 * 4];
+            int   necl = 0;
+            for (int j = 0; j < g_nbodies && necl < 6; j++) {
+                if (j == i || !g_bodies[j].alive) continue;
+                if (g_bodies[j].is_star) continue;
+                if (j != b->parent && g_bodies[j].parent != i &&
+                    (b->parent < 0 || g_bodies[j].parent != b->parent))
+                    continue;
+                float orad = visual_radius(j, 0.0f);
+                if (orad <= 0.0f) continue;
+                ecl[necl*4+0] = (float)((g_bodies[j].pos[0] - b->pos[0]) * RS);
+                ecl[necl*4+1] = (float)((g_bodies[j].pos[1] - b->pos[1]) * RS);
+                ecl[necl*4+2] = (float)((g_bodies[j].pos[2] - b->pos[2]) * RS);
+                ecl[necl*4+3] = orad;
+                necl++;
+            }
+            glUniform1i(s_sp_ecl_count, necl);
+            if (necl > 0) {
+                glUniform4fv(s_sp_ecl, necl, ecl);
+                /* Penumbra size: the primary emitter's disc radius. */
+                RadianceContrib etop[1];
+                float sun_r = 0.0f;
+                if (radiance_field_top(b->pos, i, 1, etop) >= 1 &&
+                    etop[0].body >= 0)
+                    sun_r = visual_radius(etop[0].body, 0.0f);
+                glUniform1f(s_sp_sun_radius, sun_r);
+            }
+        }
         glUniform1f(s_sp_star_heat, collision_body_star_heat(i));
         glUniform1f(s_sp_starspots, b->is_star ? (float)g_settings.starspots : 0.0f);
 
@@ -2418,10 +2519,17 @@ void render_frame(const float view[16], const float proj[16],
 
             /* Star: dot fades out as the glare billboard fades in — the exact
              * complement of the glare pass's smoothstep over the same
-             * (density-scaled) window, so the handoff conserves brightness. */
+             * (density-scaled) window, so the handoff conserves brightness.
+             * The HDR gain rolls off to 1 through the same window: the glare
+             * billboard is not overbright-scaled, so a gained dot handing
+             * off at full blaze would pulse. */
+            float gain = 1.0f;
             if (b->is_star) {
                 float glare_px = body_px[i] * STAR_GLARE_BILL_SCALE;
-                f *= 1.0f - (float)smoothstepd(lod_glare_lo, lod_glare_hi, glare_px);
+                float comp = 1.0f - (float)smoothstepd(lod_glare_lo, lod_glare_hi,
+                                                       glare_px);
+                f *= comp;
+                gain = 1.0f + (star_dot_hdr_gain(i, info[i].dcam) - 1.0f) * comp;
             }
             if (f <= 0.0f) continue;
 
@@ -2437,9 +2545,9 @@ void render_frame(const float view[16], const float proj[16],
             dot_data[dot_count*8+0] = bx;
             dot_data[dot_count*8+1] = by;
             dot_data[dot_count*8+2] = bz;
-            dot_data[dot_count*8+3] = b->col[0];
-            dot_data[dot_count*8+4] = b->col[1];
-            dot_data[dot_count*8+5] = b->col[2];
+            dot_data[dot_count*8+3] = b->col[0] * gain;
+            dot_data[dot_count*8+4] = b->col[1] * gain;
+            dot_data[dot_count*8+5] = b->col[2] * gain;
             dot_data[dot_count*8+6] = f;
             dot_data[dot_count*8+7] = star_dot_pixel_size(i, info[i].dcam);
             dot_count++;
@@ -2470,15 +2578,18 @@ void render_frame(const float view[16], const float proj[16],
             f *= farfield_horizon_fade(info[i].dcam);
             if (f <= 0.0f) continue;
 
+            /* No glare handoff out here — the gain applies in full. */
+            float gain = star_dot_hdr_gain(i, info[i].dcam);
+
             float bx = (float)(b->pos[0] * RS - cx);
             float by = (float)(b->pos[1] * RS - cy);
             float bz = (float)(b->pos[2] * RS - cz);
             dot_data[dot_count*8+0] = bx;
             dot_data[dot_count*8+1] = by;
             dot_data[dot_count*8+2] = bz;
-            dot_data[dot_count*8+3] = b->col[0];
-            dot_data[dot_count*8+4] = b->col[1];
-            dot_data[dot_count*8+5] = b->col[2];
+            dot_data[dot_count*8+3] = b->col[0] * gain;
+            dot_data[dot_count*8+4] = b->col[1] * gain;
+            dot_data[dot_count*8+5] = b->col[2] * gain;
             dot_data[dot_count*8+6] = f;
             dot_data[dot_count*8+7] = star_dot_pixel_size(i, info[i].dcam);
             dot_count++;
@@ -2590,6 +2701,12 @@ void render_frame(const float view[16], const float proj[16],
             glUniform3f(s_gl_color,
                         g_bodies[i].col[0] * hf, g_bodies[i].col[1] * hf, g_bodies[i].col[2] * hf);
             glUniform1f(s_gl_seed, (float)(i % 1024) * 0.1013f);
+            /* Resolved-disc fade: once the star's disc is genuinely large on
+             * screen, clear the glow off the disc face so the photosphere
+             * shows (starspots/granulation).  0 below 30 px keeps the
+             * dot↔glare handoff regime bit-identical. */
+            glUniform1f(s_gl_resolve,
+                        (float)smoothstepd(30.0, 120.0, body_px[i]));
             glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
         }
 
@@ -2866,6 +2983,56 @@ void render_frame(const float view[16], const float proj[16],
         float rel[3], dr, aa;
         if (inspect_ring_params(info, rel, &dr, &aa))
             draw_ring_2d(rel, dr, aa, vp_camrel);
+    }
+
+    /* ------------------------------------------------------------------ 6.7. Lens flare feed
+     *
+     * Project the dominant emitter at the camera into NDC for the post-pass
+     * flare overlay.  Always pushed (intensity 0 disables the pass), so a
+     * stale flare can never persist a frame after the sun leaves the sky.
+     * Intensity ramps with incident flux, saturating at Earth-like 1361 W/m² —
+     * a sun in the outer system still flares gently, an interstellar one not
+     * at all. */
+    {
+        float flare_col[3] = { 1.0f, 1.0f, 1.0f };
+        float fl_i = 0.0f, fl_x = 0.0f, fl_y = 0.0f, fl_d = 1.0f;
+        if (g_settings.lens_flare > 0.0f && post_enabled()) {
+            double cam_m[3] = { g_cam.pos[0] * AU,
+                                g_cam.pos[1] * AU,
+                                g_cam.pos[2] * AU };
+            RadianceContrib fl_top[1];
+            if (radiance_field_top(cam_m, -1, 1, fl_top) >= 1 &&
+                fl_top[0].irr > 0.0) {
+                /* Camera-relative in double, cast late (the standard recipe). */
+                double rx = fl_top[0].pos[0] * RS - g_cam.pos[0];
+                double ry = fl_top[0].pos[1] * RS - g_cam.pos[1];
+                double rz = fl_top[0].pos[2] * RS - g_cam.pos[2];
+                float  fx = (float)rx, fy = (float)ry, fz = (float)rz;
+                /* Behind-camera guard: without it the projection mirrors and
+                 * the ghost chain sweeps the screen with the sun at our back. */
+                if (cam_fwd[0]*fx + cam_fwd[1]*fy + cam_fwd[2]*fz > 0.0f) {
+                    float cx = vp_camrel[0]*fx + vp_camrel[4]*fy + vp_camrel[8] *fz + vp_camrel[12];
+                    float cy = vp_camrel[1]*fx + vp_camrel[5]*fy + vp_camrel[9] *fz + vp_camrel[13];
+                    float cw = vp_camrel[3]*fx + vp_camrel[7]*fy + vp_camrel[11]*fz + vp_camrel[15];
+                    if (cw > 1e-6f) {
+                        fl_x = cx / cw;
+                        fl_y = cy / cw;
+                        double dist_au = sqrt(rx*rx + ry*ry + rz*rz);
+                        fl_d = (float)(log2(dist_au + 1.0) /
+                                       log2((double)RENDER_DEPTH_FAR + 1.0));
+                        double t = (log10(fl_top[0].irr / 1361.0) + 4.0) / 4.0;
+                        if (t < 0.0) t = 0.0;
+                        if (t > 1.0) t = 1.0;
+                        t = t * t * (3.0 - 2.0 * t);
+                        fl_i = g_settings.lens_flare * (float)t;
+                        flare_col[0] = fl_top[0].col[0];
+                        flare_col[1] = fl_top[0].col[1];
+                        flare_col[2] = fl_top[0].col[2];
+                    }
+                }
+            }
+        }
+        post_set_lens_flare(fl_x, fl_y, fl_d, fl_i, flare_col);
     }
 
     /* ------------------------------------------------------------------ 7. Labels */

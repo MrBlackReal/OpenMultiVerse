@@ -1,24 +1,27 @@
 #version 330 core
 /*
- * atm.frag — atmospheric limb glow
+ * atm.frag — single-scattering Rayleigh + Mie atmosphere (roadmap §3.1)
  *
- * Per-pixel ray–atmosphere shell intersection.
+ * Carrier and structure are unchanged from the limb-glow version: atm.vert
+ * billboard/fullscreen quad, per-pixel ray + shell intersection, planet-face
+ * discards, additive blend, back-face log depth.  What changed is the colour
+ * model: the art-directed limb/twilight/forward terms are replaced by a real
+ * scattering integral — 14 view samples through the shell, each with a
+ * 4-sample secondary march toward the sun for transmittance (correct at the
+ * terminator for any planet/shell ratio, which is where sunsets live).
  *
- * Glow model:
- *   p    = closest-approach distance of the ray to the planet centre
- *   norm = (p − R) / (R_atm − R)   maps [R, R_atm] → [0, 1]
- *   glow = (1 − norm)^3            smooth power-law falloff
+ * Units: distances are AU, but scattering path lengths are measured in shell
+ * thicknesses (H = R_atm − R), so β coefficients are per-shell-unit and one
+ * set of constants serves every planet.  For thin shells on huge planets
+ * (gas giants) the tangential path in shell units grows ∝ √(R/H); β is scaled
+ * by min(1, 3.3/(R/H)) so the limb optical depth stays in the calibrated
+ * range instead of blowing out.
  *
- * Using a power-law (rather than the chord-length model) gives a
- * continuously smooth gradient that fades to zero at R_atm with no
- * visible hard edge.  The cubic exponent concentrates the bulk of the
- * glow near the planet limb (norm ≈ 0) and tapers gently outward.
- *
- * Lit-side boost: dot(outward_normal, sun_dir) dims the night-side
- * glow to ~15 % of its day-side value.
- *
- * Rendered additively (GL_SRC_ALPHA / GL_ONE); logarithmic
- * gl_FragDepth keeps it correctly depth-sorted against opaque geometry.
+ * Art direction survives as physics inputs: the JSON atmosphere colour tints
+ * the Rayleigh β spectrum (Earth's blue → blue sky + red sunsets; a heated
+ * collision shell's red → red-scattering glow), u_atm_intensity stays the
+ * overall gain, and both RadianceField lights get the full treatment
+ * (u_light2 = 0 is bit-identical to the single-sun path).
  */
 
 uniform vec3  u_oc;              /* cam − centre  (camera-relative, AU) */
@@ -40,6 +43,47 @@ uniform vec3  u_atm_color;
 uniform float u_atm_intensity;
 
 out vec4 frag_color;
+
+const float PI_C     = 3.14159265;
+const float H_RAY    = 0.12;     /* Rayleigh scale height, shell units  */
+const float H_MIE    = 0.06;     /* Mie: half the Rayleigh scale height */
+const float MIE_G    = 0.76;     /* Henyey-Greenstein anisotropy        */
+const int   N_VIEW   = 14;
+const int   N_SUN    = 4;
+const float GAIN     = 30.0;     /* calibrated: Earth limb at intensity
+                                    0.6 reads like the old art pass     */
+
+float phase_rayleigh(float mu) {
+    return (3.0 / (16.0 * PI_C)) * (1.0 + mu * mu);
+}
+
+float phase_mie(float mu) {
+    float d = 1.0 + MIE_G * MIE_G - 2.0 * MIE_G * mu;
+    return (1.0 - MIE_G * MIE_G) / (4.0 * PI_C * d * sqrt(d));
+}
+
+/* Optical depth (per-channel) from a shell point toward a light, by a short
+ * secondary march to the shell exit.  Returns transmittance; zero when the
+ * solid planet blocks the ray (this shadow IS the terminator). */
+vec3 sun_transmittance(vec3 pos, vec3 light_dir, float R, float R_atm,
+                       float H, vec3 beta_r, float beta_m)
+{
+    float b  = dot(pos, light_dir);
+    float r2 = dot(pos, pos);
+    float p2 = r2 - b * b;
+    if (b < 0.0 && p2 < R * R) return vec3(0.0);          /* planet shadow */
+    float t_exit = -b + sqrt(max(0.0, b * b - r2 + R_atm * R_atm));
+    float dt = t_exit / float(N_SUN);
+    float dl = dt / H;                                     /* shell units  */
+    vec3 tau = vec3(0.0);
+    for (int j = 0; j < N_SUN; j++) {
+        vec3  sp = pos + (float(j) + 0.5) * dt * light_dir;
+        float h  = clamp((length(sp) - R) / H, 0.0, 1.0);
+        tau += (beta_r * exp(-h / H_RAY)
+                + vec3(beta_m) * exp(-h / H_MIE)) * dl;
+    }
+    return exp(-tau);
+}
 
 void main() {
     /* Per-pixel ray direction — identical formula to phong.frag */
@@ -65,65 +109,76 @@ void main() {
         if (t > 0.0) discard;
     }
 
-    /* Front face of the outer atmosphere sphere */
-    float t_atm = -b - sqrt(max(0.0, R_atm * R_atm - p2));
-    /* When t_atm <= 0 the camera is already inside the atmosphere — still
-     * render glow.  Clamp t_hit to 0 so the lit-side normal is evaluated at
-     * the camera position rather than a point behind it. */
-    float t_hit = max(t_atm, 0.0);
+    /* March segment: shell entry (clamped to the camera when inside) to the
+     * shell exit.  The planet-face discard above guarantees the segment never
+     * crosses the solid sphere. */
+    float t_atm      = -b - sqrt(max(0.0, R_atm * R_atm - p2));
+    float t_atm_back = -b + sqrt(max(0.0, R_atm * R_atm - p2));
+    float t0  = max(t_atm, 0.0);
+    float seg = t_atm_back - t0;
+    if (seg <= 0.0) discard;
 
-    /* Smooth power-law falloff.
-     * norm = 0 at the planet surface (limb), 1 at the outer atmosphere edge.
-     * (1−norm)^3 concentrates the glow at the limb and tapers continuously
-     * to zero — no visible hard cutoff at the boundary.
-     *
-     * When the camera is inside the atmosphere and the ray points outward
-     * (b > 0), the geometric closest approach on the positive ray is at t=0
-     * (the camera itself), so use oc2 rather than the infinite-line p2. */
-    float p    = sqrt(b > 0.0 ? oc2 : p2);
-    float norm = clamp((p - R) / (R_atm - R), 0.0, 1.0);
-    /* Broad power-law glow plus a tighter term for a brighter limb line. */
-    float glow = pow(1.0 - norm, 3.0) + 0.35 * pow(1.0 - norm, 9.0);
+    float H  = max(R_atm - R, 1e-9);
+    float Rn = R / H;                       /* planet radius, shell units */
+    float bscale = min(1.0, 3.3 / Rn);      /* thin-shell (gas giant) cap */
 
-    /* Scattering model:
-     *   sun_dot  — illumination of the limb point (lit side > 0)
-     *   day      — smooth day/night with a soft terminator
-     *   twilight — scattering peaks where the sun grazes the limb (sunset band)
-     *   forward  — forward-scatter halo when looking toward the star through the
-     *              shell, i.e. a bright ring when the star is behind the planet */
-    vec3  sun_dir = normalize(u_sun_rel);
-    vec3  hit_n   = normalize(u_oc + t_hit * ray_dir);
-    float sun_dot = dot(hit_n, sun_dir);
+    /* Rayleigh spectrum DERIVED from the authored atmosphere colour: β ∝ ac²
+     * (max-normalised, so intensity lives in u_atm_intensity and hue in the
+     * colour).  Earth's authored blue (0.45, 0.65, 1.0)² × 3.2 = (0.65, 1.35,
+     * 3.2) ≈ the physical Rayleigh spectrum, so Earth stays physical — while
+     * Mars' rust actually scatters red (with the real-Mars blue terminator),
+     * Titan goes orange haze, Uranus cyan.  A fixed blue-heavy β merely
+     * tinted by the colour made every planet's shell read the same. */
+    vec3 ac = u_atm_color
+            / max(max(u_atm_color.r, u_atm_color.g), max(u_atm_color.b, 1e-3));
+    vec3  beta_r = 3.2 * ac * ac * bscale;
+    float beta_m = 0.25 * bscale;
 
-    float day      = clamp(sun_dot * 1.2 + 0.1, 0.0, 1.0);
-    float twilight = pow(clamp(1.0 - abs(sun_dot) * 2.2, 0.0, 1.0), 1.5);
-    float forward  = pow(clamp(dot(ray_dir, sun_dir), 0.0, 1.0), 6.0);
+    vec3 sun_dir = normalize(u_sun_rel);
+    float mu  = dot(ray_dir, sun_dir);
+    float pr  = phase_rayleigh(mu);
+    float pm  = phase_mie(mu);
 
-    /* Cool day tint shifts toward a warm sunset hue through the twilight band.
-     * Tinted by the primary's physical blackbody chromaticity (u_sun_col =
-     * white for a Sun-like star, so the established look is preserved). */
-    vec3 sunset = mix(u_atm_color, vec3(1.0, 0.5, 0.25), 0.85);
-    vec3 col    = mix(u_atm_color, sunset, twilight) * u_sun_col;
-
-    float lit   = 0.10 + 0.90 * day + 0.70 * forward;
-
-    /* Secondary light: same day/twilight/forward model, weighted by its flux
-     * relative to the primary; colours blend by lit share.  u_light2 = 0 →
-     * bit-identical single-sun path. */
+    vec3 sun2_dir = vec3(0.0);
+    float pr2 = 0.0, pm2 = 0.0;
     if (u_light2 > 0.0) {
-        vec3  sun2 = normalize(u_sun2_rel);
-        float sd2  = dot(hit_n, sun2);
-        float day2 = clamp(sd2 * 1.2 + 0.1, 0.0, 1.0);
-        float tw2  = pow(clamp(1.0 - abs(sd2) * 2.2, 0.0, 1.0), 1.5);
-        float fw2  = pow(clamp(dot(ray_dir, sun2), 0.0, 1.0), 6.0);
-        float lit2 = (0.90 * day2 + 0.70 * fw2) * u_light2;
-        vec3  col2 = mix(u_atm_color, sunset, tw2) * u_light2_col;
-        col  = (col * lit + col2 * lit2) / max(lit + lit2, 1e-4);
-        lit += lit2;
+        sun2_dir = normalize(u_sun2_rel);
+        float mu2 = dot(ray_dir, sun2_dir);
+        pr2 = phase_rayleigh(mu2);
+        pm2 = phase_mie(mu2);
     }
 
-    float alpha = glow * u_atm_intensity * lit;
-    if (alpha < 0.003) discard;
+    /* Jitter the sample comb per pixel (same screen hash as the volumetrics)
+     * so 14 samples don't band into onion shells. */
+    float jit = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233)))
+                      * 43758.5453);
+
+    float dt = seg / float(N_VIEW);
+    float dl = dt / H;
+    vec3 tau_v = vec3(0.0);
+    vec3 L  = vec3(0.0);
+    vec3 L2 = vec3(0.0);
+    for (int j = 0; j < N_VIEW; j++) {
+        vec3  pos = u_oc + (t0 + (float(j) + jit) * dt) * ray_dir;
+        float h   = clamp((length(pos) - R) / H, 0.0, 1.0);
+        vec3  s_r = beta_r * exp(-h / H_RAY);
+        float s_m = beta_m * exp(-h / H_MIE);
+        tau_v += (s_r + vec3(s_m)) * dl;
+        vec3 Tv = exp(-tau_v);
+        vec3 Ts = sun_transmittance(pos, sun_dir, R, R_atm, H, beta_r, beta_m);
+        L += Tv * Ts * (s_r * pr + vec3(s_m * pm)) * dl;
+        if (u_light2 > 0.0) {
+            vec3 Ts2 = sun_transmittance(pos, sun2_dir, R, R_atm, H,
+                                         beta_r, beta_m);
+            L2 += Tv * Ts2 * (s_r * pr2 + vec3(s_m * pm2)) * dl;
+        }
+    }
+
+    vec3 col = L * u_sun_col;
+    if (u_light2 > 0.0) col += L2 * u_light2_col * u_light2;
+    col *= u_atm_intensity * GAIN;
+
+    if (max(col.r, max(col.g, col.b)) < 0.0005) discard;
 
     /* Logarithmic depth — use the BACK face of the atmosphere sphere.
      *
@@ -135,9 +190,11 @@ void main() {
      * inside the atmosphere shell, so the depth test correctly rejects the
      * glow at pixels occupied by a closer solid body.                    */
     const float FAR = DEPTH_FAR;
-    float t_atm_back = -b + sqrt(max(0.0, R_atm * R_atm - p2));
     float eye_depth  = t_atm_back * dot(ray_dir, u_cam_fwd);
     gl_FragDepth = log2(eye_depth + 1.0) / log2(FAR + 1.0);
 
-    frag_color = vec4(col * alpha, alpha);
+    /* Radiance out, alpha 1: under GL_SRC_ALPHA/GL_ONE this adds L exactly
+     * once (the old path multiplied colour by alpha and then blended by it —
+     * alpha-squared radiance). */
+    frag_color = vec4(col, 1.0);
 }

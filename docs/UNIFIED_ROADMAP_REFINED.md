@@ -97,6 +97,12 @@ surroundings become a galaxy, then the Local Group" — now works end to end:
   luminosity hash that brightened it, colour comes from the spectral
   pipeline, and planets spawn on circular orbits near the disc plane (rocky
   inside the snow line, giants outside, temperate worlds get atmospheres).
+  **The density model lives in three synchronized ports** — `galaxy.frag`
+  `galaxy_sample()` (volume glow), `galaxy_stars.vert` `star_density()`
+  (sprite placement), `starsys.c` `density_cpu()` (promotion) — change one,
+  change all three, or stars detach from the glow / promotions mismatch
+  sprites (verified: the same star promotes at the same position and mass
+  after the 2026-07 density retune).
   Fly away ≳2.6 ly and it demotes; return and the identical system
   regenerates from the same lattice seed. Promoted stars are real bodies, so
   labels, Inspect, RadianceField lighting, adaptive-warp deceleration, and
@@ -331,6 +337,13 @@ This provides the backbone for:
 * VBO-based star dots
 * temperature to color mapping
 * distance-based attenuation
+* faint background star dust ✅ (2026-07: `starfield.c build_background()` —
+  `g_settings.bg_star_count` (default 18000, slider 0–60000, 0 = off)
+  sub-catalog stars m ≈ 5–8.5, 70% weighted toward the galactic plane via an
+  exponential sin-latitude falloff about the real pole so the dust thickens
+  along the Milky Way band; fixed-seed xorshift RNG (never perturbs libc
+  `rand()`), colours desaturated 40% toward white, packed as a 4th block in
+  the skybox VBO so it shares the skybox crossfade)
 
 ---
 
@@ -377,7 +390,14 @@ curves remain. Tunables under Menu → Visuals → Stars, persisted in
 * improved luminosity model ✅ — the RadianceField's Stefan-Boltzmann term
   now runs on the spectral T (physical mass+phase) instead of guessing T
   from the art-directed colour; Sol's output is calibration-identical.
-* apparent magnitude calibration ✅ (apparent-magnitude dot sizing in `render.c`)
+* apparent magnitude calibration ✅ (apparent-magnitude dot sizing in `render.c`,
+  plus **HDR overbright**: below m≈2.5 the star's colour keeps rising past 1.0
+  on a compressed magnitude scale (×6 cap) in all three point-star sources —
+  body dots, the BSC5 skybox, and the procedural galaxy-star cascades — so the
+  bloom pass blazes Sirius/Canopus/Vega in their own colour instead of capping
+  them at an LDR dot (the SpaceEngine bright-star look). Near-star dots roll
+  the gain back to 1 across the dot↔glare window, so that handoff stays
+  brightness-conserving.)
 
 ### Visual upgrades
 
@@ -385,16 +405,23 @@ curves remain. Tunables under Menu → Visuals → Stars, persisted in
   streamers weighted by blue−red colour; `g_settings.star_corona`)
 * micro-twinkle without atmosphere dependence ✅ (`star_dot.vert` `u_twinkle`,
   colour-hashed per-star phase; `g_settings.star_twinkle`)
-* starspot masking for cooler stars ⛔ **NOT WORKING** — code in place
-  (`phong.frag` emissive branch granulation + temperature-scaled spots,
-  `u_starspots`/`g_settings.starspots`, wired in `render.c`) but spots are not
-  visible in-app even at strength 1.0 on a red giant. Default forced to 0.
-  Suspected causes to chase: bloom/tonemap washing out the darkening on the
-  bright emissive disc, or close stars not taking the sphere-disc path. The
-  menu slider and plumbing are kept for the fix.
-* rotational modulation ⛔ — mechanism implemented (spots live in the body-local
-  frame so they'd rotate with `u_rotation`) but unobservable until starspots
-  render.
+* starspot masking for cooler stars ✅ **FIXED 2026-07** — both suspected
+  causes were real: (1) `render.c` skipped stars in the sphere pass entirely
+  ("glare only"), so the phong.frag emissive branch was dead code — a
+  resolved star had no photosphere at all; (2) the glare billboard's
+  additive wash (`shine ≈ 2.1` over the disc face) buried any surface
+  detail.  Fixes: stars now take the sphere path (black holes still
+  excluded), and `star_glare.frag u_resolve` clears the glow off the disc
+  interior as the star resolves (0 below 30 px disc — the CPU-mirrored
+  dot↔glare handoff regime stays bit-identical).  Spots re-tuned: isolated
+  peaks in the active-latitude bands (butterfly zone), few-percent coverage.
+  Default `starspots` 0 → 0.35.  Verified: close Sun shows limb-darkened
+  photosphere + spot groups + corona outside the limb.
+* rotational modulation ✅ — spots live in the body-local frame and now
+  actually render, so they rotate with `u_rotation` for free.
+* granulation churn ✅ (2026-07) — two counter-drifting noise fields blended
+  on `u_time`, so convective cells visibly churn instead of being a static
+  pattern.
 
 ---
 
@@ -471,6 +498,26 @@ live under Menu → Visuals and persist in `settings.json`.
   `u_spike`, driven by `g_settings.lens_spikes`; additive — leaves the
   dot/glare handoff mirror in `render.c` untouched)
 * optical vignetting ✅ (post-tonemap corner falloff, `u_vignette`)
+* **multi-scale bloom** ✅ (2026-07: the single half-res 10-pass chain became
+  three ping-pong levels at 1/2, 1/4, 1/8 res recombined with sum-normalised
+  weights 0.50/0.30/0.20 — wide smooth photographic halos, ~40% cheaper;
+  1/8-res level upsampled with a 4-tap tent to kill bilinear diamonds)
+* **true black point** ✅ (2026-07: clear colour was (0,0,0.02) navy — now
+  pure black, plus a 0.002 display-linear black-point subtract post-tonemap
+  so auto-exposure can't lift bloom spill into a grey void floor; measured
+  empty-sky RGB (0,0,0), band gradients intact)
+* **sun lens flare** ✅ (2026-07: `lens_flare.frag`, additive LDR overlay
+  drawn after the composite — post-tonemap is where a lens artifact lives,
+  and it makes the scene depth texture legally sampleable. Four chromatic
+  ghost sprites mirrored through screen centre, halo ring, blue anamorphic
+  streak, warm anchor glow. Fed per-frame by `render.c`: dominant
+  RadianceField emitter projected to NDC (behind-camera + clip-w guards),
+  intensity = `g_settings.lens_flare` (default 0.25) × a flux ramp
+  saturating at Earth-like 1361 W/m². Occlusion: 3×3 scene-depth taps with
+  an absolute log-depth epsilon (= constant ~5% distance-ratio tolerance, so
+  the sun's own disc never self-occludes) → soft limb fade; verified gone
+  when the sun sets behind a planet. Slider under Menu → Visuals; 0 skips
+  the pass entirely.)
 
 > All four lens optics default **off** (0); tonemap defaults **on** (ACES). The
 > "Tonemap Off" path still reproduces the pre-1.3 linear look bit-for-bit.
@@ -774,22 +821,48 @@ below exist in source.
 
 ## 3.1 Atmospheres
 
-**Status:** 🟡 partial
+**Status:** 🟡 partial — **physical single scattering landed** (2026-07)
 
 ### Current
 
-* limb glow ✅
-* sunset tint ✅
-* forward scattering ✅
+* limb glow ✅ (now emergent from the scattering integral, not art-directed)
+* sunset tint ✅ (emergent: sun transmittance through the shell reddens the
+  terminator; the backlit planet shows the refracted-sunset ring)
+* forward scattering ✅ (Henyey-Greenstein Mie, g = 0.76)
 * cloud layer ✅ (Earth, `phong.frag` L584)
 * city lights ✅ (Earth night side, `phong.frag` L883)
 
 ### Additions
 
-* Rayleigh scattering ⛔ (no named Rayleigh term)
-* Mie scattering ⛔
-* dynamic cloud layer ⛔ (current cloud layer is static, Earth-only)
-* atmospheric density gradients ⛔
+* Rayleigh scattering ✅ — `atm.frag` rewritten as a real single-scattering
+  march: 14 view samples through the shell, each with a 4-sample secondary
+  march to the sun for per-channel transmittance (correct at the terminator
+  for any planet/shell ratio). β_R = 3.2 · (normalised JSON atmosphere
+  colour)² — the spectrum is *derived* from the authored colour, not a blue
+  constant tinted by it: Earth's blue² reproduces physical Rayleigh, Mars
+  actually scatters red (blue terminator, as on real Mars), Titan is orange
+  haze (verified: 4-planet frozen rig, same illumination, four clearly
+  distinct shells). `u_atm_intensity` stays the gain. Path lengths in shell
+  units so one
+  constant set serves every planet; thin shells (gas giants) scale β by
+  min(1, 3.3/(R/H)) so the limb never blows out (verified on Jupiter).
+  Both RadianceField lights get the full integral (`u_light2` = 0 is
+  bit-identical single-sun). Carrier/discards/log-depth kept verbatim; the
+  blend now outputs radiance at alpha 1 (was alpha-squared). Verified
+  headless on a frozen Earth-clone rig: blue limb, terminator shadow,
+  backlit sunset ring.
+* Mie scattering ✅ (grey β_M = 0.25, HG phase, half the Rayleigh scale height)
+* dynamic cloud layer 🟡 (2026-07: generalized from static Earth-only to
+  **every solid world with an atmosphere** — `phong.frag u_cloud_amount` is
+  data-driven from the body's authored atmosphere intensity (Earth half
+  covered, Mars translucent CO2 wisps, promoted temperate exoplanets get
+  theirs automatically; gas giants/Venus/Titan excluded — their recipes ARE
+  cloud tops).  Coverage threshold + opacity scale with the amount, decks
+  drift at their own rotation rate, and clouds now **cast shadows** on the
+  surface (deck resampled toward the sun's tangential offset).  Remaining
+  for ✅: time-evolving pattern, not just drift)
+* atmospheric density gradients 🟡 (exponential ρ(h) in the march; no
+  per-planet scale-height authoring yet)
 * aurora system ⛔
 * lightning emission ⛔
 
@@ -805,23 +878,66 @@ covering most classes below; only metallic worlds and methane seas remain.
 * lava ✅ (`lava_color()`, molten/crust/white-hot; `phong.frag` L89+)
 * ice ✅ (ice giants type 12; polar caps on Earth/type 2)
 * desert ✅ (Earth land/desert recipe, type 1)
-* ocean ✅ (Earth ocean recipe, type 1)
+* ocean ✅ (Earth ocean recipe, type 1 — **+ specular sun glint 2026-07**:
+  sharp HDR Blinn lobe + Fresnel sheen on open water (no land/ice/cloud),
+  both RadianceField lights; the bloom pass blazes the sun's reflection)
 * metallic worlds ⛔
 * methane seas ⛔
+
+### Surface relief (landed 2026-07)
+
+Solid worlds now catch light: fBM terrain normals (`terrain_height()` /
+`terrain_normal()`, keyed on the same fbm(NL·3.5) as the colour recipes so
+relief follows the painted landforms — ridged mountain chains + fine
+roughness), per-type strength (Earth land-only so oceans stay glassy for the
+glint, Mars/rocky strongest, Europa subtle cracks; gas giants/Venus/Titan
+none), faded out beyond ~10–45 body radii before it can alias.  Earth gets
+altitude/latitude mountain snow.  Airless bodies keep the existing dedicated
+crater model (`moon_height`/`moon_normal`).
 
 ---
 
 ## 3.3 Planet rings
 
-**Status:** 🟡 partial
+**Status:** 🟡 partial — **ring lighting landed 2026-07**
 
 ### Additions
 
-* self-shadowing
-* forward scattering
-* density waves
-* shepherd moon perturbations
-* particle size variance
+* self-shadowing ✅ — both directions: the planet's shadow cylinder darkens
+  the ring sector behind the globe (`ring.vert u_shadow_strength`, existed),
+  and NEW: the ring annulus stripes its shadow across the globe —
+  `phong.frag u_ring`/`u_ring_pole` (fed by the new `rings_query()` API)
+  casts the sun ray from each surface point through the ring plane and
+  attenuates direct light with a banded profile.  Verified on Saturn: broad
+  banded shadow across the northern hemisphere with the sun 24° below the
+  ring plane — the signature seasonal look.
+* forward scattering ✅ — backlit ring dust blazes (`ring.vert`: forward
+  phase lobe on view·sun, respecting the planet shadow).  Verified: Cassini
+  style bright ring annulus around the dark night-side globe.
+* density waves ⛔
+* shepherd moon perturbations ⛔
+* particle size variance ⛔
+
+---
+
+## 3.4 Body–body eclipse shadows
+
+**Status:** ✅ core (landed 2026-07)
+
+Analytic soft sphere shadows in `phong.frag` (`u_ecl[6]`/`u_sun_radius`):
+each drawn sphere tests its **family** occluders (parent, children, siblings
+— the only physically plausible eclipsers; gathered per frame in `render.c`,
+O(N) int compares) against the primary sun.  Coverage compares the
+occluder's angular radius vs the sun disc's vs their separation — a real
+penumbra ramp that caps at the disc-area ratio, so small moons cast soft
+annular-transit spots while a planet fully extinguishes a moon inside its
+umbra.  One test gives both directions: moon transit shadows striping the
+planet AND moons going dark in the planet's shadow.  Verified on a frozen
+3-moon rig (warmup_years=0 for exact authored geometry): sunward moon casts
+a ~92%-deep soft spot at the subsolar point (A/B pixel-diff confirmed),
+anti-sunward moon renders fully dark in the umbra, 90°-control moon stays
+half-lit.  Primary light only (a secondary-emitter eclipse is a vanishing
+corner case); lens-flare occlusion already agrees via the depth buffer.
 
 ---
 
@@ -848,7 +964,9 @@ covering most classes below; only metallic worlds and methane seas remain.
 
 * spiral ✅ (exponential disc + bulge + two log-spiral arms + FBM knots)
 * elliptical ✅ (steep-cored smooth glow, old warm population)
-* irregular ✅ (clumpy squashed FBM — LMC/SMC read as Magellanic Clouds)
+* irregular ✅ (torn clumpy cloud: ragged noise-warped outline, off-centre
+  warm stellar bar, pink HII complexes, dark dust patches — LMC/SMC read as
+  structured Magellanic Clouds close-up and from Earth, not cotton balls)
 * active galactic nuclei — *the AGN central engine already exists* (§1.4:
   raymarched hole + accretion disk + dust torus + relativistic jets); what
   remains here is embedding it in a galaxy host (the render path now exists).
@@ -857,7 +975,12 @@ covering most classes below; only metallic worlds and methane seas remain.
 
 * dust lanes ✅ (pure absorption riding the arms' inner edges, slightly below
   the midplane, and extinguishing embedded starlight — edge-on discs get the
-  dark stripe across the bulge, verified on the Sombrero)
+  dark stripe across the bulge, verified on the Sombrero. Plus a ragged
+  equatorial **Great Rift** sheet independent of arm phase: seen from inside,
+  the Milky Way band is split lengthwise by the dark lane, with star-cloud
+  mottling and a golden bulge glow toward Sagittarius. Dust extinction scales
+  with √density so the inside-veil dimming — which is artistic, emission-only
+  — cannot wash the rift out)
 * star density gradients ✅ (disc/bulge/arm population mix: warm bulge, cool
   blue arms, pink HII knots)
 * rotational shear ✅ (flat rotation curve, ω ∝ 1/r on `u_time`; noise is
@@ -1045,8 +1168,9 @@ consumed by at least one real system; what remains in each is expansion
 ## Phase B — Visual realism completion
 
 6. Relativistic optical effects 🟡 (aberration/Doppler/beaming done; global lensing a dead end)
-7. Filmic camera and HDR optics ✅
-8. Improved atmospheres
+7. Filmic camera and HDR optics ✅ (+ multi-scale bloom, true black point, lens flare 2026-07)
+8. Improved atmospheres 🟡 (physical Rayleigh+Mie single scattering landed 2026-07;
+   dynamic clouds / aurora / lightning remain)
 9. Stellar lifecycle system ✅
 
 ## Phase C — Universe dynamism

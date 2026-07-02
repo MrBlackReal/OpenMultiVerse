@@ -86,3 +86,4 @@ __pycache__/
 *.pyc
 
 CLAUDE.md
+docs/last_chat.txt

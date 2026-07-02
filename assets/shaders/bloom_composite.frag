@@ -13,7 +13,10 @@ in  vec2 v_uv;
 out vec4 frag_color;
 
 uniform sampler2D u_scene;
-uniform sampler2D u_bloom;
+uniform sampler2D u_bloom0;     /* 1/2-res blur — tight core glow              */
+uniform sampler2D u_bloom1;     /* 1/4-res blur — mid halo                     */
+uniform sampler2D u_bloom2;     /* 1/8-res blur — wide photographic skirt      */
+uniform vec3      u_bloom_w;    /* per-level weights, sum-normalised           */
 uniform float     u_intensity;
 uniform float     u_exposure;   /* linear exposure multiplier (tonemap on)     */
 uniform int       u_tonemap;    /* 0 = off (linear), 1 = ACES, 2 = Reinhard    */
@@ -63,7 +66,16 @@ void main() {
         scene = texture(u_scene, suv).rgb;
     }
 
-    vec3 bloom = texture(u_bloom, v_uv).rgb;
+    /* Multi-scale bloom: three blur octaves recombined.  The widest level is
+     * 1/8 res, so upsample it with a 4-tap tent to hide bilinear diamonds. */
+    vec2 texel2 = 1.0 / vec2(textureSize(u_bloom2, 0));
+    vec3 wide = ( texture(u_bloom2, v_uv + vec2( texel2.x,  texel2.y) * 0.5).rgb
+                + texture(u_bloom2, v_uv + vec2(-texel2.x,  texel2.y) * 0.5).rgb
+                + texture(u_bloom2, v_uv + vec2( texel2.x, -texel2.y) * 0.5).rgb
+                + texture(u_bloom2, v_uv + vec2(-texel2.x, -texel2.y) * 0.5).rgb ) * 0.25;
+    vec3 bloom = texture(u_bloom0, v_uv).rgb * u_bloom_w.x
+               + texture(u_bloom1, v_uv).rgb * u_bloom_w.y
+               + wide                        * u_bloom_w.z;
     vec3 hdr   = scene + bloom * u_intensity;
 
     vec3 col;
@@ -72,6 +84,10 @@ void main() {
     } else {
         hdr *= u_exposure;
         vec3 mapped = (u_tonemap == 2) ? tonemap_reinhard(hdr) : tonemap_aces(hdr);
+        /* Black point: space is black. Auto-exposure can lift a mostly-void
+         * scene ×3, turning bloom spill + veil glow into a grey floor; sink
+         * the darkest display-linear values back to true black. */
+        mapped = max(mapped - 0.002, 0.0);
         col = pow(clamp(mapped, 0.0, 1.0), vec3(1.0 / 2.2));  /* sRGB encode */
     }
 
