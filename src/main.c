@@ -52,6 +52,7 @@
 #include "lifecycle.h"
 #include "accretion.h"
 #include "cosmic_field.h"
+#include "radiance_field.h"
 #include "audio.h"
 #include "presets.h"
 #include "menu.h"
@@ -404,6 +405,8 @@ static void init_runtime_world(void) {
     physics_refresh_timestep_model();
     boot_log("Building cosmic density field");
     cosmic_field_rebuild();
+    boot_log("Building radiance field");
+    radiance_field_rebuild();
     warmup_universe();
     boot_log("Runtime world ready");
     loading_end();
@@ -571,6 +574,7 @@ static void app_quit(void) {
     menu_shutdown();
     loading_shutdown();
     ui_shutdown();
+    radiance_field_shutdown();
     cosmic_field_shutdown();
     shutdown_runtime_world();
     SDL_GL_DeleteContext(s_ctx);
@@ -1042,6 +1046,11 @@ int main(int argc, char **argv) {
             cam_set = (sscanf(argv[++a], "%lf,%lf,%lf,%f,%f",
                               &cam_pos[0], &cam_pos[1], &cam_pos[2],
                               &cam_yaw, &cam_pitch) == 5);
+        /* Stellar-clock rate (years of stellar evolution per real second) —
+         * normally a menu slider; exposed as a flag so lifecycle-driven events
+         * (aging, supernovae, accretion fading) are testable headless. */
+        else if (!strcmp(argv[a], "--stellar-rate") && a + 1 < argc)
+            g_stellar_years_per_sec = atof(argv[++a]);
     }
     if (shot_frames < 1) shot_frames = 1;
     if (headless) {
@@ -1061,6 +1070,8 @@ int main(int argc, char **argv) {
     supernova_reset();
     boot_log("Initializing cosmic field");
     cosmic_field_init();
+    boot_log("Initializing radiance field");
+    radiance_field_init();
     boot_log("Initializing UI");
     ui_init();
     sync_pause_menu_ui();
@@ -1089,6 +1100,21 @@ int main(int argc, char **argv) {
                 cs.body_count, cs.number_density, cs.mass_density,
                 cs.clumpiness, cs.continuous_fill, cs.nebulae_hit,
                 cosmic_field_class_name(cs.dominant));
+
+        /* Same for the radiance field: total/dominant incident flux at the
+         * camera, so lighting is verifiable without pixels (Sun @ 1 AU ≈ 1361). */
+        RadianceSample rs;
+        radiance_field_rebuild();
+        if (radiance_field_sample_camera(&rs))
+            fprintf(stdout,
+                    "[RadianceField] irr=%.4e W/m2 dom=%s dom_irr=%.4e "
+                    "L_dom=%.4e W n=%d\n",
+                    rs.irradiance,
+                    rs.dominant >= 0 ? g_bodies[rs.dominant].name : "supernova",
+                    rs.dom_irr,
+                    radiance_field_body_luminosity(rs.dominant), rs.n_sources);
+        else
+            fprintf(stdout, "[RadianceField] no emitters\n");
     }
 
     /* Timing */
@@ -1224,6 +1250,10 @@ int main(int argc, char **argv) {
          * change). Queried by the HUD and, later, continuous LOD. */
         cosmic_field_tick(dt);
 
+        /* Refresh emitter luminosities (throttled; they drift on the stellar
+         * clock). Queried by render.c body lighting and the HUD. */
+        radiance_field_tick(dt);
+
         /* Build matrices.
          * view_rot: rotation-only lookAt (origin as eye). Used for all distant
          *           geometry via vp_camrel = proj × view_rot.
@@ -1349,6 +1379,14 @@ int main(int argc, char **argv) {
             save_screenshot_ppm(shot_path);
             running = 0;
         }
+
+        /* Headless: SDL's offscreen driver makes SwapWindow a no-op, so
+         * nothing ever syncs the GPU — at thousands of fps the driver's
+         * command queue grows without bound until frames come back corrupted
+         * (fully black, NaN-like). One glFinish per frame bounds the queue;
+         * windowed mode doesn't need it (vsync/swap paces the pipeline). */
+        if (headless)
+            glFinish();
 
         SDL_GL_SwapWindow(s_win);
 

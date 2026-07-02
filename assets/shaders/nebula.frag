@@ -33,6 +33,8 @@ uniform vec3  u_cam_fwd;
 uniform float u_fov_tan;
 uniform float u_aspect;
 uniform vec2  u_screen;
+uniform float u_boost;       /* RadianceField illumination gain (1 = unlit) */
+uniform vec3  u_boost_col;   /* illuminating source tint (white = neutral)  */
 
 out vec4 frag_color;
 
@@ -198,6 +200,11 @@ void main() {
         accumA += a * (1.0 - accumA);
         if (accumA > 0.985) break;
     }
+
+    /* RadianceField illumination: brighten the emission (not the opacity)
+     * and pull the tint toward the illuminating source.  u_boost = 1 and
+     * u_boost_col = white → bit-identical to the unlit path. */
+    accumC *= u_boost * u_boost_col;
 
     accumA *= smoothstep(0.0, 0.02, accumA);
     if (accumA < 0.0008) discard;

@@ -104,24 +104,82 @@ This becomes the bridge between:
 
 Introduce a shared lighting model:
 
-### `RadianceField`
+### `RadianceField` 🟡 *(emitter field + dominant-light consumer landed)*
 
 A unified representation for emitted, absorbed, scattered, and shifted light.
 
+**Status:** first iteration implemented as `src/radiance_field.{c,h}` — every
+light emitter reduces to one record (body, luminosity in watts, chromaticity):
+thermal stars via Stefan-Boltzmann (L = L☉·(R/R☉)²·(T/T☉)⁴, T estimated from
+the display colour's blue−red balance, calibrated so Sol → L☉; verified
+1378 W/m² at 1 AU vs the real 1361) and black holes/AGN via accretion
+(L = η·Ṁ·c² when `accretion.c` is running, else the authored Eddington ratio;
+quiet disk-dressed holes floor at 1% Eddington so Gargantua lights its
+planets). `radiance_field_sample(pos)` returns total incident irradiance
+(W/m²) + the dominant source (direction/colour/flux). **First consumers:**
+`render.c` body + atmosphere lighting now uses the *dominant emitter* instead
+of walking to the parent-chain root star — so a binary companion, a nearer
+foreign sun, or an accreting hole lights a body when it genuinely wins there —
+plus a HUD readout (irradiance + dominant name) and a headless
+`[RadianceField]` stdout print. Emitter positions are read live from
+`g_bodies`; luminosities refresh on a throttle (they only drift on the stellar
+clock). Main-thread only, like `CosmicField`.
+
 ### Covers
 
-* star emission
-* atmospheric scattering
-* nebular glow
-* accretion disks
-* galaxy light distribution
-* relativistic color shifts
+* star emission ✅ (Stefan-Boltzmann from radius + colour-estimated T)
+* atmospheric scattering ⛔ (atm shader still local; field feeds its light dir)
+* nebular glow 🟡 (nebulae are now *receivers* — see below; not yet emitters)
+* accretion disks ✅ (accretion-powered luminosity incl. Eddington floor)
+* supernovae ✅ (transient emitters: flash/core/cloud intensities → ~1e36 W
+  peak, anchored at the detonation point, body = -1 in query results; the
+  field rebuilds every tick while an event runs so the decay lights smoothly)
+* galaxy light distribution ⛔ (needs the galaxy system, Layer 4.2)
+* relativistic color shifts ⛔ (post pass exists §1.2; not yet field-driven)
+
+### Nebulae as light receivers (landed — Layer 4.1 "dynamic energy injection")
+
+Each nebula samples the field at its centre per draw (`nebula.c`): incident
+flux above ~1e-3 W/m² brightens the emission log-compressed (capped ×3.5) and
+pulls the tint toward the source colour (`nebula.frag u_boost`/`u_boost_col`).
+Catalogue starlight at interstellar range is ~1e-7 W/m², so every existing
+scene renders bit-identically; an embedded star, an AGN, or a supernova going
+off nearby visibly lights the cloud up. Verified headless: two 10 M☉ stars
+embedded at Orion's centre raise the mean frame luminance +34% vs clean HEAD.
+`--stellar-rate R` (new CLI flag) drives the stellar clock headless so
+lifecycle-driven events (aging → supernova → remnant) are testable end-to-end.
 
 ### Benefits
 
 * avoids separate “special-case shaders” for each object class
 * makes lighting behavior consistent across scales
 * simplifies integration of HDR, bloom, and optics
+
+**Multi-light shading (landed):** `phong.frag`/`atm.frag` now take the field's
+**top two** emitters (`radiance_field_top()`), not just the dominant one: the
+secondary light gets its own soft terminator + dusk band, weighted by its
+incident flux relative to the primary (`u_light2`) and tinted by its
+chromaticity (`u_light2_col`) — so a planet between binary suns shows two lit
+hemispheres meeting in a double dusk instead of a false night side.  Ambient
+keys off "any sun up".  Secondary below 2% of primary is skipped (continuous
+fade, no pop); `u_light2 = 0` is bit-identical to the single-sun path.
+
+**Remaining for ✅:** spectral classification as the T source of truth (§1.1),
+nebular *emission* into the field (they only receive so far), per-shader
+adoption beyond `phong`/`atm`/`nebula` (glare brightness), and primary-light
+chromaticity (the primary sun is still art-directed warm-white to preserve the
+established look; only the secondary is tinted).
+
+> **Pre-existing bug found & FIXED during this work:** headless runs went
+> fully black (HUD included) after a few hundred frames in some scenes.
+> Root cause: SDL's offscreen driver makes `SDL_GL_SwapWindow` a no-op, so
+> nothing ever synced the GPU — at thousands of fps the driver command queue
+> grew without bound until frames came back corrupted. Diagnosed by noticing
+> that inserting any pipeline sync (frame readbacks, `glFinish`) made the same
+> runs perfectly stable. Fix: one `glFinish()` per frame in `--headless` mode
+> (`main.c`); windowed mode is untouched (vsync/swap paces the pipeline).
+> Headless fps is now honest (paced), so wall-clock-driven things — label
+> hysteresis, `--stellar-rate` — need fewer `--frames` than before.
 
 ---
 
@@ -823,8 +881,9 @@ covering most classes below; only metallic worlds and methane seas remain.
 3. Unified `CosmicField` abstraction ✅ (density/variance field landed — built ahead of #2)
 2. Continuous LOD system 🟡 (per-body crossfades + CosmicField-driven windows landed;
    cluster/hybrid aggregation remains for dense galaxy presets)
-4. Shared `RadianceField` abstraction ← next foundation step
-5. Universe field graph
+4. Shared `RadianceField` abstraction 🟡 (emitter field + dominant-light render
+   consumer landed; nebular/galaxy coverage and multi-light shading remain)
+5. Universe field graph ← next foundation step
 
 *(Note: #3 was built before #2 — continuous LOD needs a density/variance field, which #3 provides.)*
 

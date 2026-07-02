@@ -59,6 +59,7 @@
 #include "body.h"
 #include "camera.h"
 #include "cosmic_field.h"
+#include "radiance_field.h"
 #include "starfield.h"
 #include "nebula.h"
 #include "trails.h"
@@ -92,6 +93,9 @@ static GLint  s_sp_cam_right   = -1;
 static GLint  s_sp_cam_up      = -1;
 static GLint  s_sp_oc          = -1;   /* cam − centre, double-computed float */
 static GLint  s_sp_sun_rel     = -1;   /* star − centre, for Phong lighting   */
+static GLint  s_sp_sun2_rel    = -1;   /* secondary light − centre            */
+static GLint  s_sp_light2      = -1;   /* secondary strength vs primary, 0..1 */
+static GLint  s_sp_light2_col  = -1;   /* secondary chromaticity              */
 static GLint  s_sp_cam_fwd     = -1;
 static GLint  s_sp_fov_tan     = -1;
 static GLint  s_sp_aspect      = -1;
@@ -176,6 +180,9 @@ static GLint  s_at_cam_fwd   = -1;
 static GLint  s_at_oc        = -1;
 static GLint  s_at_planet_r  = -1;
 static GLint  s_at_sun_rel   = -1;
+static GLint  s_at_sun2_rel  = -1;
+static GLint  s_at_light2    = -1;
+static GLint  s_at_light2_col = -1;
 static GLint  s_at_color     = -1;
 static GLint  s_at_intensity = -1;
 static GLint  s_at_aspect    = -1;
@@ -358,6 +365,53 @@ static void lod_update_density_scale(void)
     if (f < 1.0) f = 1.0;
     if (f > (double)g_settings.lod_density_max) f = (double)g_settings.lod_density_max;
     s_lod_scale = (float)f;
+}
+
+/* ── body lighting via the RadianceField (Phase A #4) ────────────────────────
+ * The two brightest light sources at a body, as (emitter − body) in AU floats
+ * for the phong/atm u_sun_rel/u_sun2_rel uniforms.  The RadianceField answers
+ * "which emitters' flux wins here" — so a binary companion, a nearer foreign
+ * sun, or an accreting black hole lights the body when it genuinely outshines
+ * the parent chain's root.  w2 is the secondary's flux relative to the primary
+ * (0 = no meaningful secondary; shaders are bit-identical to single-sun then),
+ * col2 its chromaticity.  Falls back to the root-star walk when the field has
+ * no emitters (starless universe). */
+static void body_lights(int i, const Body *b,
+                        float sr1[3], float sr2[3], float *w2, float col2[3])
+{
+    RadianceContrib top[2];
+    int n = radiance_field_top(b->pos, i, 2, top);
+
+    if (n >= 1) {
+        sr1[0] = (float)((top[0].pos[0] - b->pos[0]) * RS);
+        sr1[1] = (float)((top[0].pos[1] - b->pos[1]) * RS);
+        sr1[2] = (float)((top[0].pos[2] - b->pos[2]) * RS);
+    } else {
+        int l1 = i;
+        while (g_bodies[l1].parent >= 0) l1 = g_bodies[l1].parent;
+        sr1[0] = (float)((g_bodies[l1].pos[0] - b->pos[0]) * RS);
+        sr1[1] = (float)((g_bodies[l1].pos[1] - b->pos[1]) * RS);
+        sr1[2] = (float)((g_bodies[l1].pos[2] - b->pos[2]) * RS);
+    }
+
+    *w2 = 0.0f;
+    sr2[0] = sr1[0]; sr2[1] = sr1[1]; sr2[2] = sr1[2];
+    col2[0] = col2[1] = col2[2] = 1.0f;
+    if (n >= 2 && top[0].irr > 0.0) {
+        /* Below 2% of the primary a second terminator is invisible — skip the
+         * uniform work.  The ratio fades continuously above that, so there is
+         * no pop at the threshold. */
+        double r = top[1].irr / top[0].irr;
+        if (r >= 0.02) {
+            *w2 = (float)(r > 1.0 ? 1.0 : r);
+            sr2[0] = (float)((top[1].pos[0] - b->pos[0]) * RS);
+            sr2[1] = (float)((top[1].pos[1] - b->pos[1]) * RS);
+            sr2[2] = (float)((top[1].pos[2] - b->pos[2]) * RS);
+            col2[0] = top[1].col[0];
+            col2[1] = top[1].col[1];
+            col2[2] = top[1].col[2];
+        }
+    }
 }
 
 /* ------------------------------------------------------------------ build preview */
@@ -915,6 +969,9 @@ void render_init(void) {
     s_sp_sun_world = glGetUniformLocation(s_sphere_shader, "u_sun_pos_world");
     s_sp_oc        = glGetUniformLocation(s_sphere_shader, "u_oc");
     s_sp_sun_rel   = glGetUniformLocation(s_sphere_shader, "u_sun_rel");
+    s_sp_sun2_rel  = glGetUniformLocation(s_sphere_shader, "u_sun2_rel");
+    s_sp_light2    = glGetUniformLocation(s_sphere_shader, "u_light2");
+    s_sp_light2_col = glGetUniformLocation(s_sphere_shader, "u_light2_col");
     s_sp_cam_fwd   = glGetUniformLocation(s_sphere_shader, "u_cam_fwd");
     s_sp_fov_tan   = glGetUniformLocation(s_sphere_shader, "u_fov_tan");
     s_sp_aspect    = glGetUniformLocation(s_sphere_shader, "u_aspect");
@@ -1134,6 +1191,9 @@ void render_init(void) {
         s_at_oc        = glGetUniformLocation(s_atm_shader, "u_oc");
         s_at_planet_r  = glGetUniformLocation(s_atm_shader, "u_planet_radius");
         s_at_sun_rel   = glGetUniformLocation(s_atm_shader, "u_sun_rel");
+        s_at_sun2_rel  = glGetUniformLocation(s_atm_shader, "u_sun2_rel");
+        s_at_light2    = glGetUniformLocation(s_atm_shader, "u_light2");
+        s_at_light2_col = glGetUniformLocation(s_atm_shader, "u_light2_col");
         s_at_color     = glGetUniformLocation(s_atm_shader, "u_atm_color");
         s_at_intensity = glGetUniformLocation(s_atm_shader, "u_atm_intensity");
         s_at_aspect    = glGetUniformLocation(s_atm_shader, "u_aspect");
@@ -1698,18 +1758,21 @@ void render_frame(const float view[16], const float proj[16],
         float oc_y = (float)((cam_my - b->pos[1]) * RS);
         float oc_z = (float)((cam_mz - b->pos[2]) * RS);
 
-        /* Lighting: find the root star of this body (its owning stellar system).
-         * Walk the parent chain so Proxima b is lit by Proxima Centauri, not Sol. */
-        int ls = i;
-        while (g_bodies[ls].parent >= 0) ls = g_bodies[ls].parent;
-        float sr_x = (float)((g_bodies[ls].pos[0] - b->pos[0]) * RS);
-        float sr_y = (float)((g_bodies[ls].pos[1] - b->pos[1]) * RS);
-        float sr_z = (float)((g_bodies[ls].pos[2] - b->pos[2]) * RS);
+        /* Lighting: the RadianceField's two brightest emitters at this body —
+         * the sources whose incident flux actually wins here (so a binary
+         * companion or an active black hole's disk lights correctly, not just
+         * the parent chain's root).  Falls back to the root-star walk if the
+         * field is empty (e.g. a universe with no stars). */
+        float sr1[3], sr2[3], w2, col2[3];
+        body_lights(i, b, sr1, sr2, &w2, col2);
 
         glUniform3f(s_sp_center,  -oc_x, -oc_y, -oc_z);
         glUniform1f(s_sp_radius,   dr);
         glUniform3f(s_sp_oc,       oc_x, oc_y, oc_z);
-        glUniform3f(s_sp_sun_rel,  sr_x, sr_y, sr_z);
+        glUniform3f(s_sp_sun_rel,  sr1[0], sr1[1], sr1[2]);
+        glUniform3f(s_sp_sun2_rel, sr2[0], sr2[1], sr2[2]);
+        glUniform1f(s_sp_light2,   w2);
+        glUniform3f(s_sp_light2_col, col2[0], col2[1], col2[2]);
         glUniform3f(s_sp_color,    b->col[0], b->col[1], b->col[2]);
         glUniform1f(s_sp_emission, b->is_star ? 1.0f : 0.0f);
         glUniform1f(s_sp_ambient,  b->is_star ? 1.0f : 0.05f);
@@ -1860,14 +1923,10 @@ void render_frame(const float view[16], const float proj[16],
             float oc_x = (float)((cam_mx - b->pos[0]) * RS);
             float oc_y = (float)((cam_my - b->pos[1]) * RS);
             float oc_z = (float)((cam_mz - b->pos[2]) * RS);
-            float sr_x, sr_y, sr_z;
-            {
-                int ls = i;
-                while (g_bodies[ls].parent >= 0) ls = g_bodies[ls].parent;
-                sr_x = (float)((g_bodies[ls].pos[0] - b->pos[0]) * RS);
-                sr_y = (float)((g_bodies[ls].pos[1] - b->pos[1]) * RS);
-                sr_z = (float)((g_bodies[ls].pos[2] - b->pos[2]) * RS);
-            }
+            /* Same two-light RadianceField lighting as the sphere pass, so
+             * the atmosphere's day side agrees with the surface's. */
+            float sr1[3], sr2[3], w2, col2[3];
+            body_lights(i, b, sr1, sr2, &w2, col2);
 
             float planet_r = info[i].dr;
             float atm_r    = planet_r * final_scale;
@@ -1876,7 +1935,10 @@ void render_frame(const float view[16], const float proj[16],
             glUniform1f(s_at_radius,    atm_r);
             glUniform1f(s_at_planet_r,  planet_r);
             glUniform3f(s_at_oc,        oc_x, oc_y, oc_z);
-            glUniform3f(s_at_sun_rel,   sr_x, sr_y, sr_z);
+            glUniform3f(s_at_sun_rel,   sr1[0], sr1[1], sr1[2]);
+            glUniform3f(s_at_sun2_rel,  sr2[0], sr2[1], sr2[2]);
+            glUniform1f(s_at_light2,    w2);
+            glUniform3f(s_at_light2_col, col2[0], col2[1], col2[2]);
             glUniform3f(s_at_color,     final_color[0], final_color[1], final_color[2]);
             glUniform1f(s_at_intensity, final_intensity);
             glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);

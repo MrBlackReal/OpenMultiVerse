@@ -544,6 +544,12 @@ Responsibilities:
 - Project labels to screen space and avoid overlaps.
 - Render billboard quads with `label.vert/frag`.
 
+The label feed is the camera's active set (see §8.1) **plus a pinned nearest
+set**: the nearest `g_settings.label_pin_systems` star systems and
+`label_pin_planets` planets are always labelled — pinned systems even outside
+the active region, pinned planets past `label_max_dist_au` — so the closest
+names never vanish while flying between systems (Menu → Settings → Labels).
+
 ### `starfield.c` / `starfield.h`
 
 Catalog-backed skybox starfield.
@@ -806,6 +812,37 @@ fields. Query (`cosmic_field_sample`) walks the sample sphere's cell box (linear
 fallback for degenerate huge radii). **Main-thread only** — never call inside the
 physics OpenMP warmup. Verified by a live HUD line (`ui.c`) and a headless
 `[CosmicField] …` stdout print (`main.c`, `--headless`).
+
+### `radiance_field.c` / `radiance_field.h`
+
+The unified **RadianceField** (roadmap Phase A #4): one queryable
+representation of emitted light. Every emitter — thermal stars
+(Stefan-Boltzmann; T_eff estimated from the display colour's blue−red balance,
+calibrated so Sol → L☉), black holes/AGN (accretion-powered: η·Ṁ·c² from
+`accretion.c`, else the authored Eddington ratio, floored at 1% Eddington for
+quiet disk-dressed holes), and **transient supernovae** (harvested from
+`supernova_render_events()`, ~1e36 W peak, anchored at the detonation point,
+`body = -1` in query results) — reduces to a luminosity in watts, a position
+and a chromaticity. `radiance_field_sample(pos_m, exclude, out)` answers total
+incident irradiance (W/m²; Sun @ 1 AU ≈ 1361) plus the dominant source;
+`radiance_field_dominant()` is the cheap argmax used per lit body;
+`radiance_field_top()` returns the k brightest contributors (with position +
+colour, so body-less transients work identically).
+
+Consumers: `render.c` body/atmosphere lighting (`body_lights()` — the field's
+**top two** emitters replace the old parent-chain root-star walk, so binaries,
+foreign suns and accreting holes light bodies correctly; `phong.frag`/`atm.frag`
+shade a weighted, chromaticity-tinted secondary light via
+`u_sun2_rel`/`u_light2`/`u_light2_col`, bit-identical to single-sun when the
+weight is 0); `nebula.c` illumination (each nebula samples the field at its
+centre — strong incident flux brightens the glow log-compressed, capped ×3.5,
+and tints it toward the source: `nebula.frag u_boost`/`u_boost_col`; ordinary
+catalogue starlight is orders of magnitude below the 1e-3 W/m² threshold, so
+existing scenes are untouched); the HUD field line; and a headless
+`[RadianceField]` stdout print. Emitter *positions* are read live from
+`g_bodies` each query; membership/luminosity is cached (rebuilt throttled —
+every tick while a supernova is active, since its flash decays in real time).
+**Main-thread only**, same contract as `cosmic_field`.
 
 ### `menu.c` / `menu.h`
 
@@ -1290,7 +1327,8 @@ Small-body rendering (continuous LOD):
 - body center/radius/color/emission
 - rotation/obliquity
 - planet type
-- nearest sun position
+- top-two light sources from the RadianceField (primary position + secondary
+  position/weight/chromaticity; see `radiance_field.c`)
 - star heat
 - up to `COLLISION_MAX_SPOTS` impact/scar uniforms
 

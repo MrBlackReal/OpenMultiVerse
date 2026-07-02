@@ -62,7 +62,17 @@
 
 /* Hard far cutoff: non-star labels are suppressed beyond g_settings.label_max_dist_au
  * (AU), adjustable in the menu.  Stars are always shown regardless of distance
- * (they are visible at any range within the camera's active region). */
+ * (they are visible at any range within the camera's active region).
+ *
+ * Pinned nearest set: the nearest g_settings.label_pin_planets planets and
+ * g_settings.label_pin_systems star systems are additionally fed into the
+ * cache every frame and bypass both gates above — pinned planets ignore
+ * label_max_dist_au, and pinned systems are labelled even when their system
+ * is outside the camera's active region — so the closest names never vanish
+ * while flying between systems. */
+
+/* Upper bound on each pinned count (menu sliders stay within this). */
+#define LABEL_PIN_MAX 16
 
 /* Close cutoff in body radii: suppresses the label when the camera is too close
  * to the body disc.  Stars use a larger threshold because glare dominates earlier. */
@@ -172,6 +182,49 @@ static void build_label_texture(int slot, int b)
     if (!surf) { TTF_SetFontStyle(s_font, TTF_STYLE_NORMAL); return; }
     s_tex[slot] = surface_to_texture(surf, &s_tex_w[slot], &s_tex_h[slot]);
     TTF_SetFontStyle(s_font, TTF_STYLE_NORMAL);
+}
+
+/*
+ * nearest_pinned — top-k selection of the living bodies nearest the camera.
+ *
+ * want_systems = 1 → root stars only (star-system anchors, incl. black holes);
+ * want_systems = 0 → planets only (non-star bodies whose parent is a star, or
+ * parentless rogues — same classification as the priority tiers below).
+ * Writes up to k body indices into out[], nearest first; returns the count.
+ * One O(N) pass with an insertion top-k; k is bounded by LABEL_PIN_MAX.
+ */
+static int nearest_pinned(const double cam_m[3], int want_systems, int k, int *out)
+{
+    if (k <= 0) return 0;
+    if (k > LABEL_PIN_MAX) k = LABEL_PIN_MAX;
+    double best_d2[LABEL_PIN_MAX];
+    int n = 0;
+    for (int b = 0; b < g_nbodies; b++) {
+        const Body *bd = &g_bodies[b];
+        if (!bd->alive) continue;
+        if (want_systems) {
+            if (!bd->is_star || bd->parent >= 0) continue;
+        } else {
+            if (bd->is_star) continue;
+            if (bd->parent >= 0 && !g_bodies[bd->parent].is_star) continue; /* moon */
+        }
+        double dx = bd->pos[0] - cam_m[0];
+        double dy = bd->pos[1] - cam_m[1];
+        double dz = bd->pos[2] - cam_m[2];
+        double d2 = dx*dx + dy*dy + dz*dz;
+        int i;
+        if (n < k) i = n++;
+        else if (d2 >= best_d2[k-1]) continue;
+        else i = k - 1;
+        while (i > 0 && best_d2[i-1] > d2) {
+            best_d2[i] = best_d2[i-1];
+            out[i]     = out[i-1];
+            i--;
+        }
+        best_d2[i] = d2;
+        out[i]     = b;
+    }
+    return n;
 }
 
 /* Cache slot currently holding body `b`, or -1 if none.  Linear scan over the
@@ -291,10 +344,11 @@ void labels_render(const float view[16], const float proj[16],
     float half_fov_tan = tanf(FOV * 0.5f * (float)(PI / 180.0));
 
     /* ---- Step 0: refresh the camera-following slot cache ----
-     * Ask physics which bodies are in systems near the camera, then ensure each
-     * holds a cache slot (building its name texture on first use).  Slots whose
-     * body has left the active region are evicted to make room.  Everything
-     * below is indexed by cache slot, with s_slot_body[slot] giving the body. */
+     * Ask physics which bodies are in systems near the camera, add the pinned
+     * nearest planets/systems, then ensure each holds a cache slot (building
+     * its name texture on first use).  Slots whose body has left the feed set
+     * are evicted to make room.  Everything below is indexed by cache slot,
+     * with s_slot_body[slot] giving the body. */
     int active[MAX_BODIES];
     double cam_m[3] = { (double)g_cam.pos[0] * AU,
                         (double)g_cam.pos[1] * AU,
@@ -303,23 +357,59 @@ void labels_render(const float view[16], const float proj[16],
                                          g_settings.active_radius_ly * LY,
                                          active, MAX_BODIES);
 
-    /* slot_needed[s] = slot s holds a body in this frame's active set. */
-    int slot_needed[MAX_BODIES];
-    memset(slot_needed, 0, sizeof(slot_needed));
+    /* Pinned nearest set: always label the nearest M star systems and N
+     * planets, regardless of the active region / far cutoff (see top note). */
+    int pinned[2 * LABEL_PIN_MAX];
+    int n_pinned = nearest_pinned(cam_m, 1, g_settings.label_pin_systems, pinned);
+    n_pinned += nearest_pinned(cam_m, 0, g_settings.label_pin_planets,
+                               pinned + n_pinned);
 
-    /* Active bodies without a slot yet; assigned to free/evictable slots below. */
+    /* Feed list for the slot cache: pinned bodies first (so they can never be
+     * squeezed out by a full active set), then the active bodies not already
+     * pinned, truncated at MAX_BODIES (active is ordered nearest-system-first,
+     * so truncation drops the farthest).  feed_pinned[] marks pinned entries. */
+    int feed[MAX_BODIES];
+    int feed_pinned[MAX_BODIES];
+    int n_feed = 0;
+    for (int p = 0; p < n_pinned; p++) {
+        feed_pinned[n_feed] = 1;
+        feed[n_feed++] = pinned[p];
+    }
+    for (int a = 0; a < n_active && n_feed < MAX_BODIES; a++) {
+        int b = active[a], dup = 0;
+        for (int q = 0; q < n_pinned; q++)
+            if (pinned[q] == b) { dup = 1; break; }
+        if (dup) continue;
+        feed_pinned[n_feed] = 0;
+        feed[n_feed++] = b;
+    }
+
+    /* slot_needed[s] = slot s holds a body in this frame's feed set;
+     * slot_pinned[s] = that body is pinned (bypasses the far cutoff below). */
+    int slot_needed[MAX_BODIES];
+    int slot_pinned[MAX_BODIES];
+    memset(slot_needed, 0, sizeof(slot_needed));
+    memset(slot_pinned, 0, sizeof(slot_pinned));
+
+    /* Feed bodies without a slot yet; assigned to free/evictable slots below. */
     int pending[MAX_BODIES];
+    int pending_pinned[MAX_BODIES];
     int n_pending = 0;
-    for (int a = 0; a < n_active; a++) {
-        int b = active[a];
+    for (int a = 0; a < n_feed; a++) {
+        int b = feed[a];
         int slot = slot_of_body(b);
-        if (slot >= 0) slot_needed[slot] = 1;
-        else           pending[n_pending++] = b;
+        if (slot >= 0) {
+            slot_needed[slot] = 1;
+            slot_pinned[slot] = feed_pinned[a];
+        } else {
+            pending_pinned[n_pending] = feed_pinned[a];
+            pending[n_pending++]      = b;
+        }
     }
 
     /* Assign each pending body a slot: prefer an empty slot, else evict one
-     * whose occupant is not in this frame's active set.  Room is guaranteed:
-     * n_active <= MAX_BODIES, so (needed + pending) <= MAX_BODIES. */
+     * whose occupant is not in this frame's feed set.  Room is guaranteed:
+     * n_feed <= MAX_BODIES, so (needed + pending) <= MAX_BODIES. */
     {
         int scan = 0;
         for (int p = 0; p < n_pending; p++) {
@@ -331,6 +421,7 @@ void labels_render(const float view[16], const float proj[16],
             s_slot_body[slot] = pending[p];
             build_label_texture(slot, pending[p]);
             slot_needed[slot] = 1;
+            slot_pinned[slot] = pending_pinned[p];
         }
     }
 
@@ -346,8 +437,10 @@ void labels_render(const float view[16], const float proj[16],
         int b = s_slot_body[s];
         if (b < 0 || !g_bodies[b].alive) continue;
         if (!s_tex[s]) continue;
-        /* Far cutoff: planet/moon labels are only useful in their local system */
-        if (!g_bodies[b].is_star && info[b].dcam > g_settings.label_max_dist_au) continue;
+        /* Far cutoff: planet/moon labels are only useful in their local system
+         * — except pinned nearest planets, which stay labelled at any range. */
+        if (!g_bodies[b].is_star && !slot_pinned[s] &&
+            info[b].dcam > g_settings.label_max_dist_au) continue;
 
         /* Close cutoff: hide label when camera is inside the body's glow region */
         {

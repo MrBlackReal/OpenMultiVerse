@@ -47,6 +47,10 @@ typedef struct {
     float  label_max_dist_au;  /* planet/moon labels hidden beyond this (AU); */
                                /* stars ignore it (shown at any range in the  */
                                /* camera's active region)                     */
+    int    label_pin_planets;  /* nearest N planets always labelled,          */
+                               /* bypassing label_max_dist_au (0 = off)       */
+    int    label_pin_systems;  /* nearest M star systems always labelled,     */
+                               /* even outside the active region (0 = off)    */
 
     /* ---- starfield ---------------------------------------------------- */
     int    num_stars;          /* procedural skybox count (apply = regen)     */

@@ -43,6 +43,7 @@
 #include "inspect.h"
 #include "body.h"
 #include "cosmic_field.h"
+#include "radiance_field.h"
 #include "gl_utils.h"
 #include "ui_theme.h"
 #include <math.h>
@@ -387,16 +388,23 @@ static void nearest_body_distance_string(char *buf, size_t n)
 /*
  * cosmic_field_status_string — format the local density-field sample at the
  * camera for the HUD (roadmap Phase A #3): local body density, clumpiness, and
- * dominant content class. Updates live as you fly between dense systems and the
- * sparse interstellar medium.
+ * dominant content class, plus the RadianceField's incident flux and dominant
+ * light source (Phase A #4). Updates live as you fly between dense systems and
+ * the sparse interstellar medium.
  */
 static void cosmic_field_status_string(char *buf, size_t n)
 {
     CosmicSample s;
     cosmic_field_sample_camera(&s);
-    snprintf(buf, n, "rho %.2e/ly3  clump %.2f  %s",
-             s.number_density, s.clumpiness,
-             cosmic_field_class_name(s.dominant));
+    int len = snprintf(buf, n, "rho %.2e/ly3  clump %.2f  %s",
+                       s.number_density, s.clumpiness,
+                       cosmic_field_class_name(s.dominant));
+
+    RadianceSample r;
+    if (len >= 0 && (size_t)len < n && radiance_field_sample_camera(&r))
+        snprintf(buf + len, n - (size_t)len, "  |  %.2e W/m2 < %s",
+                 r.irradiance,
+                 r.dominant >= 0 ? g_bodies[r.dominant].name : "supernova");
 }
 
 /* ── quad drawing ─────────────────────────────────────────────────────────── */
@@ -978,7 +986,7 @@ void ui_render(void) {
     char nearest_str[64];
     nearest_body_distance_string(nearest_str, sizeof(nearest_str));
 
-    char field_str[64];
+    char field_str[128];
     cosmic_field_status_string(field_str, sizeof(field_str));
 
     SDL_Color white = {255, 255, 255, 220};

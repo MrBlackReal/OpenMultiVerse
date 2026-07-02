@@ -36,6 +36,8 @@ void settings_reset(void)
     g_settings.near_dot_dist_ly       = 3.0f;
 
     g_settings.label_max_dist_au = 55.0f;
+    g_settings.label_pin_planets = 3;
+    g_settings.label_pin_systems = 3;
 
     g_settings.num_stars = 4000;
 
@@ -130,6 +132,12 @@ void settings_load(void)
     if (g_settings.near_dot_dist_ly < 0.1f) g_settings.near_dot_dist_ly = 0.1f;
 
     g_settings.label_max_dist_au = (float)json_num(json_get(root, "label_max_dist_au"), g_settings.label_max_dist_au);
+    g_settings.label_pin_planets = (int)json_num(json_get(root, "label_pin_planets"), g_settings.label_pin_planets);
+    g_settings.label_pin_systems = (int)json_num(json_get(root, "label_pin_systems"), g_settings.label_pin_systems);
+    if (g_settings.label_pin_planets < 0)  g_settings.label_pin_planets = 0;
+    if (g_settings.label_pin_planets > 16) g_settings.label_pin_planets = 16;
+    if (g_settings.label_pin_systems < 0)  g_settings.label_pin_systems = 0;
+    if (g_settings.label_pin_systems > 16) g_settings.label_pin_systems = 16;
 
     g_settings.num_stars = (int)json_num(json_get(root, "num_stars"), g_settings.num_stars);
 
@@ -214,7 +222,9 @@ int settings_save(void)
             (double)g_settings.dot_hide_px, (double)g_settings.dot_excl_px);
     fprintf(f, "  \"near_dot_dist_ly\": %.6g,\n\n", (double)g_settings.near_dot_dist_ly);
 
-    fprintf(f, "  \"label_max_dist_au\": %.6g,\n\n", (double)g_settings.label_max_dist_au);
+    fprintf(f, "  \"label_max_dist_au\": %.6g,\n", (double)g_settings.label_max_dist_au);
+    fprintf(f, "  \"label_pin_planets\": %d, \"label_pin_systems\": %d,\n\n",
+            g_settings.label_pin_planets, g_settings.label_pin_systems);
 
     fprintf(f, "  \"num_stars\": %d,\n\n", g_settings.num_stars);
 

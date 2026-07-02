@@ -35,6 +35,9 @@ uniform vec3  u_center;
 uniform float u_radius;
 uniform vec3  u_oc;
 uniform vec3  u_sun_rel;
+uniform vec3  u_sun2_rel;     /* secondary light − centre (RadianceField #2) */
+uniform float u_light2;       /* secondary strength relative to primary, 0..1 */
+uniform vec3  u_light2_col;   /* secondary chromaticity (max component 1)     */
 uniform vec3  u_cam_right;
 uniform vec3  u_cam_up;
 uniform vec3  u_cam_fwd;
@@ -1008,11 +1011,32 @@ void main() {
     vec3  sun_col = mix(vec3(1.00, 0.97, 0.92),        /* warm-white sunlight */
                         vec3(1.00, 0.58, 0.34),        /* dusk reddening      */
                         dusk * 0.55);
+
+    /* Secondary light (RadianceField top-2: binary companion, foreign sun,
+     * accreting hole): its own soft terminator + dusk band, weighted by its
+     * incident flux relative to the primary and tinted by its chromaticity.
+     * u_light2 = 0 → bit-identical to the single-sun path. */
+    float day2      = 0.0;
+    vec3  sun2_term = vec3(0.0);
+    if (u_light2 > 0.0) {
+        vec3  L2    = normalize(u_sun2_rel - hit_rel);
+        float ndl2  = dot(shade_N, L2);
+        day2        = smoothstep(-0.12, 0.22, ndl2);
+        float dusk2 = day2 * (1.0 - day2) * 2.0;
+        sun2_term   = u_light2_col * mix(vec3(1.00, 0.97, 0.92),
+                                         vec3(1.00, 0.58, 0.34),
+                                         dusk2 * 0.55)
+                    * (day2 * u_light2);
+    }
+
+    /* Ambient keys off "is any sun up here", so a hemisphere lit only by the
+     * secondary doesn't keep the cool night ambient under direct light. */
+    float lit_any = max(day, day2 * u_light2);
     vec3  amb_col = mix(vec3(0.30, 0.38, 0.56),        /* cool night ambient  */
                         vec3(0.88, 0.90, 0.94),        /* neutral day ambient */
-                        day) * u_ambient;
+                        lit_any) * u_ambient;
 
-    vec3 lighting = amb_col + sun_col * ((1.0 - u_ambient) * day);
+    vec3 lighting = amb_col + (sun_col * day + sun2_term) * (1.0 - u_ambient);
     vec3 col_out  = surface * lighting + lava_emit;
 
     /* Tidal shredding: matter torn off heats up, so add a hot incandescent glow,

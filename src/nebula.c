@@ -28,6 +28,7 @@
 #include "nebula.h"
 #include "gl_utils.h"
 #include "common.h"
+#include "radiance_field.h"
 #include <stdio.h>
 #include <math.h>
 #include <stddef.h>
@@ -100,6 +101,7 @@ static GLuint s_shader = 0, s_vao = 0, s_vbo = 0, s_ebo = 0;
 static GLint  s_u_vp, s_u_center, s_u_radius, s_u_right, s_u_up, s_u_fwd;
 static GLint  s_u_oc, s_u_color, s_u_density, s_u_seed, s_u_bill, s_u_fullscreen;
 static GLint  s_u_fov_tan, s_u_aspect, s_u_screen, s_u_steps, s_u_shape;
+static GLint  s_u_boost, s_u_boost_col;
 static int    s_enabled = 1;
 
 /* J2000 equatorial RA/Dec -> ecliptic GL unit vector (matches starfield.c). */
@@ -143,6 +145,8 @@ void nebula_init(void)
     s_u_screen     = glGetUniformLocation(s_shader, "u_screen");
     s_u_steps      = glGetUniformLocation(s_shader, "u_steps");
     s_u_shape      = glGetUniformLocation(s_shader, "u_shape");
+    s_u_boost      = glGetUniformLocation(s_shader, "u_boost");
+    s_u_boost_col  = glGetUniformLocation(s_shader, "u_boost_col");
 
     const double arcmin = (M_PI / 180.0) / 60.0;
     for (int i = 0; i < NEBULA_COUNT; i++) {
@@ -257,6 +261,36 @@ void nebula_render(const float vp_camrel[16],
         glUniform3f (s_u_oc, -center[0], -center[1], -center[2]);
         glUniform3fv(s_u_color, 1, s_neb[i].col);
         glUniform1f (s_u_seed, s_neb[i].seed);
+
+        /* RadianceField illumination (roadmap 4.1 "dynamic energy injection"):
+         * the nebula is a light *receiver* — a strong emitter at/near it (an
+         * embedded star flown in, an AGN, above all a supernova going off
+         * inside it) brightens the glow and pulls the tint toward the source.
+         * The baseline authored look is the floor: catalogue starlight at
+         * interstellar distance is ~1e-7 W/m², far below IRR_REF, so boost
+         * stays 1.0 and every existing scene is untouched. */
+        {
+            const double IRR_REF   = 1e-3;   /* W/m² where brightening starts */
+            const float  BOOST_MAX = 3.5f;
+            float boost = 1.0f, bcol[3] = { 1.0f, 1.0f, 1.0f };
+            RadianceContrib top[1];
+            double p_m[3] = { s_neb[i].pos[0] * AU,
+                              s_neb[i].pos[1] * AU,
+                              s_neb[i].pos[2] * AU };
+            if (radiance_field_top(p_m, -1, 1, top) >= 1 && top[0].irr > 0.0) {
+                boost = 1.0f + 1.2f * (float)log10(1.0 + top[0].irr / IRR_REF);
+                if (boost > BOOST_MAX) boost = BOOST_MAX;
+                float t = boost - 1.0f;
+                if (t > 1.0f) t = 1.0f;
+                t *= 0.6f;   /* partial tint: keep the nebula's own species colour */
+                bcol[0] = 1.0f + (top[0].col[0] - 1.0f) * t;
+                bcol[1] = 1.0f + (top[0].col[1] - 1.0f) * t;
+                bcol[2] = 1.0f + (top[0].col[2] - 1.0f) * t;
+            }
+            glUniform1f (s_u_boost, boost);
+            glUniform3fv(s_u_boost_col, 1, bcol);
+        }
+
         glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
     }
 

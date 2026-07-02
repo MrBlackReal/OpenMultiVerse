@@ -238,10 +238,10 @@ static void menu_render_navigate(void)
         return;
     }
 
-    igBeginChild_Str("##results", (ImVec2_c){ 0.0f, 0.0f },
-                     ImGuiChildFlags_Borders, 0);
+    igBeginChild_Str("##results", (ImVec2_c){ 0.0f, 0.0f }, ImGuiChildFlags_Borders, 0);
     const int MAX_RESULTS = 300;
     int shown = 0, capped = 0;
+
     for (int i = 0; i < g_nbodies; i++) {
         if (!g_bodies[i].alive) continue;
         if (!name_matches(g_bodies[i].name, s_query)) continue;
@@ -250,16 +250,19 @@ static void menu_render_navigate(void)
         /* "##tp%d" keeps each Selectable's ID unique (names can repeat, e.g.
          * many planets named "b"); only the text before "##" is shown. */
         char label[80];
-        snprintf(label, sizeof(label), "%s %s##tp%d",
-                 g_bodies[i].is_star ? "*" : " ", g_bodies[i].name, i);
+        snprintf(label, sizeof(label), "%s %s##tp%d", (g_bodies[i].is_star ? "*" : " "), g_bodies[i].name, i);
+
         if (igSelectable_Bool(label, false, 0, (ImVec2_c){ 0.0f, 0.0f }))
             teleport_to_body(i);
+
         shown++;
     }
+
     if (shown == 0)
         igTextDisabled("No matches.");
     else if (capped)
         igTextDisabled("... more matches; refine the search.");
+
     igEndChild();
 }
 
@@ -473,9 +476,14 @@ static void menu_render_settings(void)
         igPushItemWidth(igGetContentRegionAvail().x * w);
         igSliderFloat("Max label distance", &g_settings.label_max_dist_au,
                       5.0f, 5000.0f, "%.0f AU", ImGuiSliderFlags_Logarithmic);
+        igSliderInt("Pinned planets", &g_settings.label_pin_planets, 0, 16, "%d", 0);
+        igSliderInt("Pinned systems", &g_settings.label_pin_systems, 0, 16, "%d", 0);
         igPopItemWidth();
-        igSetItemTooltip("Planet/moon name labels are hidden beyond this distance.\n"
-                         "Stars are always labelled within the active region.");
+        igSetItemTooltip("Planet/moon name labels are hidden beyond 'Max label distance'.\n"
+                         "Stars are always labelled within the active region.\n"
+                         "'Pinned planets/systems' keep the nearest N planets and M star\n"
+                         "systems labelled at any range — pinned planets ignore the distance\n"
+                         "cutoff and pinned systems show even outside the active region.");
     }
 
     igSpacing();

@@ -32,6 +32,9 @@ uniform float u_aspect;
 uniform vec2  u_screen;
 
 uniform vec3  u_sun_rel;         /* sun − centre (AU)                   */
+uniform vec3  u_sun2_rel;        /* secondary light − centre (AU)       */
+uniform float u_light2;          /* secondary strength vs primary, 0..1 */
+uniform vec3  u_light2_col;      /* secondary chromaticity              */
 uniform vec3  u_atm_color;
 uniform float u_atm_intensity;
 
@@ -100,6 +103,22 @@ void main() {
     vec3 col    = mix(u_atm_color, sunset, twilight);
 
     float lit   = 0.10 + 0.90 * day + 0.70 * forward;
+
+    /* Secondary light: same day/twilight/forward model, weighted by its flux
+     * relative to the primary; colours blend by lit share.  u_light2 = 0 →
+     * bit-identical single-sun path. */
+    if (u_light2 > 0.0) {
+        vec3  sun2 = normalize(u_sun2_rel);
+        float sd2  = dot(hit_n, sun2);
+        float day2 = clamp(sd2 * 1.2 + 0.1, 0.0, 1.0);
+        float tw2  = pow(clamp(1.0 - abs(sd2) * 2.2, 0.0, 1.0), 1.5);
+        float fw2  = pow(clamp(dot(ray_dir, sun2), 0.0, 1.0), 6.0);
+        float lit2 = (0.90 * day2 + 0.70 * fw2) * u_light2;
+        vec3  col2 = mix(u_atm_color, sunset, tw2) * u_light2_col;
+        col  = (col * lit + col2 * lit2) / max(lit + lit2, 1e-4);
+        lit += lit2;
+    }
+
     float alpha = glow * u_atm_intensity * lit;
     if (alpha < 0.003) discard;
 
