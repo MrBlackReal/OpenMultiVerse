@@ -31,6 +31,13 @@
 #define SS_MAX         8          /* concurrently promoted systems            */
 #define SS_MAX_BODIES  8          /* star + up to 7 planets                   */
 #define SS_TICK_SEC    0.15       /* promotion scan throttle                  */
+/* No promotion while cruising: a promoted star instantly becomes an
+ * adaptive-warp anchor, so promoting mid-flyby slams the effective warp
+ * speed ~1000x and the star demotes again moments later (churn). Anything
+ * at or below deliberate approach speed (the warp slider tops out at
+ * ~1 ly/s) still promotes; galaxy-crossing cruise (~125 ly/s floor) never
+ * does. */
+#define SS_MAX_SCAN_SPEED_AU_S  (1.5 * AU_PER_LY)
 
 typedef struct {
     int    active;
@@ -426,7 +433,25 @@ void starsys_tick(const double cam_au[3], float time_s)
         s_since_scan += dt;
     }
     if (s_since_scan < SS_TICK_SEC) return;
-    s_since_scan = 0.0;
+
+    /* Camera speed over the scan interval — skip the scan while cruising
+     * (see SS_MAX_SCAN_SPEED_AU_S). Stop, or slow to approach speed, and
+     * the nearby stars materialise within one scan tick. */
+    {
+        static double s_last_cam[3];
+        static int    s_have_last = 0;
+        double vx = cam_au[0] - s_last_cam[0];
+        double vy = cam_au[1] - s_last_cam[1];
+        double vz = cam_au[2] - s_last_cam[2];
+        double v  = sqrt(vx*vx + vy*vy + vz*vz) / s_since_scan;
+        int had_last = s_have_last;
+        s_last_cam[0] = cam_au[0];
+        s_last_cam[1] = cam_au[1];
+        s_last_cam[2] = cam_au[2];
+        s_have_last = 1;
+        s_since_scan = 0.0;
+        if (!had_last || v > SS_MAX_SCAN_SPEED_AU_S) return;
+    }
 
     if (gain < 0.99f) return;
 
