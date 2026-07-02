@@ -565,7 +565,9 @@ static int app_init(void) {
             glGetString(GL_SHADING_LANGUAGE_VERSION));
 
     glEnable(GL_MULTISAMPLE);
-    glClearColor(0.0f, 0.0f, 0.02f, 1.0f);
+    /* True black: space is not navy. Any blue floor here gets lifted by
+     * auto-exposure and reads as a washed-out void. */
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     update_viewport_size();
     boot_log("OpenGL context ready");
 
@@ -1177,6 +1179,33 @@ int main(int argc, char **argv) {
             fprintf(stdout, "[RadianceField] no emitters\n");
         }
 
+        /* Post-warmup body positions (GL frame, AU) — warmup moves everything
+         * off its authored phase, so this is what --cam framing must aim at.
+         * The 16 bodies nearest the camera, nearest first (O(N·16) selection). */
+        {
+            int sel[16]; int nsel = 0;
+            for (int pick = 0; pick < 16; pick++) {
+                int best = -1; double best_d2 = 0.0;
+                for (int i = 0; i < g_nbodies; i++) {
+                    if (!g_bodies[i].alive) continue;
+                    int used = 0;
+                    for (int k = 0; k < nsel; k++) if (sel[k] == i) { used = 1; break; }
+                    if (used) continue;
+                    double dx = g_bodies[i].pos[0] * RS - g_cam.pos[0];
+                    double dy = g_bodies[i].pos[1] * RS - g_cam.pos[1];
+                    double dz = g_bodies[i].pos[2] * RS - g_cam.pos[2];
+                    double d2 = dx*dx + dy*dy + dz*dz;
+                    if (best < 0 || d2 < best_d2) { best = i; best_d2 = d2; }
+                }
+                if (best < 0) break;
+                sel[nsel++] = best;
+                fprintf(stdout, "[Body] %-16s pos_au=(%.6f, %.6f, %.6f) dcam=%.4g\n",
+                        g_bodies[best].name,
+                        g_bodies[best].pos[0] * RS, g_bodies[best].pos[1] * RS,
+                        g_bodies[best].pos[2] * RS, sqrt(best_d2));
+            }
+        }
+
         /* And the field graph: node/edge/event counts, so the harvested
          * relations are verifiable without pixels. Printed again at shot time
          * (gas flows and events only appear after stellar time has run). */
@@ -1217,6 +1246,13 @@ int main(int argc, char **argv) {
                 cam_fly_cancel();
             else
                 cam_fly_update(dt);
+            /* Arrived (not cancelled): auto-target the navigated body in
+             * inspect mode so the orbit camera + panel pick it up. */
+            if (!cam_fly_active()) {
+                int fb = cam_fly_take_arrival();
+                if (fb >= 0 && fb < g_nbodies && g_bodies[fb].alive)
+                    inspect_focus_body(fb);
+            }
         }
 
         if (!cam_fly_active() && !s_pause_menu_open && !g_inspect_orbit_mode)

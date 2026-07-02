@@ -178,6 +178,15 @@ void main() {
         shadow = mix(1.0, planet_shadow, u_shadow_strength);
     }
     float light = mix(u_light0.w * 0.55, diffuse, shadow);
+
+    /* Forward scattering: ring dust glows when viewed against the sun.
+     * pos is camera-relative, so normalize(pos) is the view direction; when
+     * it aligns with the sun direction the light reaching the camera is
+     * near-forward-scattered and the (otherwise dark) backlit face brightens.
+     * Respects the planet shadow — the shadowed sector stays dark. */
+    float fw = pow(max(dot(pos / max(dist, 1e-9), u_light0.xyz), 0.0), 9.0);
+    light += fw * 1.4 * shadow;
+
     float alpha = clamp(u_morph0.x, 0.0, 1.0) * parent_fade;
     v_color     = vec4(a_color * light, alpha);
     gl_PointSize = mix(1.0, 2.1, point_t);

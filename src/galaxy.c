@@ -63,7 +63,7 @@ static const GalaxyDef GALAXIES[] = {
      * inside it renders as the Milky Way band (brightest toward Sagittarius),
      * and zooming out it coalesces into a spiral seen from outside: the
      * §0.1 scale-continuity "leave your own galaxy" experience. */
-    { "Milky Way",             266.405, -28.936,  2.60e4,     0.0, 5.0e4, 0.0, 192.859,  27.128, 0.14f, {0.90f,0.88f,0.84f}, GAL_SPIRAL     },
+    { "Milky Way",             266.405, -28.936,  2.60e4,     0.0, 5.0e4, 0.0, 192.859,  27.128, 0.20f, {0.90f,0.88f,0.84f}, GAL_SPIRAL     },
     /* name                    RA(deg)  Dec(deg)  dist(ly)   size'  r_ly  incl  pole_ra  pole_dec bright colour              type */
     { "LMC",                    80.89,  -69.76,   1.63e5,   645.0,  0.0, 35.0, -999.0,   0.0,    1.0f, {0.80f,0.82f,0.95f}, GAL_IRREGULAR  },
     { "SMC",                    13.19,  -72.83,   2.00e5,   320.0,  0.0, 50.0, -999.0,   0.0,    1.0f, {0.78f,0.80f,0.94f}, GAL_IRREGULAR  },

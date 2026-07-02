@@ -1926,6 +1926,25 @@ void rings_tick(double dt)
     }
 }
 
+/* rings_query — ring geometry for a body (for ring-shadow shading). */
+int rings_query(int body_idx, float *inner_au, float *outer_au, float pole[3])
+{
+    const float km_to_au = 1000.0f * (float)RS;
+    for (int d = 0; d < s_n_discs; d++) {
+        ParticleDisc *disc = &s_discs[d];
+        if (!disc->initialized || disc->parent_idx != body_idx) continue;
+        if (inner_au) *inner_au = disc->ring_r_inner_km * km_to_au;
+        if (outer_au) *outer_au = disc->ring_r_outer_km * km_to_au;
+        if (pole) {
+            pole[0] = disc->pole[0];
+            pole[1] = disc->pole[1];
+            pole[2] = disc->pole[2];
+        }
+        return 1;
+    }
+    return 0;
+}
+
 /* rings_render — draw all initialized, alive ring discs at current LOD. */
 void rings_render(const float vp_camrel[16])
 {

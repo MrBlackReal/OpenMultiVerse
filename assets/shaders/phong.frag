@@ -48,10 +48,20 @@ uniform vec2  u_screen;
 
 uniform float u_rotation;        /* body rotation angle, radians           */
 uniform float u_cloud_rotation;  /* continuous cloud angle, never wrapped  */
+uniform float u_cloud_amount;    /* 0..1 cloud coverage (data-driven from   */
+                                 /* the body's atmosphere; 0 = clear sky)   */
+uniform vec4  u_ring;            /* ring shadow: inner AU, outer AU,        */
+                                 /* strength (0 = no ring), unused          */
+uniform vec3  u_ring_pole;       /* ring-plane normal, GL frame             */
+uniform int   u_ecl_count;       /* eclipse occluders (family bodies that   */
+uniform vec4  u_ecl[6];          /* may block the sun): xyz = occluder −    */
+                                 /* body centre (AU), w = visual radius     */
+uniform float u_sun_radius;      /* emitter visual radius (AU) → penumbra   */
 uniform float u_obliquity;    /* axial tilt, radians (0 = upright)      */
 uniform int   u_planet_type;  /* 0-9, selects colour recipe             */
 uniform float u_star_heat;    /* 0..1 surface heating from star approach */
 uniform float u_starspots;    /* 0..1 star-surface granulation/spot strength */
+uniform float u_time;         /* seconds — convective granulation churn  */
 uniform int   u_impact_count;
 uniform vec3  u_impact_dir[32];
 uniform vec3  u_impact_tangent1[32];
@@ -180,6 +190,45 @@ vec3 moon_normal(vec3 NL)
                - moon_height(normalize(NL - bitangent * eps));
 
     return normalize(NL - tangent * dh_t * 1.2 - bitangent * dh_b * 1.2);
+}
+
+/* World direction → body-local frame: inverse of local_surface_dir_to_world,
+ * with the spin angle passed in so the cloud layer (which rotates at its own
+ * rate) can share it. */
+vec3 world_to_local(vec3 v, float rot)
+{
+    float co = cos(u_obliquity);
+    float so = sin(u_obliquity);
+    float tx =  co * v.x - so * v.y;
+    float ty =  so * v.x + co * v.y;
+    float tz =  v.z;
+    float cr = cos(-rot);
+    float sr = sin(-rot);
+    return vec3(tx * cr - tz * sr, ty, tx * sr + tz * cr);
+}
+
+/* Generic terrain relief for solid worlds: continent-scale undulation (keyed
+ * on the same fbm(NL·3.5) the colour recipes use, so relief follows the
+ * painted landforms), ridged mountain chains, and fine roughness. */
+float terrain_height(vec3 NL)
+{
+    float base  = fbm(NL * 3.5);
+    float ridge = 1.0 - abs(2.0 * fbm(NL * 8.0 + vec3(4.4, 8.8, 2.2)) - 1.0);
+    float fine  = fbm(NL * 24.0 + vec3(9.1, 3.3, 6.6));
+    return base * 0.45 + ridge * ridge * 0.40 + fine * 0.15;
+}
+
+vec3 terrain_normal(vec3 NL, float strength)
+{
+    vec3 up = abs(NL.y) < 0.98 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(up, NL));
+    vec3 bitangent = normalize(cross(NL, tangent));
+    float eps = 0.02;
+    float dh_t = terrain_height(normalize(NL + tangent * eps))
+               - terrain_height(normalize(NL - tangent * eps));
+    float dh_b = terrain_height(normalize(NL + bitangent * eps))
+               - terrain_height(normalize(NL - bitangent * eps));
+    return normalize(NL - tangent * dh_t * strength - bitangent * dh_b * strength);
 }
 
 /* ======================================================================
@@ -598,17 +647,25 @@ void main() {
             float cr = cos(-u_rotation), sr = sin(-u_rotation);
             vec3  NL = vec3(tx * cr - tz * sr, ty, tx * sr + tz * cr);
 
-            /* fine convective mottling */
-            float gran = fbm(NL * 14.0) - 0.5;
-            col *= 1.0 + u_starspots * gran * 0.18;
+            /* fine convective mottling — two counter-drifting noise fields
+             * blended, so cells appear to churn rather than slide */
+            float t    = u_time * 0.05;
+            float g1   = fbm(NL * 14.0 + vec3(t, 0.7 * t, -t));
+            float g2   = fbm(NL * 14.0 - vec3(0.8 * t, t, 0.6 * t) + vec3(4.7, 1.3, 8.2));
+            float gran = mix(g1, g2, 0.5 + 0.5 * sin(u_time * 0.21)) - 0.5;
+            col *= 1.0 + u_starspots * gran * 0.20;
 
-            /* larger cooler patches, weighted by how red (cool) the star is.
-             * fbm() here centres near 0.5 and peaks ~0.7, so the threshold sits
-             * low; cool has a floor so spots stay visible on hot stars too. */
+            /* Starspots: cool dark patches, weighted by how red (cool) the
+             * star is, confined to the active latitude bands (the solar
+             * butterfly zone) and thresholded to isolated peaks — a few
+             * percent coverage, not a cow pattern. */
             float cool  = clamp((u_color.r - u_color.b) * 1.2 + 0.45, 0.15, 1.0);
-            float spotn = fbm(NL * 3.0 + vec3(11.0, 4.0, 7.0));
-            float spot  = smoothstep(0.45, 0.60, spotn) * cool * u_starspots;
-            col = mix(col, col * vec3(0.32, 0.24, 0.22), spot);
+            float spotn = fbm(NL * 6.0 + vec3(11.0, 4.0, 7.0));
+            float lat_band = smoothstep(0.75, 0.45, abs(NL.y))
+                           * smoothstep(0.02, 0.12, abs(NL.y));
+            float spot  = smoothstep(0.60, 0.72, spotn) * lat_band
+                        * cool * u_starspots;
+            col = mix(col, col * vec3(0.30, 0.24, 0.22), spot);
         }
 
         frag_color = vec4(col, u_opacity);
@@ -621,51 +678,64 @@ void main() {
      * body's obliquity: axis = (sin(obl), cos(obl), 0).
      * Apply the inverse body rotation (Rodrigues, angle = -u_rotation).
      * When u_obliquity == 0 this reduces to a plain Y-axis rotation.    */
-    vec3 NL;
-    {
-        /* Step 1 — undo axial tilt: rotate N around Z by +obliquity.
-         * This maps the tilted spin axis back onto the Y axis so the
-         * subsequent Y-rotation is a simple spin around the new Y.     */
-        float co = cos(u_obliquity);
-        float so = sin(u_obliquity);
-        float tx =  co * N.x - so * N.y;
-        float ty =  so * N.x + co * N.y;
-        float tz =  N.z;
-
-        /* Step 2 — undo body spin: plain Y-axis rotation (same convention
-         * as the original no-tilt code).                                */
-        float cr = cos(-u_rotation);
-        float sr = sin(-u_rotation);
-        NL = vec3(tx * cr - tz * sr,
-                  ty,
-                  tx * sr + tz * cr);
-    }
+    vec3 NL = world_to_local(N, u_rotation);
 
     vec3 base_surface = surface_color(NL);
     vec3 surface = base_surface;
     vec3 shade_N = N;
+
+    /* Camera distance in body radii: high-frequency relief (and city lights,
+     * below) alias once the body is small on screen, so fade them out. */
+    float dist_r = length(u_oc) / (u_radius + 1e-9);
+    float relief_fade = 1.0 - smoothstep(10.0, 45.0, dist_r);
+
     if (u_planet_type == 14) {
         shade_N = local_surface_dir_to_world(moon_normal(NL));
+    } else if (relief_fade > 0.001) {
+        /* fBM relief so terrain visibly catches light close-up.  Gas giants,
+         * Venus and Titan are cloud tops — no relief.  Earth's is land-only
+         * so the oceans stay glassy for the specular glint below. */
+        float strength = 0.0;
+        float gate = 1.0;
+        if (u_planet_type == 1) {
+            gate = smoothstep(0.44, 0.49, fbm(NL * 3.5));
+            strength = 1.5;
+        }
+        else if (u_planet_type == 2)                        strength = 2.0;
+        else if (u_planet_type == 0 || u_planet_type == 10) strength = 2.2;
+        else if (u_planet_type == 7)                        strength = 1.2;
+        else if (u_planet_type == 9)                        strength = 0.6;
+        if (strength > 0.0 && gate > 0.001) {
+            vec3 tn = terrain_normal(NL, strength * relief_fade);
+            shade_N = local_surface_dir_to_world(normalize(mix(NL, tn, gate)));
+        }
     }
+
+    /* Mountain snow: high ridged terrain whitens, more readily at latitude. */
+    if (u_planet_type == 1) {
+        float land = smoothstep(0.44, 0.49, fbm(NL * 3.5));
+        float alt  = terrain_height(NL);
+        surface = mix(surface, vec3(0.90, 0.92, 0.95),
+                      land * smoothstep(0.72, 0.90, alt)
+                           * (0.35 + 0.65 * smoothstep(0.25, 0.75, abs(NL.y))));
+    }
+
     vec3 lava_emit = vec3(0.0);
     float cloud_mask = 0.0;
+    float cloud_shadow = 0.0;
     float impact_light_block = 0.0;
 
-    /* ---- Cloud layer (Earth only) --------------------------------------- */
-    if (u_planet_type == 1) {
-        /* Clouds rotate slightly faster than the surface. */
-        vec3 NL_cloud;
-        {
-            float co = cos(u_obliquity);
-            float so = sin(u_obliquity);
-            float tx =  co * N.x - so * N.y;
-            float ty =  so * N.x + co * N.y;
-            float tz =  N.z;
-            float cloud_rot = u_cloud_rotation;
-            float cr = cos(-cloud_rot);
-            float sr = sin(-cloud_rot);
-            NL_cloud = vec3(tx * cr - tz * sr, ty, tx * sr + tz * cr);
-        }
+    /* Sun direction — needed by the cloud shadow pass below and reused for
+     * everything after (terminators, impacts, city lights). */
+    vec3  L = normalize(u_sun_rel - hit_rel);
+
+    /* ---- Cloud layer (any solid world with an atmosphere) --------------- */
+    /* Coverage is data-driven: u_cloud_amount comes from the body's authored
+     * atmosphere intensity, so Earth is half-covered, Mars gets thin CO2
+     * wisps, and airless rock stays clear.  Clouds rotate slightly faster
+     * than the surface (u_cloud_rotation). */
+    if (u_cloud_amount > 0.001) {
+        vec3 NL_cloud = world_to_local(N, u_cloud_rotation);
 
         /* Domain warping: warp the sample position with a flow field
          * before sampling cloud density — creates swirling spiral shapes. */
@@ -679,13 +749,29 @@ void main() {
         float cn1 = fbm(warped);
         float cn2 = fbm(warped * 2.1 + vec3(3.3, 7.6, 1.9));
         float cloud_val = cn1 * 0.70 + cn2 * 0.30;
-        cloud_mask = smoothstep(0.48, 0.66, cloud_val);
+        /* Coverage threshold from amount; Earth's 0.6 reproduces the
+         * original 0.48..0.66 band almost exactly.  Thin decks are also more
+         * translucent, so Mars' sparse CO2 wisps don't read as Earth cumulus. */
+        float amt = clamp(u_cloud_amount, 0.0, 1.0);
+        float thr = mix(0.80, 0.42, amt);
+        float opacity = mix(0.45, 1.0, smoothstep(0.15, 0.60, amt));
+        cloud_mask = smoothstep(thr - 0.09, thr + 0.09, cloud_val) * opacity;
+
+        /* Cloud shadows: resample the deck displaced toward the sun (its
+         * tangential component) — the offset patch is what shades this spot.
+         * Reuses the warp field, valid for a small displacement. */
+        vec3 L_loc = world_to_local(L, u_cloud_rotation);
+        vec3 L_tan = L_loc - NL_cloud * dot(L_loc, NL_cloud);
+        vec3 NL_sh = normalize(NL_cloud + L_tan * 0.05);
+        vec3 warped_sh = NL_sh * 4.2 + warp * 0.55 + vec3(4.1, 2.3, 6.8);
+        float sh_val = fbm(warped_sh) * 0.70
+                     + fbm(warped_sh * 2.1 + vec3(3.3, 7.6, 1.9)) * 0.30;
+        cloud_shadow = smoothstep(thr - 0.09, thr + 0.09, sh_val) * opacity;
     }
 
-    /* Sun direction — computed once, reused for emission clamping inside the
-     * impact loop (kind 4 dampens edge/fringe emission on the lit hemisphere
-     * to avoid a transparent-looking orange halo when viewed from the sun). */
-    vec3  L    = normalize(u_sun_rel - hit_rel);
+    /* (L computed above the cloud block; also used for emission clamping
+     * inside the impact loop — kind 4 dampens edge/fringe emission on the lit
+     * hemisphere to avoid a transparent-looking orange halo sun-side.) */
     float sun_dot = dot(N, L);
     float diff = max(dot(N, L), 0.0);
 
@@ -990,7 +1076,10 @@ void main() {
                    * pop_mask * (1.0 - impact_light_block) * 0.90 * city_fade;
     }
 
-    if (cloud_mask > 0.0) {
+    if (cloud_mask > 0.0 || cloud_shadow > 0.0) {
+        /* Shadow first (only where this spot isn't itself cloud-covered),
+         * then the deck itself over everything. */
+        surface *= 1.0 - cloud_shadow * 0.40 * (1.0 - cloud_mask);
         surface = mix(surface, vec3(0.93, 0.95, 0.97), cloud_mask);
         lava_emit *= 1.0 - cloud_mask;
         shade_N = normalize(mix(shade_N, N, cloud_mask));
@@ -1007,6 +1096,58 @@ void main() {
      * top, so neither is affected.                                            */
     float ndl = dot(shade_N, L);
     float day = smoothstep(-0.12, 0.22, ndl);          /* soft terminator   */
+
+    /* ---- Ring shadow: the ring plane stripes the globe ------------------ */
+    /* Cast the sun ray from this surface point; where it crosses the ring
+     * annulus, direct sunlight is attenuated by an art-directed band profile.
+     * This is the signature Saturn look (shadow bands riding the season). */
+    if (u_ring.z > 0.001) {
+        float denom = dot(L, u_ring_pole);
+        if (abs(denom) > 1e-4) {
+            float t_p = -dot(hit_rel, u_ring_pole) / denom;
+            if (t_p > 0.0) {
+                vec3  rp = hit_rel + t_p * L;
+                float rr = length(rp - u_ring_pole * dot(rp, u_ring_pole));
+                float rn = (rr - u_ring.x) / max(u_ring.y - u_ring.x, 1e-9);
+                if (rn > 0.0 && rn < 1.0) {
+                    float edge    = smoothstep(0.0, 0.05, rn)
+                                  * (1.0 - smoothstep(0.90, 1.0, rn));
+                    float stripes = 0.72 + 0.28 * sin(rn * 31.0)
+                                               * sin(rn * 13.0 + 1.7);
+                    day *= 1.0 - u_ring.z * edge * stripes;
+                }
+            }
+        }
+    }
+
+    /* ---- Body–body eclipse shadows -------------------------------------- */
+    /* Analytic soft shadow of sibling/parent/child spheres against the
+     * primary sun: compare the occluder's angular radius, the sun disc's
+     * angular radius, and their angular separation as seen from this
+     * fragment.  Coverage ramps linearly across the penumbra (θ within
+     * ±a_sun of the occluder edge) and caps at the disc-area ratio when the
+     * occluder is smaller than the sun (annular/partial transits).  Gives
+     * moon transit shadows on planets AND moons going dark inside their
+     * planet's shadow from one test.  Primary light only — a secondary
+     * emitter eclipse is a vanishing corner case. */
+    if (u_ecl_count > 0) {
+        vec3  S    = u_sun_rel - hit_rel;
+        float ds   = length(S);
+        vec3  Sn   = S / max(ds, 1e-9);
+        float a_s  = max(u_sun_radius / max(ds, 1e-9), 1e-4);
+        for (int k = 0; k < 6; k++) {
+            if (k >= u_ecl_count) break;
+            vec3  O = u_ecl[k].xyz - hit_rel;
+            float d = length(O);
+            if (d <= 1e-9 || d >= ds) continue;      /* behind the sun     */
+            if (dot(O, Sn) <= 0.0) continue;          /* not sunward        */
+            float a_o   = u_ecl[k].w / d;
+            float theta = acos(clamp(dot(O / d, Sn), -1.0, 1.0));
+            float f     = clamp((a_o + a_s - theta) / (2.0 * a_s), 0.0, 1.0);
+            float amax  = min((a_o * a_o) / (a_s * a_s), 1.0);
+            day *= 1.0 - f * amax;
+        }
+    }
 
     float dusk    = day * (1.0 - day) * 2.0;           /* peaks at terminator */
     /* Art-directed warm-white/dusk ramp × the primary's physical blackbody
@@ -1040,8 +1181,37 @@ void main() {
                         vec3(0.88, 0.90, 0.94),        /* neutral day ambient */
                         lit_any) * u_ambient;
 
+    /* ---- Ocean specular glint (Earth-type water) ------------------------ */
+    /* A sharp Blinn lobe on the geometric sphere normal (water is flat at
+     * this scale) plus a broad Fresnel-boosted sheen.  HDR-bright so the
+     * bloom pass blazes the sun's reflection — the signature "real ocean"
+     * look.  Masked to open water: no land, no ice caps, no cloud cover. */
+    vec3 spec_out = vec3(0.0);
+    if (u_planet_type == 1) {
+        float sea = 1.0 - smoothstep(0.42, 0.47, fbm(NL * 3.5));
+        sea *= 1.0 - smoothstep(0.78, 0.93, abs(NL.y));
+        sea *= 1.0 - cloud_mask;
+        if (sea > 0.001) {
+            vec3  V    = -ray_dir;
+            vec3  H    = normalize(L + V);
+            float ndh  = max(dot(N, H), 0.0);
+            float fres = 0.05 + 0.95 * pow(1.0 - max(dot(N, V), 0.0), 5.0);
+            float glint = pow(ndh, 240.0) * 2.4
+                        + pow(ndh, 20.0) * (0.06 + fres * 0.25);
+            spec_out = sun_col * (glint * sea * day);
+            if (u_light2 > 0.0) {
+                vec3  L2s  = normalize(u_sun2_rel - hit_rel);
+                vec3  H2   = normalize(L2s + V);
+                float ndh2 = max(dot(N, H2), 0.0);
+                spec_out += u_light2_col
+                          * ((pow(ndh2, 240.0) * 2.4 + pow(ndh2, 20.0) * 0.08)
+                             * sea * day2 * u_light2);
+            }
+        }
+    }
+
     vec3 lighting = amb_col + (sun_col * day + sun2_term) * (1.0 - u_ambient);
-    vec3 col_out  = surface * lighting + lava_emit;
+    vec3 col_out  = surface * lighting + lava_emit + spec_out;
 
     /* Tidal shredding: matter torn off heats up, so add a hot incandescent glow,
      * brightest on the limb so the stretched strand reads as glowing gas. */

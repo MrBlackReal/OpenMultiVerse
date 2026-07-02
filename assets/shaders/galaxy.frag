@@ -16,8 +16,9 @@
  *                 pattern on u_time.
  *   1 ELLIPTICAL  smooth, steep-cored glow (de-Vaucouleurs-ish), old warm
  *                 population, barely any structure.
- *   2 IRREGULAR   clumpy squashed FBM cloud (LMC/SMC): patchy blue starlight
- *                 with pink HII knots.
+ *   2 IRREGULAR   torn clumpy cloud (LMC/SMC): ragged noise-warped outline,
+ *                 an off-centre warm stellar bar, patchy blue starlight with
+ *                 bright pink HII complexes, and dark dust patches.
  *
  * Output is premultiplied; blended "over" at log depth like the nebulae.
  */
@@ -115,14 +116,36 @@ void galaxy_sample(vec3 p, float rr, vec3 seedv,
     float phi = atan(dot(pr, t2), dot(pr, t1));
 
     if (u_type == 2) {                               /* IRREGULAR */
-        float env = exp(-pow(r / 0.62, 2.0) - pow(h / 0.34, 2.0));
+        /* In-plane coords for the stellar bar. */
+        float x1 = dot(pr, t1), x2 = dot(pr, t2);
+
+        /* Ragged outline: large-scale noise warps the envelope radius so
+         * the cloud reads as a torn lump from outside, not a smooth ball. */
+        float lump = fbm2(p * 2.1 + seedv * 1.7);
+        float env  = exp(-pow(r / (0.42 + 0.30 * lump), 2.2)
+                         - pow(h / 0.30, 2.0));
+
+        /* Off-centre elongated stellar bar (the LMC's defining feature) —
+         * old warm population, slightly displaced from the cloud centre. */
+        float bar = 1.5 * exp(-pow((x1 - 0.07) / 0.34, 2.0)
+                              - pow( x2         / 0.115, 2.0)
+                              - pow( h          / 0.13,  2.0));
+
+        /* Patchy young population: low base fill, strong clumps, and rare
+         * bright pink HII complexes (30 Doradus-class at the top end). */
         float n   = fbm3(p * 3.2 + seedv);
-        float k   = smoothstep(0.42, 0.85, n);
-        dens = env * (0.20 + 1.6 * k * k) * 1.15;
-        /* patchy young blue light with pink HII knots */
-        float hii = smoothstep(0.72, 0.92, fbm2(p * 5.1 - seedv));
-        col = u_color * mix(vec3(0.75, 0.82, 1.0), vec3(1.0, 0.55, 0.60), hii)
-            * (0.6 + 0.8 * n);
+        float k   = smoothstep(0.48, 0.85, n);
+        float hii = smoothstep(0.68, 0.86, fbm2(p * 4.6 - seedv));
+        dens = env * (0.05 + 1.9 * k * k + 2.6 * hii) + bar;
+
+        /* Torn dark dust patches for structure, absent from the bar core. */
+        dust = smoothstep(0.58, 0.82, fbm2(p * 3.9 + seedv * 2.3))
+             * env * (1.0 - clamp(bar, 0.0, 1.0)) * 0.9;
+
+        float bw    = clamp(bar / max(dens, 1e-5), 0.0, 1.0);
+        vec3  young = mix(vec3(0.72, 0.80, 1.00), vec3(1.0, 0.50, 0.55), hii);
+        col = u_color * mix(young * (0.55 + 0.9 * k),
+                            vec3(1.0, 0.90, 0.72), bw);
         return;
     }
 
@@ -140,7 +163,7 @@ void galaxy_sample(vec3 p, float rr, vec3 seedv,
     /* Thin exponential disc, slightly flaring outward; warm compact bulge. */
     float disc  = exp(-r / 0.30) * exp(-abs(h) / (0.035 + 0.09 * r * r))
                 * smoothstep(1.0, 0.85, rr);
-    float bulge = 1.9 * exp(-pow(rr / 0.13, 2.0));
+    float bulge = 2.4 * exp(-pow(rr / 0.14, 2.0));
 
     /* Star-forming knots along the arms (noise in the co-rotating frame so
      * clumps ride the shear instead of the arms sweeping through them). */
@@ -149,29 +172,41 @@ void galaxy_sample(vec3 p, float rr, vec3 seedv,
     float n     = fbm3(prot * 4.6 + seedv);
     float knots = smoothstep(0.55, 0.88, n) * arm;
 
+    /* Star-cloud mottling: the band seen from inside is patchy star clouds,
+     * not an airbrushed gradient. */
+    float cloud = 0.60 + 0.80 * fbm2(prot * 3.1 + seedv * 1.3);
+
     /* The disc needs ~2.4x the naive weight to read against the compact
      * bulge from outside (verified face-on + edge-on on the Milky Way). */
-    dens = disc * (0.38 + 2.8 * arm + 3.8 * knots) + bulge;
+    dens = disc * cloud * (0.38 + 2.8 * arm + 3.8 * knots) + bulge;
 
     /* Dust lanes: absorption on the arms' inner edges, pinned to the
      * midplane, absent from the bulge core. */
     float lane = pow(0.5 + 0.5 * cos(armw + 1.1), 3.0);
+    float dn   = 0.55 + 0.45 * fbm2(prot * 6.0 - seedv);
     /* The lane rides slightly below the midplane, so edge-on it silhouettes
      * against the bright disc/bulge behind instead of coinciding with them. */
     dust = lane * exp(-abs(h + 0.028) / 0.030) * exp(-r / 0.40)
-         * smoothstep(0.06, 0.18, r)
-         * (0.55 + 0.45 * fbm2(prot * 6.0 - seedv)) * 2.2;
+         * smoothstep(0.06, 0.18, r) * dn * 2.2;
+
+    /* Great Rift: a ragged equatorial dust sheet independent of the arm
+     * phase, so the band seen from inside is split lengthwise by a dark
+     * lane (and an edge-on disc keeps its stripe between arm crossings). */
+    dust += exp(-abs(h + 0.008) / 0.016) * exp(-r / 0.45)
+          * smoothstep(0.04, 0.12, r) * dn * 1.1;
 
     /* Dust extinguishes the starlight embedded in it too, not just what is
      * behind — this is what carves the classic dark stripe across an
      * edge-on disc (Sombrero) instead of the midplane glowing through. */
-    dens *= exp(-dust * 3.0);
+    dens *= exp(-dust * 2.4);
 
-    /* Population colours: warm bulge, cool blue-white arms, pink HII knots. */
-    float bw   = clamp(bulge / max(dens, 1e-5), 0.0, 1.0);
+    /* Population colours: warm bulge, cool blue-white arms, pink HII knots.
+     * The weight uses the *extinguished* bulge — same dust as dens — or the
+     * warm tint smears along every dust-dimmed midplane region. */
+    float bw   = clamp(bulge * exp(-dust * 2.4) / max(dens, 1e-5), 0.0, 1.0);
     float hii  = smoothstep(0.80, 0.94, n) * arm;
     vec3  dcol = mix(vec3(0.72, 0.80, 1.00), vec3(1.0, 0.55, 0.60), hii);
-    col = u_color * mix(dcol, vec3(1.0, 0.87, 0.66), bw);
+    col = u_color * mix(dcol, vec3(1.0, 0.83, 0.56), bw);
 }
 
 void main() {
@@ -244,8 +279,12 @@ void main() {
         float dens, dust;
         galaxy_sample(p, rr, seedv, col, dens, dust);
 
-        /* Dust first: absorption only — darkens everything behind it. */
-        float ad = clamp(dust * stepLen * 5.5 * u_density, 0.0, 0.45);
+        /* Dust first: absorption only — darkens everything behind it.
+         * Extinction scales with sqrt(density): the Milky Way's inside
+         * veil dims the *emission* ~7x for taste, but the dark rift must
+         * still carve the band, so absorption falls off much slower. */
+        float ad = clamp(dust * stepLen * 5.5 * sqrt(max(u_density, 0.0)),
+                         0.0, 0.45);
         accumA += ad * (1.0 - accumA);
 
         if (dens > 0.0015) {

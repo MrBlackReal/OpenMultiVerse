@@ -180,8 +180,10 @@ static void teleport_to_body(int idx)
     float yaw   = (float)(atan2(dz, dx) * 180.0 / PI);
     float pitch = (float)(asin(dy) * 180.0 / PI);
 
-    /* Fly there with an eased animation rather than snapping. */
+    /* Fly there with an eased animation rather than snapping; on arrival,
+     * inspect mode auto-targets the body (orbit camera picks it up). */
     cam_fly_to(target, yaw, pitch);
+    cam_fly_set_arrival_body(idx);
 }
 
 /* Fly to nebula `i`, framing it from outside at a few radii out and looking at
@@ -538,8 +540,10 @@ static void menu_render_settings(void)
     if (igCollapsingHeader_TreeNodeFlags("Starfield", 0)) {
         igPushItemWidth(igGetContentRegionAvail().x * w);
         igSliderInt("Fallback stars", &g_settings.num_stars, 0, 20000, "%d", 0);
-        igPopItemWidth();
         igSetItemTooltip("Procedural skybox star count (used when no BSC5 catalog).");
+        igSliderInt("Background stars", &g_settings.bg_star_count, 0, 60000, "%d", 0);
+        igSetItemTooltip("Faint star-dust layer between the catalog stars (0 = off).");
+        igPopItemWidth();
         if (igButton("Regenerate starfield", (ImVec2_c){ -1.0f, 0.0f }))
             settings_apply_starfield();
     }
@@ -932,6 +936,9 @@ int menu_render(int current_preset, int *laws_changed, const char **out_load_pat
                     if (igSliderFloat("Star spikes", &sp, 0.0f, 1.5f, "%.2f", 0))
                         g_settings.lens_spikes = sp;
                     igSetItemTooltip("Diffraction spikes on bright stars.");
+                    igSliderFloat("Lens flare", &g_settings.lens_flare, 0.0f, 1.0f, "%.2f", 0);
+                    igSetItemTooltip("Ghost sprites + halo + anamorphic streak from the "
+                                     "dominant sun (0 = off).");
                     igSliderFloat("Relativistic", &g_settings.relativistic, 0.0f, 1.0f, "%.2f", 0);
                     igSetItemTooltip("Aberration + Doppler shift at warp speed. "
                                      "Only visible while moving fast.");

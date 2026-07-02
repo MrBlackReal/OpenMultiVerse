@@ -23,6 +23,12 @@ uniform float u_spike;    /* diffraction-spike strength (0 = none, default) */
 uniform float u_corona;   /* corona streamer strength  (0 = none, default)  */
 uniform float u_time;     /* seconds, for corona animation                  */
 uniform float u_seed;     /* per-star phase offset so coronae differ        */
+uniform float u_resolve;  /* 0 = point-like star (glow covers the disc — the
+                             dot/glare handoff regime, MUST stay unchanged)
+                             → 1 = close resolved disc: clear the additive
+                             glow off the disc face so the photosphere (limb
+                             darkening, granulation, starspots) shows; the
+                             glow survives outside the limb as the corona.  */
 
 out vec4 frag_color;
 
@@ -69,6 +75,14 @@ void main() {
         total += u_corona * streamers * exp(-r_safe * 0.30) * outer_fade
                  * (0.25 + 0.75 * hot) * 0.35;
     }
+
+    /* Resolved-disc interior fade: when the star is a large on-screen disc,
+     * the additive wash over the disc face buries the photosphere (this is
+     * why starspots were invisible).  Ramp the glow to zero inside the limb;
+     * u_resolve = 0 (any star small on screen) is bit-identical to before,
+     * so the CPU-mirrored dot↔glare handoff never sees a difference. */
+    if (u_resolve > 0.0)
+        total *= mix(1.0, smoothstep(0.92, 1.30, r), u_resolve);
 
     if (total < 0.001) discard;
 
