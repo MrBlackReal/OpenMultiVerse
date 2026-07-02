@@ -42,6 +42,11 @@ uniform float u_lum_scale;    /* per-cascade: a coarse cell's candidates
                                * larger volume, so luminosity grows ~ with
                                * cell area — keeps each cascade's apparent
                                * brightness distribution scale-invariant    */
+uniform ivec4 u_suppress[8];  /* promoted stars (cell.xyz, candidate): these
+                               * exist as real bodies right now, so their
+                               * point sprites are skipped (finest cascade
+                               * only — promotion radius is ~1 ly)          */
+uniform int   u_n_suppress;
 
 out vec4 v_color;             /* rgb premultiplied-ish, a = coverage        */
 
@@ -139,8 +144,17 @@ void main() {
     lc.y = (cid / u_grid_dim) % u_grid_dim;
     lc.z = cid / (u_grid_dim * u_grid_dim);
 
+    ivec3 cell = u_cell_base + lc;
+
+    /* Promoted to a real body right now? Then skip the sprite. */
+    if (u_inner_half <= 0.0) {
+        for (int i = 0; i < u_n_suppress; i++)
+            if (all(equal(u_suppress[i].xyz, cell)) && u_suppress[i].w == sub)
+                return;
+    }
+
     /* Stable per-star hashes from the absolute cell + candidate index. */
-    vec3 cellf = vec3(u_cell_base + lc);
+    vec3 cellf = vec3(cell);
     vec3 h3    = hash33(cellf + float(sub) * vec3(13.17, 7.71, 3.39)
                               + u_seed * vec3(0.173, 0.317, 0.531));
     float hsel = hash13(cellf * 1.7 + float(sub) * 41.7 + u_seed);

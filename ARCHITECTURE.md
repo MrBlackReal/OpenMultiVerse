@@ -843,6 +843,33 @@ arrival at any galaxy auto-decelerate into this resolved regime.
 Consumers: Navigate → "Galaxies (fly to)", RadianceField integrated
 emitters, and field-graph galaxy nodes.
 
+### `starsys.c` / `starsys.h`
+
+**Star → system promotion** (roadmap §0.1, the final scale-continuity step):
+when the camera comes within ~1 ly of a procedural galaxy star, the star is
+promoted to a live body with a deterministic planetary system; leave (> ~2.6
+ly, hysteresis) and it demotes back to a point sprite. Revisiting regenerates
+the identical system from the same lattice-cell seed. The first half of the
+file is a **float-exact CPU port** of `galaxy_stars.vert`'s hash/noise/
+density pipeline — the two must stay in step (same constants, same op order)
+or the promoted body appears beside, not in place of, the sprite it replaces;
+`galaxy.c` passes the promoted cells back to the shader as suppression
+uniforms so the sprite vanishes while the body exists. Star mass follows the
+same luminosity hash that sized the sprite (L ≈ M^3.5), colour comes from
+`spectral.c` (mass → T_eff → blackbody), planets spawn on circular orbits
+near the galactic disc plane via `universe_add_body()` + the standard
+per-body hooks (`trails_add_body`/`labels_add_body`/`collision_on_body_added`
+— the build.c pattern), so physics, labels, Inspect, RadianceField lighting
+and adaptive-warp deceleration all treat them as ordinary bodies. Promotion
+is gated on the skybox crossfade being fully done (> ~4.7 kly from origin),
+so it can never double the real catalogue around Sol. Scan is throttled
+(0.15 s) over the 3×3×3 finest-cascade cell neighbourhood; ≤ 8 concurrent
+systems. Demotion kills bodies with a name-match slot-reuse guard.
+Grep-able verification: `[StarSys] promoted 'OMV <cx>.<cy>.<cz>.<sub>'
+(M Msun, N planets) in <galaxy> at x,y,z AU`. **Main-thread only** (mutates
+`g_bodies`). Called from the main loop just before physics so a fresh system
+integrates the same frame; reset on universe reload.
+
 ### `cosmic_field.c` / `cosmic_field.h`
 
 The unified **CosmicField** density/variance field (roadmap Phase A #3): one

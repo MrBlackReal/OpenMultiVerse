@@ -55,6 +55,7 @@
 #include "cosmic_field.h"
 #include "radiance_field.h"
 #include "field_graph.h"
+#include "starsys.h"
 #include "spectral.h"
 #include "audio.h"
 #include "presets.h"
@@ -437,6 +438,7 @@ static void reset_universe_state(void) {
     collision_reset();
     supernova_reset();
     field_graph_reset();   /* event history belongs to the old universe */
+    starsys_reset();       /* promoted bodies were wiped with the world */
     clear_movement_keys();
     s_freelook = 0;
     s_warp = 0;
@@ -1219,6 +1221,11 @@ int main(int argc, char **argv) {
 
         if (!cam_fly_active() && !s_pause_menu_open && !g_inspect_orbit_mode)
             camera_move(dt);
+
+        /* Star→system promotion (§0.1 final step): make the nearest
+         * procedural galaxy stars real bodies before physics runs, so a
+         * freshly promoted system integrates this same frame. */
+        starsys_tick(g_cam.pos, (float)SDL_GetTicks() * 0.001f);
 
         /* Physics — RESPA hierarchical integrator */
         if (!g_paused && g_sim_speed > 0.0) {

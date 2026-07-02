@@ -53,3 +53,10 @@ void         galaxy_position(int i, double out[3]);
 double       galaxy_radius_au(int i);
 /* Display colour of galaxy i (white if out of range). */
 void         galaxy_color(int i, float out[3]);
+
+/* Procedural-model parameters of galaxy i, for CPU-side re-evaluation of the
+ * galaxy_stars density/hash pipeline (starsys.c star→system promotion must
+ * find exactly the stars the shader draws). */
+int          galaxy_type(int i);           /* 0 spiral, 1 elliptical, 2 irregular */
+float        galaxy_seed(int i);
+void         galaxy_axis(int i, float out[3]);

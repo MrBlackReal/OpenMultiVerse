@@ -89,11 +89,24 @@ surroundings become a galaxy, then the Local Group" — now works end to end:
   scale contributes its brightest members. Flying toward a spiral arm resolves
   it into individual stars; the glow stays as the unresolved remainder.
 
-**Remaining:** promoting a procedural star to a real loaded star *system* on
-close approach (the final "get close to a star → see its planets" step —
-needs deterministic seeding into `universe_add_body` + active-region
-integration), and richer per-cascade populations (open clusters, OB
-associations along the arms).
+* **…and stars into real systems** (`starsys.c`): come within ~1 ly of a
+  procedural star and it is *promoted* to a live body with a deterministic
+  planetary system — a float-exact CPU port of the shader's hash/density
+  pipeline finds exactly the star the sprite showed (the sprite is
+  suppressed via uniforms while the body exists), mass follows the same
+  luminosity hash that brightened it, colour comes from the spectral
+  pipeline, and planets spawn on circular orbits near the disc plane (rocky
+  inside the snow line, giants outside, temperate worlds get atmospheres).
+  Fly away ≳2.6 ly and it demotes; return and the identical system
+  regenerates from the same lattice seed. Promoted stars are real bodies, so
+  labels, Inspect, RadianceField lighting, adaptive-warp deceleration, and
+  physics all pick them up with zero special cases — verified headless
+  (`[StarSys] promoted 'OMV 107.188.1938.3' (0.40 Msun, 5 planets)…`,
+  planets orbiting on trails, star as dominant HUD light at 0.5 AU).
+
+**Remaining:** richer per-cascade populations (open clusters, OB
+associations along the arms), binaries/multiples, and moons + rings for
+promoted giants.
 
 ---
 

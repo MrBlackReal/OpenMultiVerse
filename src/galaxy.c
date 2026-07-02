@@ -11,6 +11,7 @@
  * Data: SIMBAD/NED J2000 positions, distances, major-axis sizes, inclinations.
  */
 #include "galaxy.h"
+#include "starsys.h"     /* suppressed cells: promoted stars are real bodies */
 #include "gl_utils.h"
 #include "common.h"
 #include <stdio.h>
@@ -102,7 +103,7 @@ static GLuint s_star_shader = 0, s_star_vao = 0;
 static GLint  s_su_vp, s_su_cell_base, s_su_origin_rel, s_su_cell_size;
 static GLint  s_su_grid_dim, s_su_inner, s_su_outer, s_su_cam_in_gal;
 static GLint  s_su_radius, s_su_axis, s_su_seed, s_su_type, s_su_time;
-static GLint  s_su_gain, s_su_lum;
+static GLint  s_su_gain, s_su_lum, s_su_suppress, s_su_n_suppress;
 static GLint  s_u_vp, s_u_center, s_u_radius, s_u_right, s_u_up, s_u_fwd;
 static GLint  s_u_oc, s_u_color, s_u_density, s_u_seed, s_u_bill, s_u_fullscreen;
 static GLint  s_u_fov_tan, s_u_aspect, s_u_screen, s_u_steps, s_u_type;
@@ -233,6 +234,8 @@ void galaxy_init(void)
         s_su_time       = glGetUniformLocation(s_star_shader, "u_time");
         s_su_gain       = glGetUniformLocation(s_star_shader, "u_gain");
         s_su_lum        = glGetUniformLocation(s_star_shader, "u_lum_scale");
+        s_su_suppress   = glGetUniformLocation(s_star_shader, "u_suppress");
+        s_su_n_suppress = glGetUniformLocation(s_star_shader, "u_n_suppress");
         s_star_vao      = gl_vao_create();
         glBindVertexArray(0);
     } else {
@@ -386,6 +389,15 @@ void galaxy_render_stars(const float vp_camrel[16], const double cam_pos[3],
         double dist = sqrt(gx*gx + gy*gy + gz*gz);
         if (dist > GS_ENTER_FRAC * s_gal[i].radius) continue;
 
+        /* Hide sprites of stars currently promoted to real bodies. */
+        {
+            int sup[8][4];
+            int nsup = starsys_suppressed(i, sup, 8);
+            glUniform1i(s_su_n_suppress, nsup);
+            if (nsup > 0)
+                glUniform4iv(s_su_suppress, nsup, &sup[0][0]);
+        }
+
         glUniform3f(s_su_cam_in_gal, (float)(gx / s_gal[i].radius),
                                      (float)(gy / s_gal[i].radius),
                                      (float)(gz / s_gal[i].radius));
@@ -468,4 +480,22 @@ void galaxy_color(int i, float out[3])
     out[0] = s_gal[i].col[0];
     out[1] = s_gal[i].col[1];
     out[2] = s_gal[i].col[2];
+}
+
+int galaxy_type(int i)
+{
+    return (i >= 0 && i < GALAXY_COUNT) ? s_gal[i].type : 0;
+}
+
+float galaxy_seed(int i)
+{
+    return (i >= 0 && i < GALAXY_COUNT) ? s_gal[i].seed : 0.0f;
+}
+
+void galaxy_axis(int i, float out[3])
+{
+    if (i < 0 || i >= GALAXY_COUNT) { out[0] = 0; out[1] = 1; out[2] = 0; return; }
+    out[0] = s_gal[i].axis[0];
+    out[1] = s_gal[i].axis[1];
+    out[2] = s_gal[i].axis[2];
 }
