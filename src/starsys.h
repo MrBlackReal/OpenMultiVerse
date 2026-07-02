@@ -24,6 +24,11 @@
 /* Forget all promotions (universe reload wiped the bodies). */
 void starsys_reset(void);
 
+/* Master toggle (Visuals menu). Disabling demotes everything currently
+ * promoted on the next tick; the procedural sprites take over again. */
+void starsys_set_enabled(int enabled);
+int  starsys_enabled(void);
+
 /* Per-frame: demote out-of-range systems, promote newly-near procedural
  * stars. cam_pos_au = camera in AU (g_cam.pos), time_s = the same clock
  * render.c hands the galaxy shaders (drives the arm-shear term). */

@@ -23,8 +23,9 @@
                                     * keeps drawing behind it */
 #define GALAXY_BILL      1.30f     /* billboard overscan (matches nebula.vert) */
 
-static float s_density    = 0.85f;
-static int   s_base_steps = 18;
+static float s_density       = 0.85f;
+static int   s_base_steps    = 18;
+static int   s_stars_enabled = 1;   /* resolved-stars pass (galaxy_render_stars) */
 
 /* Morphology — must match galaxy.frag u_type. */
 enum {
@@ -363,7 +364,8 @@ void galaxy_render(const float vp_camrel[16],
 void galaxy_render_stars(const float vp_camrel[16], const double cam_pos[3],
                          float gain, float time_s)
 {
-    if (!s_enabled || !s_star_shader || !s_star_vao || gain <= 0.002f) return;
+    if (!s_enabled || !s_stars_enabled || !s_star_shader || !s_star_vao ||
+        gain <= 0.002f) return;
 
     glUseProgram(s_star_shader);
     glUniformMatrix4fv(s_su_vp, 1, GL_FALSE, vp_camrel);
@@ -454,6 +456,24 @@ void galaxy_shutdown(void)
 
 void galaxy_set_enabled(int enabled) { s_enabled = enabled ? 1 : 0; }
 int  galaxy_enabled(void)            { return s_enabled; }
+
+void galaxy_get_params(int *enabled, float *density, int *steps,
+                       int *stars_enabled)
+{
+    if (enabled)       *enabled       = s_enabled;
+    if (density)       *density       = s_density;
+    if (steps)         *steps         = s_base_steps;
+    if (stars_enabled) *stars_enabled = s_stars_enabled;
+}
+
+void galaxy_set_params(int enabled, float density, int steps,
+                       int stars_enabled)
+{
+    s_enabled = enabled ? 1 : 0;
+    s_density = density < 0.0f ? 0.0f : density;
+    s_base_steps = steps < 4 ? 4 : (steps > 64 ? 64 : steps);
+    s_stars_enabled = stars_enabled ? 1 : 0;
+}
 
 int         galaxy_count(void)       { return GALAXY_COUNT; }
 const char *galaxy_name(int i)

@@ -15,6 +15,7 @@
 #include "post.h"
 #include "nebula.h"
 #include "galaxy.h"
+#include "starsys.h"
 #include "inspect.h"
 #include "lifecycle.h"
 #include "field_graph.h"
@@ -965,6 +966,34 @@ int menu_render(int current_preset, int *laws_changed, const char **out_load_pat
                                      "use fewer steps automatically.");
                     igPopItemWidth();
                     if (nch) nebula_set_params(nen, nde, nst);
+                }
+
+                igSeparator();
+                {
+                    int   gen, gst, gsr; float gde;
+                    galaxy_get_params(&gen, &gde, &gst, &gsr);
+                    bool  gb = gen, sb = gsr;
+                    int   gch = 0;
+                    if (igCheckbox("Galaxies", &gb)) { gen = gb; gch = 1; }
+                    igSetItemTooltip("Volumetric catalogue galaxies, including "
+                                     "the Milky Way you're inside.");
+                    igPushItemWidth(igGetContentRegionAvail().x * 0.55f);
+                    gch |= igSliderFloat("Galaxy density", &gde, 0.0f, 2.0f, "%.2f", 0);
+                    igSetItemTooltip("Volume glow opacity / brightness.");
+                    gch |= igSliderInt("Galaxy steps", &gst, 4, 64, "%d", 0);
+                    igSetItemTooltip("Raymarch quality vs. performance. Distant galaxies "
+                                     "use fewer steps automatically.");
+                    igPopItemWidth();
+                    if (igCheckbox("Resolved stars", &sb)) { gsr = sb; gch = 1; }
+                    igSetItemTooltip("Procedural point stars that resolve out of the "
+                                     "galaxy glow as you approach.");
+                    if (gch) galaxy_set_params(gen, gde, gst, gsr);
+
+                    bool pb = starsys_enabled();
+                    if (igCheckbox("Star promotion", &pb))
+                        starsys_set_enabled(pb);
+                    igSetItemTooltip("Approach a procedural star and it becomes a real "
+                                     "planetary system. Off demotes any current ones.");
                 }
             }
 

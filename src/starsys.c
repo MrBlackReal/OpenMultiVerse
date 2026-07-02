@@ -52,6 +52,7 @@ typedef struct {
 
 static Promoted s_prom[SS_MAX];
 static double   s_since_scan = 1e9;
+static int      s_enabled    = 1;
 
 /* ── shader port: hashes / noise / density (keep bit-for-bit in step) ────── */
 
@@ -392,6 +393,9 @@ void starsys_reset(void)
     s_since_scan = 1e9;
 }
 
+void starsys_set_enabled(int enabled) { s_enabled = enabled ? 1 : 0; }
+int  starsys_enabled(void)            { return s_enabled; }
+
 int starsys_suppressed(int gal, int out[][4], int max)
 {
     int n = 0;
@@ -410,17 +414,18 @@ void starsys_tick(const double cam_au[3], float time_s)
 {
     float gain = crossfade_gain(cam_au);
 
-    /* Demotions run every tick (cheap): out of range, or back in the
-     * catalogue zone where procedural stars aren't the visible sky. */
+    /* Demotions run every tick (cheap): out of range, back in the catalogue
+     * zone where procedural stars aren't the visible sky, or feature off. */
     for (int i = 0; i < SS_MAX; i++) {
         if (!s_prom[i].active) continue;
         double dx = s_prom[i].pos_au[0] - cam_au[0];
         double dy = s_prom[i].pos_au[1] - cam_au[1];
         double dz = s_prom[i].pos_au[2] - cam_au[2];
         double d2 = dx*dx + dy*dy + dz*dz;
-        if (d2 > SS_DEMOTE_AU * SS_DEMOTE_AU || gain < 0.98f)
+        if (d2 > SS_DEMOTE_AU * SS_DEMOTE_AU || gain < 0.98f || !s_enabled)
             demote(&s_prom[i]);
     }
+    if (!s_enabled) return;
 
     /* Promotion scan, throttled: enumerate finest-cascade candidates in the
      * 3×3×3 cell neighbourhood around the camera, exactly like the shader. */

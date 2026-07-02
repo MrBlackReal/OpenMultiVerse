@@ -44,6 +44,14 @@ void galaxy_render_stars(const float vp_camrel[16], const double cam_pos[3],
 void galaxy_set_enabled(int enabled);
 int  galaxy_enabled(void);
 
+/* Visuals-menu parameters, nebula_get/set_params pattern (runtime-only,
+ * not persisted): master toggle, volume density/brightness, raymarch step
+ * budget, and the resolved-stars pass toggle. */
+void galaxy_get_params(int *enabled, float *density, int *steps,
+                       int *stars_enabled);
+void galaxy_set_params(int enabled, float density, int steps,
+                       int stars_enabled);
+
 /* Enumeration for the Navigate tab / fields. */
 int          galaxy_count(void);
 const char  *galaxy_name(int i);
