@@ -791,6 +791,52 @@ Drawn camera-relative after
 opaque geometry with depth test on / writes off. Exposes a Visuals toggle +
 density/steps and a Navigate-tab enumeration.
 
+### `galaxy.c` / `galaxy.h`
+
+Catalogue galaxies as world-space volumetric structures (roadmap Layer 4.2,
+first iteration) — the same architecture as `nebula.c`: real J2000
+RA/Dec + distance + apparent size place the **Milky Way itself** (centred
+26 kly toward Sgr A*, disc axis = the real galactic north pole, explicit
+50 kly radius, reduced inside-veil brightness that blends back to full once
+the camera is outside the volume — from Earth it is the Milky Way band,
+from 100 kly out a spiral, no mode switch) plus 10 Local Group / nearby
+galaxies (LMC/SMC, M31, M33, M81, NGC 253, Cen A, M51, M104, M87) as
+navigable 3D objects; one raymarch representation (`galaxy.frag`, carried by
+the reused `nebula.vert` billboard/fullscreen quad) covers backdrop through
+fly-through, with the angular-size-preserving far-clamp shell at 1400 AU
+(just inside the nebula shell so overlaps sort). The density model is
+per-type: **spiral** (exponential thin disc + warm bulge, two logarithmic
+arms with FBM star-forming knots, absorbing dust lanes slightly below the
+midplane that also extinguish embedded starlight — edge-on discs get the
+classic dark stripe; flat-rotation-curve shear on `u_time`, noise in the
+co-rotating frame; rays are clipped to the disc slab so the fixed step
+budget samples the disc, not empty bounding sphere), **elliptical**
+(steep-cored smooth glow), **irregular** (clumpy squashed FBM with pink HII
+knots). Each disc axis is tilted off the Earth sightline by the catalogued
+inclination (or uses an explicit catalogued pole), so the iconic Earth views
+are right. Drawn immediately before the nebulae (farther translucents first).
+
+**Procedural resolved stars** (`galaxy_stars.vert/.frag`,
+`galaxy_render_stars()`, the roadmap §0.1 galaxy → stars step): when the
+camera is inside or entering a galaxy (< 1.35× radius), attribute-less
+point-draw cascades resolve the volume into individual stars. Six cubic
+lattices centred on the camera (cells 2 → 2048 ly, 20³ cells × 5 candidates
+each) hash stable star positions from absolute galaxy-frame cell coordinates
+(grid corner precomputed in double on the CPU — floats stay camera-relative);
+a candidate lives if a hash beats the local emission density evaluated by a
+port of `galaxy.frag`'s model (the two must stay in sync), so stars trace
+the same arms/bulge/knots as the glow. Luminosity is a power-law tail scaled
+per cascade (~cell²) so every scale shows its brightest members; each
+cascade excludes the next-finer one's box and fades at its rim. Additive
+blend at log depth (occluded by planets, no depth writes), crossfaded in by
+`render.c` as the painted skybox fades out (47 ly → 4.7 kly from origin), so
+the neighbourhood sky hands over to the procedural field with no double
+counting. The galaxy anchors in `main.c camera_move()`'s adaptive warp make
+arrival at any galaxy auto-decelerate into this resolved regime.
+
+Consumers: Navigate → "Galaxies (fly to)", RadianceField integrated
+emitters, and field-graph galaxy nodes.
+
 ### `cosmic_field.c` / `cosmic_field.h`
 
 The unified **CosmicField** density/variance field (roadmap Phase A #3): one
@@ -842,6 +888,66 @@ existing scenes are untouched); the HUD field line; and a headless
 `[RadianceField]` stdout print. Emitter *positions* are read live from
 `g_bodies` each query; membership/luminosity is cached (rebuilt throttled —
 every tick while a supernova is active, since its flash decays in real time).
+**Main-thread only**, same contract as `cosmic_field`.
+
+Later additions: star temperatures come from `spectral.c` (physical mass+phase
+T_eff; the display-colour estimate survives only as the massless-catalog-row
+fallback); every light's chromaticity is the blackbody tint of its T_eff
+relative to Sol's (white for a Sun twin — established looks preserved; M
+dwarfs light their planets warm orange via `u_sun_col` in `phong`/`atm`);
+and **nebulae are emitters** (L ∝ area, Orion-class reference, body = -1 with
+`RadianceContrib.nebula` carrying the index so a cloud's receiver query can
+skip its own glow; `RadianceSample.dom_label` names body-less dominants in
+the HUD/headless print).
+
+### `spectral.c` / `spectral.h`
+
+Stellar **spectral classification** (roadmap §1.1) and the RadianceField's
+effective-temperature source of truth (§0.3): pure functions of a `Body`
+mapping mass + lifecycle phase → T_eff and an MK-style class. Main-sequence T
+uses a piecewise mass–temperature slope calibrated so Sol lands exactly on
+G2V (TRAPPIST-1 → M6V with its real luminosity, Sirius-mass stars → A);
+subgiants cool toward IV, red giants converge on ~3600 K III, and remnants
+get compact classes (DA white dwarf, PN nucleus, NS). Stars without a usable
+mass fall back to the display-colour estimate the RadianceField used
+originally (same Sol calibration). Consumers: `radiance_field.c
+star_luminosity()` (Stefan-Boltzmann h = T/T☉), the Inspect panel's
+"Class:" line, and the headless `[RadianceField] cls=` print. Stateless and
+thread-agnostic.
+
+### `field_graph.c` / `field_graph.h`
+
+The **universe field graph** (roadmap Phase A #5, §0.4): one queryable graph
+of typed nodes and edges over relations that already exist implicitly in the
+sim, and the backbone later systems attach to (orbit prediction reads gravity
+edges, timeline scrubbing replays the event log, galaxy formation adds field
+nodes). Nodes are the existing entities (alive `g_bodies` + nebula field
+nodes, counted but edge-less so far). Stored edges are harvested in one O(N)
+pass on a throttled rebuild (0.25 s, immediate on body-count change):
+**GRAVITY** child→parent from `Body.parent`, and **GAS_FLOW** donor→hole from
+the accretion model's Roche streams (`accretion_flows()`, with a live kg/s
+rate) plus tidal-disruption streams (`Body.tidal_frac`/`tidal_hole`).
+**RADIATION edges are deliberately not stored** — at ~16k bodies an all-pairs
+body×emitter table is unaffordable — they are computed lazily per query via
+`radiance_field_top()` (`field_graph_radiation_top()`).
+
+Evolution/event transitions land in a fixed 256-entry ring
+(`FieldGraphEvent`), fed by explicit notify calls at the moment a transition
+happens: `lifecycle.c` phase changes, `supernova.c` detonation→remnant (both
+the lifecycle and the star-merger path), and `collision.c` merges and tidal
+consumptions (`finalize_absorb_body()` carries a `tidal` flag to tell them
+apart). Body slots are reused after death, so every event snapshots the
+participants' **names**; `field_graph_body_events()` matches index + name, so
+a reused slot drops — never misattributes — the previous tenant's history.
+Each event also snapshots both clocks (`g_sim_time` and the subject's
+`age_yr`) and prints one grep-able `[FieldGraph] event=…` stdout line.
+
+Consumers: the Inspect panel's **Relations** block (orbit chain, gas-flow
+edges with Msun/yr rates, top incident lights, per-body history) plus a
+collapsed **Recent events** log (menu.c, IMGUI only), and headless
+`[FieldGraph] nodes=… edges=… events=…` stats lines at boot and at shot time
+(gas flows/events only exist once stellar time has run). Universe reload
+clears the log via `field_graph_reset()` (`main.c reset_universe_state()`).
 **Main-thread only**, same contract as `cosmic_field`.
 
 ### `menu.c` / `menu.h`

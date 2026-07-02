@@ -7,13 +7,10 @@
  * ── Luminosity models ─────────────────────────────────────────────────────
  *
  * Thermal stars:  L = L☉ · (R/R☉)² · h⁴, the Stefan-Boltzmann law with the
- * effective-temperature ratio h = T/T☉ estimated from the star's display
- * colour.  The codebase's existing temperature proxy is the blue−red channel
- * balance (star_glare corona weighting, catalog colour conversion), so h is
- * calibrated against Sol's authored colour: a star coloured like the Sun gets
- * exactly h = 1, bluer runs hotter, redder cooler.  This is a v1 estimate —
- * when spectral classification lands (roadmap §1.1) it becomes the source of
- * truth for T and this refines for free.
+ * effective-temperature ratio h = T/T☉ from **spectral classification**
+ * (spectral.c, roadmap §1.1): T is physical — mass + lifecycle phase — with
+ * the old display-colour estimate as the fallback for massless catalog rows
+ * (calibrated so Sol → T☉ either way, so Earth still gets ~1361 W/m²).
  *
  * Black holes / AGN:  L = η·Ṁ·c² (η = 0.1, matching accretion.c) when the
  * accretion model is running; otherwise the authored Eddington ratio seeds
@@ -33,6 +30,9 @@
 #include "radiance_field.h"
 #include "body.h"
 #include "camera.h"
+#include "nebula.h"
+#include "galaxy.h"
+#include "spectral.h"
 #include "supernova.h"
 
 #include <stdlib.h>
@@ -46,15 +46,12 @@
 #define EDD_PER_MSUN 1.26e31       /* Eddington luminosity per solar mass, W */
 #define ACC_EFF    0.1             /* radiative efficiency η (accretion.c)   */
 
-/* Colour→temperature-ratio calibration: Sol's authored colour (1, 0.92, 0.23)
- * has blue−red = −0.77 and must map to h = T/T☉ = 1.  Slope chosen so a
- * blue-white star (b−r ≈ +0.3) runs h ≈ 2.3 (~13000 K, early A/B) and a deep
- * red dwarf (b−r ≈ −1.0) h ≈ 0.7 (~4000 K).  Clamped to keep L finite for
- * arbitrary hand-authored colours. */
-#define SUN_BLUE_RED  (-0.77)
-#define HEAT_SLOPE    1.2
-#define HEAT_MIN      0.45
-#define HEAT_MAX      3.0
+/* Temperature-ratio clamp for the Stefan-Boltzmann term: wide enough for the
+ * physical range spectral.c produces (late M dwarfs ~1800 K up to hot
+ * planetary-nebula nuclei; a neutron star's 6e5 K clamps here, but its tiny
+ * radius keeps L sane), tight enough that h⁴ stays finite. */
+#define HEAT_MIN      0.3
+#define HEAT_MAX      20.0
 
 /* A quiet hole that still wears an accretion disk (e.g. the Gargantua preset:
  * disk on, no authored activity) renders as a glowing disk, so it must light
@@ -68,16 +65,36 @@
 #define SN_L_CORE  2.0e35
 #define SN_L_CLOUD 2.0e34
 
+/* Nebular emission (roadmap §0.3 "nebular glow" as an *emitter*): each cloud
+ * reradiates like an emission nebula powered by its embedded association —
+ * L ∝ projected area, referenced to an Orion-class nebula (~1e5 L☉ at 10 ly).
+ * Because L ∝ R², the irradiance just inside any cloud is a constant
+ * L_ref/(4π·R_ref²) ≈ 3e-4 W/m² — deliberately below the 1e-3 W/m² nebula
+ * *receiver* threshold, so a cloud never boosts itself, but a body drifting
+ * through it picks up a faint coloured glow when no star outshines it. */
+#define NEB_L_REF   3.8e31             /* W (≈1e5 L☉)                       */
+#define NEB_R_REF_M (10.0 * 9.461e15)  /* 10 ly in metres                   */
+
+/* Galaxy emission (roadmap §0.3 "galaxy light distribution", first step):
+ * one integrated emitter per catalogue galaxy, L ∝ area referenced to a
+ * Milky-Way-class disc (~2.5e10 L☉ at 50 kly). Interstellar-scale scenes are
+ * numerically untouched (a Local Group galaxy delivers ~1e-9 W/m² here);
+ * per-region light within a galaxy is future work for Layer 4.2. */
+#define GAL_L_REF   1.0e37                 /* W (≈2.6e10 L☉)                */
+#define GAL_R_REF_M (5.0e4 * 9.461e15)     /* 50 kly in metres              */
+
 /* ── emitter list ─────────────────────────────────────────────────────────
  * Membership + luminosity are cached at rebuild.  Body emitters read their
  * position live from g_bodies at query time (orbits move between rebuilds);
  * transient (supernova) emitters use the snapshot pos — the blast is anchored. */
 typedef struct {
-    int    body;      /* g_bodies index, or -1 = transient (supernova)      */
+    int    body;      /* g_bodies index, or -1 = body-less (SN / nebula)    */
     double lum;       /* luminosity, W                                      */
     double pos[3];    /* SI m; used when body < 0 (bodies are read live)    */
     double rmin2;     /* min distance² clamp (photosphere / core), m²       */
     float  col[3];    /* chromaticity (max component 1)                     */
+    const char *label;/* display name for body-less emitters (static str)   */
+    int    nebula;    /* nebula index for nebula emitters, else -1          */
 } Emitter;
 
 static Emitter *s_em = NULL;
@@ -97,8 +114,10 @@ static int    s_had_sn        = 0;   /* last rebuild harvested a supernova */
 /* Thermal (photosphere) luminosity of a star-flagged body, W. */
 static double star_luminosity(const Body *b)
 {
+    double t = spectral_t_eff(b);
+    if (t <= 0.0) return 0.0;
     double rr = b->radius / R_SUN;
-    double h  = 1.0 + HEAT_SLOPE * ((double)(b->col[2] - b->col[0]) - SUN_BLUE_RED);
+    double h  = t / SPECTRAL_T_SUN;
     if (h < HEAT_MIN) h = HEAT_MIN;
     if (h > HEAT_MAX) h = HEAT_MAX;
     return L_SUN * rr * rr * (h * h) * (h * h);
@@ -200,7 +219,67 @@ void radiance_field_rebuild(void)
         e->pos[0] = e->pos[1] = e->pos[2] = 0.0;   /* read live */
         e->rmin2 = b->radius * b->radius;
         radiance_field_body_color(i, e->col);
+        e->label  = NULL;
+        e->nebula = -1;
         s_body_lum[i] = lum;
+    }
+
+    /* Nebulae as faint area emitters (skipped when nebulae are disabled in
+     * the menu — no glow drawn, no light cast). */
+    if (nebula_enabled()) {
+        int nn = nebula_count();
+        for (int i = 0; i < nn; i++) {
+            double r_m = nebula_radius_au(i) * AU;
+            if (r_m <= 0.0) continue;
+            double pos_au[3];
+            nebula_position(i, pos_au);
+            Emitter *e = emitters_push();
+            e->body   = -1;
+            e->lum    = NEB_L_REF * (r_m / NEB_R_REF_M) * (r_m / NEB_R_REF_M);
+            e->pos[0] = pos_au[0] * AU;
+            e->pos[1] = pos_au[1] * AU;
+            e->pos[2] = pos_au[2] * AU;
+            e->rmin2  = r_m * r_m;
+            nebula_color(i, e->col);
+            float m = e->col[0] > e->col[1] ? e->col[0] : e->col[1];
+            if (e->col[2] > m) m = e->col[2];
+            if (m > 1e-6f) {
+                e->col[0] /= m; e->col[1] /= m; e->col[2] /= m;
+            } else {
+                e->col[0] = e->col[1] = e->col[2] = 1.0f;
+            }
+            e->label  = nebula_name(i);
+            e->nebula = i;
+        }
+    }
+
+    /* Galaxies as integrated area emitters (Layer 4.2 hosts; skipped when
+     * disabled in the menu alongside their rendering). */
+    if (galaxy_enabled()) {
+        int ng = galaxy_count();
+        for (int i = 0; i < ng; i++) {
+            double r_m = galaxy_radius_au(i) * AU;
+            if (r_m <= 0.0) continue;
+            double pos_au[3];
+            galaxy_position(i, pos_au);
+            Emitter *e = emitters_push();
+            e->body   = -1;
+            e->lum    = GAL_L_REF * (r_m / GAL_R_REF_M) * (r_m / GAL_R_REF_M);
+            e->pos[0] = pos_au[0] * AU;
+            e->pos[1] = pos_au[1] * AU;
+            e->pos[2] = pos_au[2] * AU;
+            e->rmin2  = r_m * r_m;
+            galaxy_color(i, e->col);
+            float m = e->col[0] > e->col[1] ? e->col[0] : e->col[1];
+            if (e->col[2] > m) m = e->col[2];
+            if (m > 1e-6f) {
+                e->col[0] /= m; e->col[1] /= m; e->col[2] /= m;
+            } else {
+                e->col[0] = e->col[1] = e->col[2] = 1.0f;
+            }
+            e->label  = galaxy_name(i);
+            e->nebula = -1;
+        }
     }
 
     /* Transient supernova emitters, anchored at the detonation point.  Asking
@@ -236,6 +315,8 @@ void radiance_field_rebuild(void)
             } else {
                 e->col[0] = e->col[1] = e->col[2] = 1.0f;
             }
+            e->label  = "supernova";
+            e->nebula = -1;
         }
     }
 
@@ -280,7 +361,9 @@ int radiance_field_sample(const double pos_m[3], int exclude_body,
     const Emitter *de = &s_em[best_e];
     out->irradiance = total;
     out->dom_irr    = best;
-    out->dominant   = de->body;   /* -1 for a transient (supernova) */
+    out->dominant   = de->body;   /* -1 for a body-less emitter */
+    out->dom_label  = de->body >= 0 ? g_bodies[de->body].name
+                    : de->label     ? de->label : "?";
 
     double p[3];
     emitter_pos(de, p);
@@ -328,8 +411,9 @@ int radiance_field_top(const double pos_m[3], int exclude_body,
             out[i] = out[i-1];
             i--;
         }
-        out[i].body = s_em[e].body;
-        out[i].irr  = irr;
+        out[i].body   = s_em[e].body;
+        out[i].nebula = s_em[e].nebula;
+        out[i].irr    = irr;
         emitter_pos(&s_em[e], out[i].pos);
         out[i].col[0] = s_em[e].col[0];
         out[i].col[1] = s_em[e].col[1];
@@ -338,17 +422,28 @@ int radiance_field_top(const double pos_m[3], int exclude_body,
     return n;
 }
 
-/* Chromaticity: display colour normalised so the max component is 1 (colour
- * only — irradiance carries the magnitude).  Black holes emit hot disk light,
- * not their (black) body colour. */
+/* Chromaticity (max component 1; irradiance carries the magnitude).  Stars
+ * use the physical blackbody tint of their spectral T_eff *relative to the
+ * Sun's* — exactly white for a Sol twin, so Sol-lit scenes keep their
+ * established art-directed look, while an M dwarf lights its planets warm
+ * orange and an A star faintly blue.  Black holes emit hot disk light, not
+ * their (black) body colour. */
 void radiance_field_body_color(int body, float out_col[3])
 {
     out_col[0] = out_col[1] = out_col[2] = 1.0f;
     if (body < 0 || body >= g_nbodies) return;
     const Body *b = &g_bodies[body];
-    float c[3];
-    if (b->is_black_hole) { c[0] = 1.0f; c[1] = 0.93f; c[2] = 0.82f; }
-    else { c[0] = b->col[0]; c[1] = b->col[1]; c[2] = b->col[2]; }
+    if (b->is_black_hole) {
+        out_col[0] = 1.0f; out_col[1] = 0.93f; out_col[2] = 0.82f;
+        return;
+    }
+    double t = spectral_t_eff(b);
+    if (t > 0.0) {
+        spectral_light_tint(t, out_col);
+        return;
+    }
+    /* Non-emitter fallback: display colour, normalised. */
+    float c[3] = { b->col[0], b->col[1], b->col[2] };
     float m = c[0] > c[1] ? c[0] : c[1];
     if (c[2] > m) m = c[2];
     if (m < 1e-6f) return;

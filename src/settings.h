@@ -72,6 +72,10 @@ typedef struct {
     /* ---- camera / controls ------------------------------------------- */
     float  fov;                /* vertical field of view (degrees)            */
     float  warp_speed_min_au, warp_speed_max_au;
+    int    adaptive_warp;      /* warp speed also scales with distance from   */
+                               /* the nearest body, so flying "out" ramps     */
+                               /* through interstellar → galactic scales      */
+                               /* (the §0.1 zoom-out) in minutes, not hours   */
     float  slider_step;        /* keyboard/wheel adjust increment             */
     float  mouse_sens_min, mouse_sens_max;
 

@@ -771,13 +771,15 @@ void universe_load(const char *path)
     /* ================================================================
      * Pass 2 — Planets, dwarf_planets, and asteroids
      *
-     * keplerian_to_state() returns a heliocentric position/velocity in SI
-     * units (metres, m/s) relative to the parent star.  The star's world
-     * position is then added to convert to absolute world coordinates.
+     * keplerian_to_state() returns the RELATIVE orbit's position/velocity in
+     * SI units (metres, m/s) with respect to the parent.  The parent's world
+     * position is then added to convert to absolute world coordinates, and
+     * the body keeps its barycentric share M/(M+m) of the relative velocity
+     * (see the two-body note at the conversion site below).
      *
-     * GM of the parent star must be expressed in AU³/day² to match the
-     * JPL table convention used by keplerian_to_state():
-     *   gm_star_au2 = G × M_star / AU³ × DAY²
+     * GM must be expressed in AU³/day² to match the JPL table convention
+     * used by keplerian_to_state():
+     *   gm_rel_au2 = G × (M_parent + m_body) / AU³ × DAY²
      *
      * All parent data is read before the ensure_capacity() call: while
      * ensure_capacity uses an integer index (par_idx) that survives realloc,
@@ -809,8 +811,19 @@ void universe_load(const char *path)
                 json_free(root); exit(1);
             }
 
-            /* GM of parent star in AU³/day² for keplerian_to_state() */
-            double gm_star_au2 = G_CONST * g_bodies[par_idx].mass
+            /* GM for keplerian_to_state() in AU³/day².  The elements describe
+             * the RELATIVE orbit, whose two-body GM is G·(M_parent + m_body);
+             * the body then takes its barycentric share M/(M+m) of the
+             * relative velocity, and the CoM correction in post-processing
+             * gives the parent the opposite share — so the realised relative
+             * orbit matches the authored elements exactly.  For planet-mass
+             * companions (m ≪ M) this is indistinguishable from the old
+             * heliocentric convention; for a comparable-mass companion (e.g.
+             * a Roche donor around a stellar-mass black hole, q ≈ 0.7) the
+             * old form inflated the relative speed by (1+q) and blew the
+             * authored 0.15 AU orbit out to ~0.8 AU. */
+            double m_parent   = g_bodies[par_idx].mass;
+            double gm_rel_au2 = G_CONST * (m_parent + mass)
                                  / (AU * AU * AU) * (DAY * DAY);
 
             double p[3] = {0,0,0}, v[3] = {0,0,0};
@@ -823,7 +836,11 @@ void universe_load(const char *path)
                 double O = json_num(json_get(kep, "Omega"),        0.0);
                 double w = json_num(json_get(kep, "omega_tilde"),  0.0);
                 double L = json_num(json_get(kep, "L"),            0.0);
-                keplerian_to_state(a, e, ii, O, w, L, gm_star_au2, p, v);
+                keplerian_to_state(a, e, ii, O, w, L, gm_rel_au2, p, v);
+                if (m_parent + mass > 0.0) {
+                    double share = m_parent / (m_parent + mass);
+                    v[0] *= share; v[1] *= share; v[2] *= share;
+                }
             }
             /* Convert heliocentric → world coordinates */
             p[0] += g_bodies[par_idx].pos[0];

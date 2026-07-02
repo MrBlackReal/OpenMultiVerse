@@ -61,6 +61,40 @@ Replace discrete “planet view / solar system view / galaxy view” modes with 
 
 The camera can zoom from a planet’s surface to a galaxy cluster and beyond while maintaining a coherent visual and physical transition.
 
+### The zoom-out experience 🟡 *(landed: hold W from a planet to outside the galaxy)*
+
+The user-facing form of this layer — "zoom out from where I stand until my
+surroundings become a galaxy, then the Local Group" — now works end to end:
+
+* **Milky Way as the home volume** — the galaxy catalogue's first entry is the
+  Milky Way itself (centred 26 kly toward Sgr A*, disc axis = the real galactic
+  north pole, explicit 50 kly radius, reduced inside-veil brightness that blends
+  to full once the camera leaves the volume). From Earth it renders as the
+  Milky Way band, brightest toward Sagittarius; from 100 kly out it is a spiral
+  seen from outside — same object, no switch.
+* **Adaptive warp** (`g_settings.adaptive_warp`, on by default, menu toggle) —
+  in warp, speed also scales with distance to the nearest *anchor* (any alive
+  body, and every galaxy: distance to its volume edge, floored inside at 2% of
+  its radius). v = dist/8 → each decade of scale is a fixed ~18 s, so
+  interstellar space, the galaxy rim, and Andromeda are minutes away by just
+  holding W — and arrival anywhere (including at a galaxy) auto-decelerates.
+* **Skybox crossfade** — the painted magnitude-catalogue sky is a
+  direction-only backdrop of the stellar neighbourhood, so it fades out
+  47 ly → 4.7 kly from origin (`starfield.frag u_fade`)…
+* **…into procedural resolved stars** (`galaxy_stars.vert/.frag`,
+  `galaxy_render_stars()`): cascaded camera-centred lattices (6 cascades,
+  2 ly → 2048 ly cells) scatter stable point stars on the GPU following the
+  *same* density model as the galaxy volume glow, accepted per-star against
+  local emission density, luminosity power-law scaled per cascade so each
+  scale contributes its brightest members. Flying toward a spiral arm resolves
+  it into individual stars; the glow stays as the unresolved remainder.
+
+**Remaining:** promoting a procedural star to a real loaded star *system* on
+close approach (the final "get close to a star → see its planets" step —
+needs deterministic seeding into `universe_add_body` + active-region
+integration), and richer per-cascade populations (open clusters, OB
+associations along the arms).
+
 ---
 
 ## 0.2 Unified scene representation
@@ -127,14 +161,22 @@ clock). Main-thread only, like `CosmicField`.
 
 ### Covers
 
-* star emission ✅ (Stefan-Boltzmann from radius + colour-estimated T)
+* star emission ✅ (Stefan-Boltzmann from radius + **spectral T** — physical
+  mass+phase temperature from `spectral.c` §1.1, colour-estimate fallback)
 * atmospheric scattering ⛔ (atm shader still local; field feeds its light dir)
-* nebular glow 🟡 (nebulae are now *receivers* — see below; not yet emitters)
+* nebular glow ✅ (receivers *and* emitters — each cloud emits L ∝ area,
+  referenced to an Orion-class nebula; calibrated so a cloud's interior flux
+  sits just below its own receiver threshold — no self-boost feedback, and
+  the receiver query skips its own contribution (`RadianceContrib.nebula`).
+  A body drifting through a cloud picks up a faint coloured glow when no
+  star outshines it; the HUD names body-less dominants via `dom_label`)
 * accretion disks ✅ (accretion-powered luminosity incl. Eddington floor)
 * supernovae ✅ (transient emitters: flash/core/cloud intensities → ~1e36 W
   peak, anchored at the detonation point, body = -1 in query results; the
   field rebuilds every tick while an event runs so the decay lights smoothly)
-* galaxy light distribution ⛔ (needs the galaxy system, Layer 4.2)
+* galaxy light distribution 🟡 (each catalogue galaxy is an integrated
+  emitter — L ∝ area at Milky-Way-class reference, named in the HUD when
+  dominant; per-region light within a galaxy remains)
 * relativistic color shifts ⛔ (post pass exists §1.2; not yet field-driven)
 
 ### Nebulae as light receivers (landed — Layer 4.1 "dynamic energy injection")
@@ -164,11 +206,21 @@ hemispheres meeting in a double dusk instead of a false night side.  Ambient
 keys off "any sun up".  Secondary below 2% of primary is skipped (continuous
 fade, no pop); `u_light2 = 0` is bit-identical to the single-sun path.
 
-**Remaining for ✅:** spectral classification as the T source of truth (§1.1),
-nebular *emission* into the field (they only receive so far), per-shader
-adoption beyond `phong`/`atm`/`nebula` (glare brightness), and primary-light
-chromaticity (the primary sun is still art-directed warm-white to preserve the
-established look; only the secondary is tinted).
+**Physical light chromaticity (landed):** every light's tint is now the
+blackbody colour of its spectral T_eff *relative to Sol's* (`spectral.c
+spectral_light_tint()`), applied to both the primary (`phong.frag`/`atm.frag`
+`u_sun_col` multiplies the art-directed warm-white/dusk ramp) and the
+secondary. A Sun-like star's tint is exactly white, so every Sol-lit scene is
+bit-identical; an M dwarf's planets are lit warm orange (verified headless:
+neutral-grey probe renders tan at an M dwarf, neutral at a Sun twin, with
+physically correct irradiance 152 W/m² at 3 AU), an A star's faintly blue.
+
+**Remaining for ✅:** per-shader adoption beyond `phong`/`atm`/`nebula`
+(glare brightness — deferred deliberately: the dot↔glare handoff mirrors its
+falloff formula between CPU and shader, so rebasing glare on field luminosity
+needs its own careful pass), and wavelength-dependent emission curves (§1.1).
+*(Spectral classification as the T source of truth: DONE — `spectral.c`
+§1.1 feeds the Stefan-Boltzmann term and the light tints.)*
 
 > **Pre-existing bug found & FIXED during this work:** headless runs went
 > fully black (HUD included) after a few hundred frames in some scenes.
@@ -183,25 +235,66 @@ established look; only the secondary is tinted).
 
 ---
 
-## 0.4 Universe field graph
+## 0.4 Universe field graph 🟡 *(graph + event log landed)*
 
 Introduce a simulation graph that links object classes and fields:
 
 ### Node types
 
-* star node
-* planet node
-* black hole node
-* nebula field node
-* galaxy field node
-* event node
+* star node ✅
+* planet node ✅
+* black hole node ✅
+* nebula field node 🟡 (counted as field nodes; no edges yet)
+* galaxy field node 🟡 (counted as field nodes since Layer 4.2 landed;
+  no edges yet)
+* event node ✅ (256-entry ring of typed transitions)
 
 ### Edge types
 
-* gravitational coupling
-* radiation coupling
-* gas-flow coupling
-* evolution/event transitions
+* gravitational coupling ✅ (child→parent from `Body.parent`)
+* radiation coupling ✅ (lazy — `field_graph_radiation_top()` wraps
+  `radiance_field_top()` per query; deliberately not stored, an all-pairs
+  body×emitter table is unaffordable at 16k bodies)
+* gas-flow coupling ✅ (Roche donor→hole streams with live kg/s rates via the
+  new `accretion_flows()`, + tidal-disruption streams)
+* evolution/event transitions ✅ (notify hooks: lifecycle phase changes,
+  supernova detonation→remnant incl. the star-merger path, collision merges,
+  tidal consumptions — `collision.c finalize_absorb_body()` gained a `tidal`
+  flag to tell the last two apart)
+
+**Status:** first iteration implemented as `src/field_graph.{c,h}`, following
+the `cosmic_field`/`radiance_field` module pattern (O(N) throttled rebuild,
+main-thread only). Events snapshot participant **names** (body slots are
+reused, so per-body history matches index + name and drops — never
+misattributes — a previous tenant's events) and both clocks (`g_sim_time` +
+stellar `age_yr`). Consumers: Inspect panel **Relations** block (orbit chain,
+gas flows with rates, top incident lights, per-body history) + collapsed
+**Recent events** log; headless `[FieldGraph]` stats at boot/shot time and one
+stdout line per event. Verified headless end-to-end: a 10 M☉ star ages
+subgiant → red giant → supernova (`event=phase`, `event=phase`,
+`event=supernova`, cross-checked against the `[supernova]` stderr line), a
+Roche-overflow binary shows a `flow=1` GAS_FLOW edge, and Gargantua's
+"Doomed" body shows the tidal stream then `event=tde` at consumption.
+**Remaining:** galaxy field nodes (Layer 4.2), nebula edges (gas-flow /
+radiation into clouds), and the downstream consumers (orbit prediction,
+timeline scrubbing §6.3).
+
+> **Pre-existing bug found & FIXED during verification:** the
+> `microquasar.json` demo's Roche feeding was not actually occurring — the
+> donor is 0.67× the hole's mass, and the keplerian loader converted elements
+> heliocentrically (GM of the parent only) while the CoM correction then gave
+> the parent a compensating velocity, inflating the relative speed by (1+q):
+> the authored a = 0.15 AU orbit ran at ~0.8 AU separation, outside the Roche
+> lobe. Fix (`universe.c` pass 2): elements are converted with the two-body
+> GM = G·(M+m) and the body takes its barycentric velocity share M/(M+m), so
+> the realised *relative* orbit matches the authored elements exactly.
+> Planet-mass companions are numerically unaffected (q ≲ 1e-3); the
+> microquasar now feeds as designed (verified: `[FieldGraph] … flow=1` with
+> the shipped preset). **Still open:** orbits authored with periapsis
+> near/inside the primary's radius blow up during warmup (physics runs
+> without collision there — a test body at a=0.05 AU, e=0.95 was ejected to
+> ~69 AU); needs a warmup guard for deep periapsis passes if such content is
+> ever authored.
 
 ### Purpose
 
@@ -252,15 +345,25 @@ This provides the backbone for:
 
 ## 1.1 Stellar appearance system
 
-**Status:** 🟡 partial — twinkle + corona done; starspots wired but not visibly
-working; data-model additions remain. Tunables under Menu → Visuals → Stars,
-persisted in `settings.json`.
+**Status:** 🟡 partial — twinkle + corona + spectral classification +
+physical luminosity done; starspots wired but not visibly working; emission
+curves remain. Tunables under Menu → Visuals → Stars, persisted in
+`settings.json`.
 
 ### Additions
 
-* spectral classification labels ⛔
+* spectral classification ✅ — `src/spectral.{c,h}`: physical T_eff from mass
+  (piecewise mass–temperature slope calibrated so Sol → G2V exactly;
+  TRAPPIST-1 → M6V, its real L within 15%) shifted by lifecycle phase
+  (subgiant IV, red giant III at ~3600 K, DA/PN/NS compact classes), with
+  the old display-colour estimate as fallback for massless catalog rows.
+  Shown in the Inspect panel ("Class: G2V, T_eff") and the headless
+  `[RadianceField] cls=` print. *(3D name-label suffix not done — the labels
+  stay name-only.)*
 * wavelength-dependent emission curves ⛔
-* improved luminosity model ⛔
+* improved luminosity model ✅ — the RadianceField's Stefan-Boltzmann term
+  now runs on the spectral T (physical mass+phase) instead of guessing T
+  from the art-directed colour; Sol's output is calibration-identical.
 * apparent magnitude calibration ✅ (apparent-magnitude dot sizing in `render.c`)
 
 ### Visual upgrades
@@ -726,23 +829,48 @@ covering most classes below; only metallic worlds and methane seas remain.
 
 ## 4.2 Galaxy system
 
-**Status:** ⛔ todo
+**Status:** 🟡 *(catalogue galaxies as volumetric structures landed)*
 
 ### Types
 
-* spiral
-* elliptical
-* irregular
+* spiral ✅ (exponential disc + bulge + two log-spiral arms + FBM knots)
+* elliptical ✅ (steep-cored smooth glow, old warm population)
+* irregular ✅ (clumpy squashed FBM — LMC/SMC read as Magellanic Clouds)
 * active galactic nuclei — *the AGN central engine already exists* (§1.4:
   raymarched hole + accretion disk + dust torus + relativistic jets); what
-  remains here is the surrounding galaxy (stellar disk, dust lanes) to host it.
+  remains here is embedding it in a galaxy host (the render path now exists).
 
 ### Visual components
 
-* dust lanes
-* star density gradients
-* rotational shear
-* central black hole glow
+* dust lanes ✅ (pure absorption riding the arms' inner edges, slightly below
+  the midplane, and extinguishing embedded starlight — edge-on discs get the
+  dark stripe across the bulge, verified on the Sombrero)
+* star density gradients ✅ (disc/bulge/arm population mix: warm bulge, cool
+  blue arms, pink HII knots)
+* rotational shear ✅ (flat rotation curve, ω ∝ 1/r on `u_time`; noise is
+  sampled in the co-rotating frame so clumps ride the shear)
+* central black hole glow 🟡 (the bulge core glows; a true embedded AGN
+  engine remains)
+
+**Status detail:** first iteration implemented as `src/galaxy.{c,h}` +
+`assets/shaders/galaxy.frag`, mirroring the nebula architecture: 10 real
+Local Group / nearby galaxies (SIMBAD/NED positions, distances, sizes,
+**inclinations** — the disc axis is tilted off the Earth sightline by the
+catalogued inclination, so Andromeda leans and the Sombrero is edge-on),
+one volumetric raymarch representation from a few-pixel backdrop to a
+fly-through (billboard→fullscreen carrier is nebula.vert, reused; same
+angular-size-preserving 1400 AU clamp shell), premultiplied "over" at log
+depth, drawn before the nebulae so translucent overlaps sort back-to-front.
+Consumers: Navigate → "Galaxies (fly to)", RadianceField integrated emitters
+(§0.3 "galaxy light distribution" first step: L ∝ area at Milky-Way-class
+reference — the HUD names "Andromeda (M31)" as the dominant light when you
+fly out there), field-graph galaxy nodes (`[FieldGraph] … galaxies=10`).
+Verified headless: Magellanic Clouds + Tarantula neighbourhood shot, M31
+tilted disc, M51 face-on spiral with arms, M104 edge-on dust stripe.
+**Remaining:** an AGN preset hosted inside a galaxy, per-region galaxy light
+(the single integrated emitter is a point approximation), authored galaxies
+in universe JSON, and a half-res render target — a screen-filling galaxy
+raymarch costs ~20 fps (same known fix as the supernova cloud).
 
 ---
 
@@ -881,11 +1009,19 @@ covering most classes below; only metallic worlds and methane seas remain.
 3. Unified `CosmicField` abstraction ✅ (density/variance field landed — built ahead of #2)
 2. Continuous LOD system 🟡 (per-body crossfades + CosmicField-driven windows landed;
    cluster/hybrid aggregation remains for dense galaxy presets)
-4. Shared `RadianceField` abstraction 🟡 (emitter field + dominant-light render
-   consumer landed; nebular/galaxy coverage and multi-light shading remain)
-5. Universe field graph ← next foundation step
+4. Shared `RadianceField` abstraction 🟡 (emitter field, multi-light shading,
+   spectral T + physical chromaticity, nebulae as receivers *and* emitters
+   all landed; galaxy light distribution, glare adoption and relativistic
+   shifts remain)
+5. Universe field graph 🟡 (graph + edges + event log + Inspect/headless
+   consumers landed; galaxy field nodes and the orbit-prediction/timeline
+   consumers remain)
 
 *(Note: #3 was built before #2 — continuous LOD needs a density/variance field, which #3 provides.)*
+
+**Phase A is now foundation-complete** — every abstraction exists and is
+consumed by at least one real system; what remains in each is expansion
+(cluster aggregation, spectral T, galaxy nodes), not groundwork.
 
 ## Phase B — Visual realism completion
 
@@ -903,7 +1039,9 @@ covering most classes below; only metallic worlds and methane seas remain.
 
 ## Phase D — Cosmic expansion
 
-14. Galaxy system
+14. Galaxy system 🟡 (catalogue galaxies as volumetric spiral/elliptical/
+    irregular structures with dust lanes + shear; AGN-in-host and per-region
+    light remain)
 15. Gravitational field visualization
 16. Gravitational waves
 

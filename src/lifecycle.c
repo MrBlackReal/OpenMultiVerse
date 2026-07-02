@@ -3,6 +3,7 @@
  */
 #include "lifecycle.h"
 #include "body.h"
+#include "field_graph.h"
 #include "supernova.h"
 #include <math.h>
 
@@ -90,10 +91,12 @@ int lifecycle_advance_phase(int star)
         case STAR_MAIN_SEQUENCE:
             b->star_phase = STAR_SUBGIANT;
             lifecycle_apply_visual(star);
+            field_graph_notify_phase(star, b->star_phase);
             return 0;
         case STAR_SUBGIANT:
             b->star_phase = STAR_RED_GIANT;
             lifecycle_apply_visual(star);
+            field_graph_notify_phase(star, b->star_phase);
             return 0;
         case STAR_RED_GIANT:
         default:
@@ -131,10 +134,11 @@ void lifecycle_step(double dt_real_sec)
         else if (frac >= 1.00) target = STAR_SUBGIANT;
 
         if (target < 0) {
-            lifecycle_trigger_death(i);
+            lifecycle_trigger_death(i);   /* death logs via the supernova hook */
         } else if (target != b->star_phase) {
             b->star_phase = target;
             lifecycle_apply_visual(i);
+            field_graph_notify_phase(i, b->star_phase);
         }
     }
 }

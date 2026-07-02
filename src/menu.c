@@ -14,8 +14,11 @@
 #include "body.h"
 #include "post.h"
 #include "nebula.h"
+#include "galaxy.h"
 #include "inspect.h"
 #include "lifecycle.h"
+#include "field_graph.h"
+#include "spectral.h"
 #include "physics.h"
 #include <math.h>
 #include <string.h>
@@ -205,6 +208,28 @@ static void teleport_to_nebula(int i)
     cam_fly_to(target, yaw, pitch);
 }
 
+/* Fly to galaxy `i` — same framing as teleport_to_nebula. */
+static void teleport_to_galaxy(int i)
+{
+    double pos[3];
+    galaxy_position(i, pos);
+    double radius    = galaxy_radius_au(i);
+    double view_dist = fmax(radius * 2.5, 1.0);
+
+    double dx = 1.0, dy = -0.32, dz = 1.0;
+    double dl = sqrt(dx*dx + dy*dy + dz*dz);
+    dx /= dl; dy /= dl; dz /= dl;
+
+    double target[3] = {
+        pos[0] - dx * view_dist,
+        pos[1] - dy * view_dist,
+        pos[2] - dz * view_dist,
+    };
+    float yaw   = (float)(atan2(dz, dx) * 180.0 / PI);
+    float pitch = (float)(asin(dy) * 180.0 / PI);
+    cam_fly_to(target, yaw, pitch);
+}
+
 /* Render the "Navigate" tab: a name search over every live body with a
  * click-to-teleport result list, plus a catalogue-nebula list that flies the
  * camera to the chosen nebula. */
@@ -224,6 +249,15 @@ static void menu_render_navigate(void)
             snprintf(label, sizeof(label), "~ %s##neb%d", nebula_name(i), i);
             if (igSelectable_Bool(label, false, 0, (ImVec2_c){ 0.0f, 0.0f }))
                 teleport_to_nebula(i);
+        }
+    }
+    /* Galaxies too (Layer 4.2) — same fly-to framing. */
+    if (igCollapsingHeader_TreeNodeFlags("Galaxies (fly to)", 0)) {
+        for (int i = 0; i < galaxy_count(); i++) {
+            char label[96];
+            snprintf(label, sizeof(label), "@ %s##gal%d", galaxy_name(i), i);
+            if (igSelectable_Bool(label, false, 0, (ImVec2_c){ 0.0f, 0.0f }))
+                teleport_to_galaxy(i);
         }
     }
     igSpacing();
@@ -306,6 +340,11 @@ static void menu_render_inspect(void)
         igText("Stellar lifecycle");
         igSpacing();
         igText("Phase: %s", lifecycle_phase_name(b->star_phase));
+        {
+            SpectralClass sc;
+            if (spectral_classify(b, &sc))
+                igText("Class: %s  (T_eff ~ %.0f K)", sc.class_str, sc.t_eff);
+        }
 
         if (lifecycle_is_evolvable_star(t)) {
             double tau = b->ms_lifetime_yr > 0.0 ? b->ms_lifetime_yr
@@ -346,6 +385,85 @@ static void menu_render_inspect(void)
         }
     }
 
+    /* ── Relations: this body's field-graph edges (roadmap §0.4) ────────── */
+    igSpacing();
+    igSeparator();
+    igText("Relations");
+    igSpacing();
+
+    /* Orbit chain (gravity edges): walk the parent hierarchy. */
+    {
+        char   chain[128] = "";
+        size_t len = 0;
+        int    depth = 0;
+        for (int p = b->parent;
+             p >= 0 && p < g_nbodies && g_bodies[p].alive &&
+             depth < 8 && len < sizeof(chain);
+             p = g_bodies[p].parent, depth++)
+            len += (size_t)snprintf(chain + len, sizeof(chain) - len, "%s%s",
+                                    depth ? " < " : "", g_bodies[p].name);
+        if (depth > 0) igText("Orbits    %s", chain);
+        else           igTextDisabled("Orbits    nothing (system root)");
+
+        int children = 0;
+        for (int i = 0; i < g_nbodies; i++)
+            if (g_bodies[i].alive && g_bodies[i].parent == t) children++;
+        if (children > 0)
+            igText("Children  %d bodies in orbit", children);
+    }
+
+    /* Gas-flow edges: Roche mass-transfer streams and tidal disruption. */
+    {
+        FieldGraphEdge ed[8];
+        int n = field_graph_body_edges(t, ed, 8);
+        for (int i = 0; i < n; i++) {
+            if (ed[i].type != FG_EDGE_GAS_FLOW) continue;
+            const char *other = g_bodies[ed[i].from == t ? ed[i].to
+                                                         : ed[i].from].name;
+            const char *verb  = ed[i].from == t ? "Feeds " : "Fed by";
+            if (ed[i].flow_kind == FG_FLOW_ROCHE)
+                igText("%s    %s  (%.3g Msun/yr Roche stream)", verb, other,
+                       ed[i].rate_kg_s * 3.15576e7 / SOLAR_MASS_KG);
+            else
+                igText("%s    %s  (tidal stream)", verb, other);
+        }
+    }
+
+    /* Incident light: lazy radiation edges from the RadianceField. */
+    {
+        RadianceContrib rc[3];
+        int n = field_graph_radiation_top(t, 3, rc);
+        for (int i = 0; i < n; i++)
+            igText("Light     %s  (%.3g W/m2)",
+                   rc[i].body >= 0 ? g_bodies[rc[i].body].name : "supernova",
+                   rc[i].irr);
+        if (n == 0)
+            igTextDisabled("Light     no emitters reach here");
+    }
+
+    /* This body's recorded history (evolution/event transitions). */
+    {
+        FieldGraphEvent ev[8];
+        int n = field_graph_body_events(t, ev, 8);
+        if (n > 0) {
+            igSpacing();
+            igText("History");
+            for (int i = 0; i < n; i++) {
+                if (ev[i].type == FG_EVENT_PHASE)
+                    igText("  became %s", lifecycle_phase_name(ev[i].detail));
+                else if (ev[i].type == FG_EVENT_SUPERNOVA)
+                    igText("  supernova: %s -> %s (%s)", ev[i].a_name,
+                           ev[i].b_name, lifecycle_phase_name(ev[i].detail));
+                else
+                    igText("  %s: %s absorbed %s",
+                           field_graph_event_name(ev[i].type),
+                           ev[i].a_name, ev[i].b_name);
+            }
+        } else {
+            igTextDisabled("No recorded events.");
+        }
+    }
+
     igSpacing();
     igSeparator();
     igSpacing();
@@ -359,6 +477,28 @@ static void menu_render_inspect(void)
     igSetItemTooltip("How fast every star ages on its own clock.\n"
                      "0 = stars only change via the buttons above.\n"
                      "This does NOT speed up orbits.");
+
+    /* Universe-wide event log (field graph), newest first. */
+    igSpacing();
+    if (igCollapsingHeader_TreeNodeFlags("Recent events", 0)) {
+        FieldGraphEvent ev[10];
+        int n = field_graph_events(ev, 10);
+        if (n == 0)
+            igTextDisabled("Nothing has happened yet.\n"
+                           "Advance Stellar time, or make something collide.");
+        for (int i = 0; i < n; i++) {
+            if (ev[i].type == FG_EVENT_PHASE)
+                igText("phase      %s -> %s", ev[i].a_name,
+                       lifecycle_phase_name(ev[i].detail));
+            else if (ev[i].type == FG_EVENT_SUPERNOVA)
+                igText("supernova  %s -> %s (%s)", ev[i].a_name, ev[i].b_name,
+                       lifecycle_phase_name(ev[i].detail));
+            else
+                igText("%-10s %s absorbed %s",
+                       field_graph_event_name(ev[i].type),
+                       ev[i].a_name, ev[i].b_name);
+        }
+    }
 }
 
 /* Global application settings (g_settings). Most changes take effect live;
@@ -411,6 +551,16 @@ static void menu_render_settings(void)
                       "%.0f AU/s", ImGuiSliderFlags_Logarithmic);
         igSliderFloat("Warp max", &g_settings.warp_speed_max_au, 1000.0f, 200000.0f,
                       "%.0f AU/s", ImGuiSliderFlags_Logarithmic);
+        {
+            bool aw = g_settings.adaptive_warp != 0;
+            if (igCheckbox("Adaptive warp (scale travel)", &aw))
+                g_settings.adaptive_warp = aw ? 1 : 0;
+            igSetItemTooltip("In warp, speed also scales with distance from the\n"
+                             "nearest body: hold W to accelerate out of the system,\n"
+                             "through interstellar space, and clear of the galaxy —\n"
+                             "each 10x of scale takes a fixed few seconds.\n"
+                             "Approaching anything decelerates automatically.");
+        }
         igSliderFloat("Adjust step", &g_settings.slider_step, 0.01f, 0.5f, "%.2f", 0);
         igSetItemTooltip("Increment for keyboard/wheel volume & sensitivity changes.");
         igSliderFloat("Mouse sens min", &g_settings.mouse_sens_min, 0.01f, 1.0f, "%.2f", 0);

@@ -36,6 +36,7 @@ static GLuint s_shader       = 0;
 static GLuint s_vao          = 0;
 static GLuint s_vbo          = 0;
 static GLint  s_loc_vp       = -1;
+static GLint  s_loc_fade     = -1;
 static int    s_count        = 0;
 static int    s_faint_count  = 0;
 static int    s_mid_count    = 0;
@@ -236,10 +237,11 @@ void starfield_init(void) {
     if (s_vao || s_vbo || s_shader) starfield_shutdown();
 
     s_shader = gl_shader_load("assets/shaders/color.vert",
-                              "assets/shaders/color.frag");
+                              "assets/shaders/starfield.frag");
     if (!s_shader) return;
 
-    s_loc_vp = glGetUniformLocation(s_shader, "u_vp");
+    s_loc_vp   = glGetUniformLocation(s_shader, "u_vp");
+    s_loc_fade = glGetUniformLocation(s_shader, "u_fade");
 
     s_count = load_catalog(&stars);
     if (s_count > 0) {
@@ -267,14 +269,16 @@ void starfield_init(void) {
     glBindVertexArray(0);
 }
 
-void starfield_render(const float view_rot[16], const float proj[16]) {
-    if (!s_shader || !s_vao || s_count <= 0) return;
+void starfield_render(const float view_rot[16], const float proj[16],
+                      float fade) {
+    if (!s_shader || !s_vao || s_count <= 0 || fade <= 0.001f) return;
 
     Mat4 vp;
     mat4_mul(vp, proj, view_rot);
 
     glUseProgram(s_shader);
     glUniformMatrix4fv(s_loc_vp, 1, GL_FALSE, vp);
+    glUniform1f(s_loc_fade, fade);
 
     glBindVertexArray(s_vao);
 

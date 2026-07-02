@@ -24,6 +24,7 @@
 #include "body.h"
 #include "accretion.h"
 #include "collision.h"
+#include "field_graph.h"
 #include "labels.h"
 #include "trails.h"
 #include "universe.h"
@@ -544,6 +545,7 @@ int supernova_try_trigger(int star_a, int star_b, double rel_speed,
     children_invalidate();   /* body set just changed (remnant added, stars retired) */
     immediate_flash_effects(e);
 
+    field_graph_notify_supernova(star_a, remnant_idx);
     fprintf(stderr,
             "[supernova] %s + %s -> %s (rel=%.0f m/s, ejecta=%.2f Msun)\n",
             g_bodies[star_a].name, g_bodies[star_b].name, g_bodies[remnant_idx].name,
@@ -694,6 +696,7 @@ int supernova_detonate(int star_idx)
     children_invalidate();   /* body set just changed (remnant added, stars retired) */
     immediate_flash_effects(e);
 
+    field_graph_notify_supernova(star_idx, remnant_idx);
     fprintf(stderr, "[supernova] %s -> %s (%.1f Msun progenitor, %s)\n",
             g_bodies[star_idx].name, g_bodies[remnant_idx].name, msun,
             remnant_is_bh ? "black hole" :

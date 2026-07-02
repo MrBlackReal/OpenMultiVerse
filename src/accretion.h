@@ -31,3 +31,16 @@ void accretion_init_body(Body *b);
  * g_stellar_years_per_sec: drain reservoir → Ṁ → L/L_edd → agn_activity, and
  * accrete the mass. No-op when the stellar rate is 0. */
 void accretion_step(double dt_real_sec);
+
+/* One Roche-lobe mass-transfer stream observed by the model. */
+typedef struct {
+    int    donor;       /* g_bodies index of the overflowing companion       */
+    int    hole;        /* g_bodies index of the accreting black hole        */
+    double rate_kg_s;   /* transfer rate over the last step (stellar-clock s) */
+} AccretionFlow;
+
+/* Roche-lobe transfers seen during the most recent accretion_step() (cleared
+ * each step; empty while the stellar clock is 0). Sets *out to an internal
+ * array valid until the next step; returns the count. Read by field_graph.c
+ * as GAS_FLOW edges. */
+int accretion_flows(const AccretionFlow **out);

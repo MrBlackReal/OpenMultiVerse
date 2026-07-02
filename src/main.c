@@ -39,6 +39,7 @@
 #include "camera.h"
 #include "starfield.h"
 #include "nebula.h"
+#include "galaxy.h"
 #include "trails.h"
 #include "labels.h"
 #include "render.h"
@@ -53,6 +54,8 @@
 #include "accretion.h"
 #include "cosmic_field.h"
 #include "radiance_field.h"
+#include "field_graph.h"
+#include "spectral.h"
 #include "audio.h"
 #include "presets.h"
 #include "menu.h"
@@ -375,6 +378,8 @@ static void init_runtime_world(void) {
     loading_phase("Placing nebulae");
     boot_log("Initializing nebulae");
     nebula_init();
+    boot_log("Initializing galaxies");
+    galaxy_init();
     loading_phase("Allocating trails");
     boot_log("Initializing trails");
     trails_gl_init();
@@ -407,6 +412,8 @@ static void init_runtime_world(void) {
     cosmic_field_rebuild();
     boot_log("Building radiance field");
     radiance_field_rebuild();
+    boot_log("Building field graph");
+    field_graph_rebuild();
     warmup_universe();
     boot_log("Runtime world ready");
     loading_end();
@@ -418,6 +425,7 @@ static void shutdown_runtime_world(void) {
     render_shutdown();
     labels_shutdown();
     trails_gl_shutdown();
+    galaxy_shutdown();
     nebula_shutdown();
     starfield_shutdown();
     universe_shutdown();
@@ -428,6 +436,7 @@ static void reset_universe_state(void) {
     shutdown_runtime_world();
     collision_reset();
     supernova_reset();
+    field_graph_reset();   /* event history belongs to the old universe */
     clear_movement_keys();
     s_freelook = 0;
     s_warp = 0;
@@ -574,6 +583,7 @@ static void app_quit(void) {
     menu_shutdown();
     loading_shutdown();
     ui_shutdown();
+    field_graph_shutdown();
     radiance_field_shutdown();
     cosmic_field_shutdown();
     shutdown_runtime_world();
@@ -957,7 +967,50 @@ static void camera_move(float dt) {
     float rlen = sqrtf(rx*rx + rz*rz);
     if (rlen > 1e-6f) { rx /= rlen; rz /= rlen; }
 
-    double dspd = (double)g_cam.speed * (double)dt;
+    double speed = (double)g_cam.speed;
+
+    /* Adaptive warp (the §0.1 zoom-out): in warp, the effective speed also
+     * scales with the distance to the nearest body — each decade of scale
+     * takes a fixed ~18 s of flight, so interstellar space, the galaxy, and
+     * the Local Group are all reachable by just holding W.  v = dist/8 means
+     * the factor only ever *raises* the set speed once you are far from
+     * everything, and approaching a target automatically decelerates. */
+    if (s_warp && g_settings.adaptive_warp) {
+        double cx = g_cam.pos[0] * AU, cy = g_cam.pos[1] * AU,
+               cz = g_cam.pos[2] * AU;
+        double best2 = -1.0;
+        for (int i = 0; i < g_nbodies; i++) {
+            if (!g_bodies[i].alive) continue;
+            double dx = g_bodies[i].pos[0] - cx;
+            double dy = g_bodies[i].pos[1] - cy;
+            double dz = g_bodies[i].pos[2] - cz;
+            double d2 = dx*dx + dy*dy + dz*dz;
+            if (best2 < 0.0 || d2 < best2) best2 = d2;
+        }
+        double best_au = best2 > 0.0 ? sqrt(best2) * RS : -1.0;
+
+        /* Galaxies are anchors too, or arriving at one would never slow
+         * down (their stars aren't bodies): distance to the volume's edge,
+         * floored inside so intra-galaxy travel stays brisk (~2% of the
+         * radius ≈ 1 kly for the Milky Way → ~150 ly/s). */
+        for (int i = 0; i < galaxy_count(); i++) {
+            double gp[3], gr = galaxy_radius_au(i);
+            galaxy_position(i, gp);
+            double dx = gp[0] - g_cam.pos[0];
+            double dy = gp[1] - g_cam.pos[1];
+            double dz = gp[2] - g_cam.pos[2];
+            double d  = sqrt(dx*dx + dy*dy + dz*dz) - 0.85 * gr;
+            if (d < 0.02 * gr) d = 0.02 * gr;
+            if (best_au < 0.0 || d < best_au) best_au = d;
+        }
+
+        if (best_au > 0.0) {
+            double v_scale = best_au / 8.0;            /* AU/s */
+            if (v_scale > speed) speed = v_scale;
+        }
+    }
+
+    double dspd = speed * (double)dt;
 
     if (s_key_w) { g_cam.pos[0] += (double)fdx*dspd; g_cam.pos[1] += (double)fdy*dspd; g_cam.pos[2] += (double)fdz*dspd; }
     if (s_key_s) { g_cam.pos[0] -= (double)fdx*dspd; g_cam.pos[1] -= (double)fdy*dspd; g_cam.pos[2] -= (double)fdz*dspd; }
@@ -1072,6 +1125,8 @@ int main(int argc, char **argv) {
     cosmic_field_init();
     boot_log("Initializing radiance field");
     radiance_field_init();
+    boot_log("Initializing field graph");
+    field_graph_init();
     boot_log("Initializing UI");
     ui_init();
     sync_pause_menu_ui();
@@ -1105,16 +1160,33 @@ int main(int argc, char **argv) {
          * camera, so lighting is verifiable without pixels (Sun @ 1 AU ≈ 1361). */
         RadianceSample rs;
         radiance_field_rebuild();
-        if (radiance_field_sample_camera(&rs))
+        if (radiance_field_sample_camera(&rs)) {
+            SpectralClass sc = {0};
+            if (rs.dominant >= 0)
+                spectral_classify(&g_bodies[rs.dominant], &sc);
             fprintf(stdout,
-                    "[RadianceField] irr=%.4e W/m2 dom=%s dom_irr=%.4e "
+                    "[RadianceField] irr=%.4e W/m2 dom=%s cls=%s dom_irr=%.4e "
                     "L_dom=%.4e W n=%d\n",
-                    rs.irradiance,
-                    rs.dominant >= 0 ? g_bodies[rs.dominant].name : "supernova",
+                    rs.irradiance, rs.dom_label,
+                    sc.class_str[0] ? sc.class_str : "-",
                     rs.dom_irr,
                     radiance_field_body_luminosity(rs.dominant), rs.n_sources);
-        else
+        } else {
             fprintf(stdout, "[RadianceField] no emitters\n");
+        }
+
+        /* And the field graph: node/edge/event counts, so the harvested
+         * relations are verifiable without pixels. Printed again at shot time
+         * (gas flows and events only appear after stellar time has run). */
+        FieldGraphStats fs;
+        field_graph_rebuild();
+        field_graph_stats(&fs);
+        fprintf(stdout,
+                "[FieldGraph] nodes=%d (stars=%d planets=%d holes=%d "
+                "nebulae=%d galaxies=%d) edges=%d (grav=%d flow=%d) events=%d\n",
+                fs.nodes, fs.stars, fs.planets, fs.black_holes, fs.nebulae,
+                fs.galaxies, fs.edges, fs.grav_edges, fs.flow_edges,
+                fs.events_logged);
     }
 
     /* Timing */
@@ -1254,6 +1326,10 @@ int main(int argc, char **argv) {
          * clock). Queried by render.c body lighting and the HUD. */
         radiance_field_tick(dt);
 
+        /* Refresh the field graph's harvested edges (throttled; rebuilds on
+         * body-set change). Queried by the Inspect panel's Relations view. */
+        field_graph_tick(dt);
+
         /* Build matrices.
          * view_rot: rotation-only lookAt (origin as eye). Used for all distant
          *           geometry via vp_camrel = proj × view_rot.
@@ -1377,6 +1453,19 @@ int main(int argc, char **argv) {
         /* Headless screenshot: capture the back buffer (this frame) then quit. */
         if (shot_path && ++frame_no >= shot_frames) {
             save_screenshot_ppm(shot_path);
+            if (headless) {
+                /* End-of-run field-graph stats: by now stellar time (if any)
+                 * has run, so gas-flow edges and logged events are visible. */
+                FieldGraphStats fs;
+                field_graph_rebuild();
+                field_graph_stats(&fs);
+                fprintf(stdout,
+                        "[FieldGraph] nodes=%d (stars=%d planets=%d holes=%d "
+                        "nebulae=%d galaxies=%d) edges=%d (grav=%d flow=%d) events=%d\n",
+                        fs.nodes, fs.stars, fs.planets, fs.black_holes,
+                        fs.nebulae, fs.galaxies, fs.edges, fs.grav_edges, fs.flow_edges,
+                        fs.events_logged);
+            }
             running = 0;
         }
 

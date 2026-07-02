@@ -36,7 +36,10 @@
 typedef struct {
     double irradiance;   /* total incident flux from all emitters, W/m²      */
     double dom_irr;      /* flux from the dominant (brightest-here) emitter  */
-    int    dominant;     /* dominant emitter body index (-1 = supernova)     */
+    int    dominant;     /* dominant emitter body index (-1 = body-less:     */
+                         /* supernova transient or nebula — see dom_label)   */
+    const char *dom_label; /* dominant's display name ("supernova", nebula   */
+                           /* name, or the body's name); static storage      */
     double dir[3];       /* unit vector from the point toward the dominant   */
     float  color[3];     /* dominant emitter chromaticity (max component 1)  */
     int    n_sources;    /* emitters contributing > 0.1% of the total        */
@@ -69,7 +72,9 @@ int  radiance_field_dominant(const double pos_m[3], int exclude_body);
  * chromaticity so consumers need no body lookup — and so transient emitters
  * (supernovae, body = -1) work identically. */
 typedef struct {
-    int    body;     /* g_bodies index, or -1 for a supernova         */
+    int    body;     /* g_bodies index, or -1 for a body-less emitter */
+    int    nebula;   /* nebula index for nebula emitters, else -1 —   */
+                     /* lets a nebula skip its own glow when sampling */
     double irr;      /* incident flux from it, W/m²                   */
     double pos[3];   /* emitter position, SI m                        */
     float  col[3];   /* chromaticity (max component 1)                */

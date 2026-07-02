@@ -62,6 +62,7 @@
 #include "radiance_field.h"
 #include "starfield.h"
 #include "nebula.h"
+#include "galaxy.h"
 #include "trails.h"
 #include "rings.h"
 #include "asteroids.h"
@@ -93,6 +94,7 @@ static GLint  s_sp_cam_right   = -1;
 static GLint  s_sp_cam_up      = -1;
 static GLint  s_sp_oc          = -1;   /* cam − centre, double-computed float */
 static GLint  s_sp_sun_rel     = -1;   /* star − centre, for Phong lighting   */
+static GLint  s_sp_sun_col     = -1;   /* primary chromaticity (white = Sol)  */
 static GLint  s_sp_sun2_rel    = -1;   /* secondary light − centre            */
 static GLint  s_sp_light2      = -1;   /* secondary strength vs primary, 0..1 */
 static GLint  s_sp_light2_col  = -1;   /* secondary chromaticity              */
@@ -180,6 +182,7 @@ static GLint  s_at_cam_fwd   = -1;
 static GLint  s_at_oc        = -1;
 static GLint  s_at_planet_r  = -1;
 static GLint  s_at_sun_rel   = -1;
+static GLint  s_at_sun_col   = -1;
 static GLint  s_at_sun2_rel  = -1;
 static GLint  s_at_light2    = -1;
 static GLint  s_at_light2_col = -1;
@@ -374,18 +377,25 @@ static void lod_update_density_scale(void)
  * sun, or an accreting black hole lights the body when it genuinely outshines
  * the parent chain's root.  w2 is the secondary's flux relative to the primary
  * (0 = no meaningful secondary; shaders are bit-identical to single-sun then),
- * col2 its chromaticity.  Falls back to the root-star walk when the field has
- * no emitters (starless universe). */
+ * col1/col2 their chromaticities — physical blackbody tints relative to Sol
+ * (white for a Sun-like star, so the art-directed sunlight ramp survives; an
+ * M dwarf's planets are lit warm orange).  Falls back to the root-star walk
+ * when the field has no emitters (starless universe). */
 static void body_lights(int i, const Body *b,
-                        float sr1[3], float sr2[3], float *w2, float col2[3])
+                        float sr1[3], float col1[3],
+                        float sr2[3], float *w2, float col2[3])
 {
     RadianceContrib top[2];
     int n = radiance_field_top(b->pos, i, 2, top);
 
+    col1[0] = col1[1] = col1[2] = 1.0f;
     if (n >= 1) {
         sr1[0] = (float)((top[0].pos[0] - b->pos[0]) * RS);
         sr1[1] = (float)((top[0].pos[1] - b->pos[1]) * RS);
         sr1[2] = (float)((top[0].pos[2] - b->pos[2]) * RS);
+        col1[0] = top[0].col[0];
+        col1[1] = top[0].col[1];
+        col1[2] = top[0].col[2];
     } else {
         int l1 = i;
         while (g_bodies[l1].parent >= 0) l1 = g_bodies[l1].parent;
@@ -969,6 +979,7 @@ void render_init(void) {
     s_sp_sun_world = glGetUniformLocation(s_sphere_shader, "u_sun_pos_world");
     s_sp_oc        = glGetUniformLocation(s_sphere_shader, "u_oc");
     s_sp_sun_rel   = glGetUniformLocation(s_sphere_shader, "u_sun_rel");
+    s_sp_sun_col   = glGetUniformLocation(s_sphere_shader, "u_sun_col");
     s_sp_sun2_rel  = glGetUniformLocation(s_sphere_shader, "u_sun2_rel");
     s_sp_light2    = glGetUniformLocation(s_sphere_shader, "u_light2");
     s_sp_light2_col = glGetUniformLocation(s_sphere_shader, "u_light2_col");
@@ -1191,6 +1202,7 @@ void render_init(void) {
         s_at_oc        = glGetUniformLocation(s_atm_shader, "u_oc");
         s_at_planet_r  = glGetUniformLocation(s_atm_shader, "u_planet_radius");
         s_at_sun_rel   = glGetUniformLocation(s_atm_shader, "u_sun_rel");
+        s_at_sun_col   = glGetUniformLocation(s_atm_shader, "u_sun_col");
         s_at_sun2_rel  = glGetUniformLocation(s_atm_shader, "u_sun2_rel");
         s_at_light2    = glGetUniformLocation(s_atm_shader, "u_light2");
         s_at_light2_col = glGetUniformLocation(s_atm_shader, "u_light2_col");
@@ -1622,11 +1634,26 @@ void render_frame(const float view[16], const float proj[16],
 
     /* ------------------------------------------------------------------ 1. Starfield */
     /* Stars are on the unit sphere (depth ~= far plane).  Depth test would
-     * Z-fight with the cleared depth buffer, so it is disabled for the skybox. */
-    glDisable(GL_DEPTH_TEST);
-    glDepthMask(GL_FALSE);
-    starfield_render(view_rot, proj);
-    glDepthMask(GL_TRUE);
+     * Z-fight with the cleared depth buffer, so it is disabled for the skybox.
+     * The skybox is a direction-only backdrop for the stellar neighbourhood:
+     * fade it out as the camera travels to galactic scale (~50 ly → ~5 kly),
+     * where the Milky Way volume takes over as the unresolved-star glow. */
+    float sf_fade = 1.0f;   /* also feeds the procedural-star crossfade */
+    {
+        double cd_au = sqrt(g_cam.pos[0]*g_cam.pos[0] +
+                            g_cam.pos[1]*g_cam.pos[1] +
+                            g_cam.pos[2]*g_cam.pos[2]);
+        if (cd_au > 3.0e6) {
+            float t = (float)((log10(cd_au) - 6.477) / 2.0);  /* 3e6→3e8 AU */
+            if (t < 0.0f) t = 0.0f;
+            if (t > 1.0f) t = 1.0f;
+            sf_fade = 1.0f - t * t * (3.0f - 2.0f * t);
+        }
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        starfield_render(view_rot, proj, sf_fade);
+        glDepthMask(GL_TRUE);
+    }
 
     /* ------------------------------------------------------------------ 2. Spheres */
     glEnable(GL_DEPTH_TEST);
@@ -1763,13 +1790,14 @@ void render_frame(const float view[16], const float proj[16],
          * companion or an active black hole's disk lights correctly, not just
          * the parent chain's root).  Falls back to the root-star walk if the
          * field is empty (e.g. a universe with no stars). */
-        float sr1[3], sr2[3], w2, col2[3];
-        body_lights(i, b, sr1, sr2, &w2, col2);
+        float sr1[3], col1[3], sr2[3], w2, col2[3];
+        body_lights(i, b, sr1, col1, sr2, &w2, col2);
 
         glUniform3f(s_sp_center,  -oc_x, -oc_y, -oc_z);
         glUniform1f(s_sp_radius,   dr);
         glUniform3f(s_sp_oc,       oc_x, oc_y, oc_z);
         glUniform3f(s_sp_sun_rel,  sr1[0], sr1[1], sr1[2]);
+        glUniform3f(s_sp_sun_col,  col1[0], col1[1], col1[2]);
         glUniform3f(s_sp_sun2_rel, sr2[0], sr2[1], sr2[2]);
         glUniform1f(s_sp_light2,   w2);
         glUniform3f(s_sp_light2_col, col2[0], col2[1], col2[2]);
@@ -1925,8 +1953,8 @@ void render_frame(const float view[16], const float proj[16],
             float oc_z = (float)((cam_mz - b->pos[2]) * RS);
             /* Same two-light RadianceField lighting as the sphere pass, so
              * the atmosphere's day side agrees with the surface's. */
-            float sr1[3], sr2[3], w2, col2[3];
-            body_lights(i, b, sr1, sr2, &w2, col2);
+            float sr1[3], col1[3], sr2[3], w2, col2[3];
+            body_lights(i, b, sr1, col1, sr2, &w2, col2);
 
             float planet_r = info[i].dr;
             float atm_r    = planet_r * final_scale;
@@ -1936,6 +1964,7 @@ void render_frame(const float view[16], const float proj[16],
             glUniform1f(s_at_planet_r,  planet_r);
             glUniform3f(s_at_oc,        oc_x, oc_y, oc_z);
             glUniform3f(s_at_sun_rel,   sr1[0], sr1[1], sr1[2]);
+            glUniform3f(s_at_sun_col,   col1[0], col1[1], col1[2]);
             glUniform3f(s_at_sun2_rel,  sr2[0], sr2[1], sr2[2]);
             glUniform1f(s_at_light2,    w2);
             glUniform3f(s_at_light2_col, col2[0], col2[1], col2[2]);
@@ -1948,6 +1977,20 @@ void render_frame(const float view[16], const float proj[16],
         glDepthMask(GL_TRUE);
         glDisable(GL_BLEND);
     }
+
+    /* ------------------------------------------------------------------ 2.65. Galaxies (volumetric) */
+    /* Real-position volumetric galaxies (Layer 4.2). Drawn before the nebulae:
+     * both blend "over" without depth writes, and galaxies are the more
+     * distant translucents, so back-to-front order keeps overlaps correct. */
+    galaxy_render(vp_camrel, cam_right, cam_up, cam_fwd, g_cam.pos,
+                  tanf(FOV * 0.5f * (float)(PI / 180.0)), aspect,
+                  WIN_W, WIN_H, (float)SDL_GetTicks() * 0.001f);
+
+    /* Procedural resolved stars (§0.1 galaxy → stars): additive sparkle
+     * following the same density model as the glow above, crossfaded in as
+     * the painted neighbourhood skybox fades out. */
+    galaxy_render_stars(vp_camrel, g_cam.pos, 1.0f - sf_fade,
+                        (float)SDL_GetTicks() * 0.001f);
 
     /* ------------------------------------------------------------------ 2.7. Nebulae (volumetric) */
     /* Real-position volumetric clouds; depth-tested against opaque geometry so

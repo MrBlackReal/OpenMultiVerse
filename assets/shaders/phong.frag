@@ -35,6 +35,7 @@ uniform vec3  u_center;
 uniform float u_radius;
 uniform vec3  u_oc;
 uniform vec3  u_sun_rel;
+uniform vec3  u_sun_col;      /* primary chromaticity: blackbody tint vs Sol */
 uniform vec3  u_sun2_rel;     /* secondary light − centre (RadianceField #2) */
 uniform float u_light2;       /* secondary strength relative to primary, 0..1 */
 uniform vec3  u_light2_col;   /* secondary chromaticity (max component 1)     */
@@ -1008,9 +1009,12 @@ void main() {
     float day = smoothstep(-0.12, 0.22, ndl);          /* soft terminator   */
 
     float dusk    = day * (1.0 - day) * 2.0;           /* peaks at terminator */
+    /* Art-directed warm-white/dusk ramp × the primary's physical blackbody
+     * chromaticity (u_sun_col — white for a Sun-like star, so the established
+     * look is preserved; an M dwarf's daylight runs warm orange). */
     vec3  sun_col = mix(vec3(1.00, 0.97, 0.92),        /* warm-white sunlight */
                         vec3(1.00, 0.58, 0.34),        /* dusk reddening      */
-                        dusk * 0.55);
+                        dusk * 0.55) * u_sun_col;
 
     /* Secondary light (RadianceField top-2: binary companion, foreign sun,
      * accreting hole): its own soft terminator + dusk band, weighted by its

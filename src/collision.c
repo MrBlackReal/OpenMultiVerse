@@ -17,6 +17,7 @@
  */
 #include "collision.h"
 #include "body.h"
+#include "field_graph.h"
 #include "labels.h"
 #include "laws.h"
 #include "physics.h"
@@ -1386,8 +1387,11 @@ static double merge_speed_boost(double rel_speed)
     return t;
 }
 
+/* `tidal` distinguishes a black hole devouring a shredded body from an
+ * ordinary merge for the field-graph event log — it cannot be recovered from
+ * state here because bh_tidal_pass zeroes tidal_frac before calling. */
 static void finalize_absorb_body(int target, int impactor, double rel_speed,
-                                 int outcome, double old_radius)
+                                 int outcome, double old_radius, int tidal)
 {
     Body *a = &g_bodies[target];
     Body *b = &g_bodies[impactor];
@@ -1414,6 +1418,8 @@ static void finalize_absorb_body(int target, int impactor, double rel_speed,
     if (outcome == COLLISION_VIS_MERGE) outcome_name = "merge";
     else if (outcome == COLLISION_VIS_MAJOR) outcome_name = "major";
     else if (outcome == COLLISION_VIS_CRATER) outcome_name = "crater";
+    if (tidal) field_graph_notify_tde(target, impactor);
+    else       field_graph_notify_merge(target, impactor);
     fprintf(stderr, "[collision] %s absorbed %s (%.0f m/s, %s, %.0f->%.0f km)\n",
             a->name, b->name, rel_speed, outcome_name,
             old_radius / 1000.0, a->radius / 1000.0);
@@ -1452,7 +1458,7 @@ static void absorb_body_into_star(int star_idx, int body_idx, double rel_speed,
         star->mass = total;
     }
 
-    finalize_absorb_body(star_idx, body_idx, rel_speed, 0, old_radius);
+    finalize_absorb_body(star_idx, body_idx, rel_speed, 0, old_radius, 0);
 }
 
 /* Tidal-disruption radius (m) of body `i` around black hole `hole`: where the
@@ -1591,7 +1597,7 @@ static void bh_tidal_pass(int hole, double dt)
             h->gas_reservoir += b->mass;
             b->mass       = 0.0;
             b->tidal_frac = 0.0f;
-            finalize_absorb_body(hole, i, 0.0, 0, old_radius);
+            finalize_absorb_body(hole, i, 0.0, 0, old_radius, 1);
         }
     }
 
@@ -1708,7 +1714,7 @@ static void update_merge_events(double dt)
                 }
                 m->active = 0;
                 finalize_absorb_body(m->target, m->impactor, m->rel_speed,
-                                     COLLISION_VIS_MERGE, old_radius);
+                                     COLLISION_VIS_MERGE, old_radius, 0);
                 continue;
             }
         }
@@ -1848,7 +1854,7 @@ static void update_merge_events(double dt)
                 }
                 m->active = 0;
                 finalize_absorb_body(m->target, m->impactor, m->rel_speed,
-                                     COLLISION_VIS_MERGE, old_radius);
+                                     COLLISION_VIS_MERGE, old_radius, 0);
             }
         }
     }
@@ -2315,7 +2321,7 @@ static void absorb_body(int target, int impactor, double rel_speed,
     a->mass = total;
     }
 
-    finalize_absorb_body(target, impactor, rel_speed, outcome, old_radius);
+    finalize_absorb_body(target, impactor, rel_speed, outcome, old_radius, 0);
 }
 
 void collision_step_system(int root, double dt)

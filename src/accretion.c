@@ -78,6 +78,18 @@ void accretion_init_body(Body *b)
     b->eddington_ratio = edd0;
 }
 
+/* Roche streams seen during the most recent step, for field_graph.c. A pair
+ * per feeding binary, so a small fixed table suffices (drop on overflow). */
+#define ACC_MAX_FLOWS 64
+static AccretionFlow s_flows[ACC_MAX_FLOWS];
+static int           s_flow_count = 0;
+
+int accretion_flows(const AccretionFlow **out)
+{
+    *out = s_flows;
+    return s_flow_count;
+}
+
 /* Eggleton (1983) Roche-lobe radius of the donor, as a fraction of the orbital
  * separation, for mass ratio q = M_donor / M_accretor. */
 static double roche_lobe_frac(double q)
@@ -112,11 +124,20 @@ static void roche_feed(int hole, double dt_sec)
         if (dM > 0.02 * d->mass) dM = 0.02 * d->mass; /* cap per step (stability) */
         d->mass          -= dM;
         h->gas_reservoir += dM;                       /* fuels the hole           */
+
+        /* Record the stream for the field graph (donor → hole, kg/s). */
+        if (dM > 0.0 && dt_sec > 0.0 && s_flow_count < ACC_MAX_FLOWS) {
+            s_flows[s_flow_count].donor     = j;
+            s_flows[s_flow_count].hole      = hole;
+            s_flows[s_flow_count].rate_kg_s = dM / dt_sec;
+            s_flow_count++;
+        }
     }
 }
 
 void accretion_step(double dt_real_sec)
 {
+    s_flow_count = 0;   /* streams are re-observed every step */
     if (g_stellar_years_per_sec <= 0.0 || dt_real_sec <= 0.0) return;
 
     double dt_sec = dt_real_sec * g_stellar_years_per_sec * SEC_PER_YEAR;

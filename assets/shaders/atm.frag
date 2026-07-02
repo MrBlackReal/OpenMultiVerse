@@ -32,6 +32,7 @@ uniform float u_aspect;
 uniform vec2  u_screen;
 
 uniform vec3  u_sun_rel;         /* sun − centre (AU)                   */
+uniform vec3  u_sun_col;         /* primary blackbody tint vs Sol       */
 uniform vec3  u_sun2_rel;        /* secondary light − centre (AU)       */
 uniform float u_light2;          /* secondary strength vs primary, 0..1 */
 uniform vec3  u_light2_col;      /* secondary chromaticity              */
@@ -98,9 +99,11 @@ void main() {
     float twilight = pow(clamp(1.0 - abs(sun_dot) * 2.2, 0.0, 1.0), 1.5);
     float forward  = pow(clamp(dot(ray_dir, sun_dir), 0.0, 1.0), 6.0);
 
-    /* Cool day tint shifts toward a warm sunset hue through the twilight band. */
+    /* Cool day tint shifts toward a warm sunset hue through the twilight band.
+     * Tinted by the primary's physical blackbody chromaticity (u_sun_col =
+     * white for a Sun-like star, so the established look is preserved). */
     vec3 sunset = mix(u_atm_color, vec3(1.0, 0.5, 0.25), 0.85);
-    vec3 col    = mix(u_atm_color, sunset, twilight);
+    vec3 col    = mix(u_atm_color, sunset, twilight) * u_sun_col;
 
     float lit   = 0.10 + 0.90 * day + 0.70 * forward;
 

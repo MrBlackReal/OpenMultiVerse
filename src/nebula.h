@@ -41,3 +41,5 @@ const char  *nebula_name(int i);
 void         nebula_position(int i, double out[3]);
 /* Bounding radius of nebula i in AU (0 if out of range). */
 double       nebula_radius_au(int i);
+/* Display colour of nebula i (white if out of range). */
+void         nebula_color(int i, float out[3]);

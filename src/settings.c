@@ -56,6 +56,7 @@ void settings_reset(void)
     g_settings.fov               = 60.0f;
     g_settings.warp_speed_min_au = 200.0f;
     g_settings.warp_speed_max_au = 63241.0f;
+    g_settings.adaptive_warp     = 1;
     g_settings.slider_step       = 0.05f;
     g_settings.mouse_sens_min    = 0.05f;
     g_settings.mouse_sens_max    = 1.0f;
@@ -155,6 +156,7 @@ void settings_load(void)
     g_settings.fov               = (float)json_num(json_get(root, "fov"),               g_settings.fov);
     g_settings.warp_speed_min_au = (float)json_num(json_get(root, "warp_speed_min_au"), g_settings.warp_speed_min_au);
     g_settings.warp_speed_max_au = (float)json_num(json_get(root, "warp_speed_max_au"), g_settings.warp_speed_max_au);
+    g_settings.adaptive_warp     = (int)json_num(json_get(root, "adaptive_warp"),       g_settings.adaptive_warp);
     g_settings.slider_step       = (float)json_num(json_get(root, "slider_step"),       g_settings.slider_step);
     g_settings.mouse_sens_min    = (float)json_num(json_get(root, "mouse_sens_min"),    g_settings.mouse_sens_min);
     g_settings.mouse_sens_max    = (float)json_num(json_get(root, "mouse_sens_max"),    g_settings.mouse_sens_max);
@@ -242,6 +244,7 @@ int settings_save(void)
     fprintf(f, "  \"fov\": %.6g,\n", (double)g_settings.fov);
     fprintf(f, "  \"warp_speed_min_au\": %.10g, \"warp_speed_max_au\": %.10g,\n",
             (double)g_settings.warp_speed_min_au, (double)g_settings.warp_speed_max_au);
+    fprintf(f, "  \"adaptive_warp\": %d,\n", g_settings.adaptive_warp);
     fprintf(f, "  \"slider_step\": %.6g,\n", (double)g_settings.slider_step);
     fprintf(f, "  \"mouse_sens_min\": %.6g, \"mouse_sens_max\": %.6g,\n\n",
             (double)g_settings.mouse_sens_min, (double)g_settings.mouse_sens_max);

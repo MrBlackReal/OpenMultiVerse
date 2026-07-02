@@ -403,8 +403,7 @@ static void cosmic_field_status_string(char *buf, size_t n)
     RadianceSample r;
     if (len >= 0 && (size_t)len < n && radiance_field_sample_camera(&r))
         snprintf(buf + len, n - (size_t)len, "  |  %.2e W/m2 < %s",
-                 r.irradiance,
-                 r.dominant >= 0 ? g_bodies[r.dominant].name : "supernova");
+                 r.irradiance, r.dom_label);
 }
 
 /* ── quad drawing ─────────────────────────────────────────────────────────── */

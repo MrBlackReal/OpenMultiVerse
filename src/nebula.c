@@ -273,19 +273,25 @@ void nebula_render(const float vp_camrel[16],
             const double IRR_REF   = 1e-3;   /* W/m² where brightening starts */
             const float  BOOST_MAX = 3.5f;
             float boost = 1.0f, bcol[3] = { 1.0f, 1.0f, 1.0f };
-            RadianceContrib top[1];
+            RadianceContrib top[2];
             double p_m[3] = { s_neb[i].pos[0] * AU,
                               s_neb[i].pos[1] * AU,
                               s_neb[i].pos[2] * AU };
-            if (radiance_field_top(p_m, -1, 1, top) >= 1 && top[0].irr > 0.0) {
-                boost = 1.0f + 1.2f * (float)log10(1.0 + top[0].irr / IRR_REF);
+            /* Nebulae are emitters in the field too now — skip this cloud's
+             * own glow (top[k].nebula == i) so it never boosts itself. */
+            int nt = radiance_field_top(p_m, -1, 2, top);
+            int k  = -1;
+            for (int q = 0; q < nt; q++)
+                if (top[q].nebula != i) { k = q; break; }
+            if (k >= 0 && top[k].irr > 0.0) {
+                boost = 1.0f + 1.2f * (float)log10(1.0 + top[k].irr / IRR_REF);
                 if (boost > BOOST_MAX) boost = BOOST_MAX;
                 float t = boost - 1.0f;
                 if (t > 1.0f) t = 1.0f;
                 t *= 0.6f;   /* partial tint: keep the nebula's own species colour */
-                bcol[0] = 1.0f + (top[0].col[0] - 1.0f) * t;
-                bcol[1] = 1.0f + (top[0].col[1] - 1.0f) * t;
-                bcol[2] = 1.0f + (top[0].col[2] - 1.0f) * t;
+                bcol[0] = 1.0f + (top[k].col[0] - 1.0f) * t;
+                bcol[1] = 1.0f + (top[k].col[1] - 1.0f) * t;
+                bcol[2] = 1.0f + (top[k].col[2] - 1.0f) * t;
             }
             glUniform1f (s_u_boost, boost);
             glUniform3fv(s_u_boost_col, 1, bcol);
@@ -342,4 +348,12 @@ void nebula_position(int i, double out[3])
 double nebula_radius_au(int i)
 {
     return (i >= 0 && i < NEBULA_COUNT) ? s_neb[i].radius : 0.0;
+}
+
+void nebula_color(int i, float out[3])
+{
+    if (i < 0 || i >= NEBULA_COUNT) { out[0] = out[1] = out[2] = 1.0f; return; }
+    out[0] = s_neb[i].col[0];
+    out[1] = s_neb[i].col[1];
+    out[2] = s_neb[i].col[2];
 }
