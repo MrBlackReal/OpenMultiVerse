@@ -38,6 +38,12 @@ uniform vec3  u_cam_fwd;
 uniform float u_fov_tan;
 uniform float u_aspect;
 uniform vec2  u_screen;
+uniform sampler2D u_scene_depth;   /* opaque scene log depth (half-res path) */
+uniform float u_use_scene_depth;   /* >0.5: occlusion done here, not by the
+                                    * depth test — the half-res target has no
+                                    * depth buffer, so the march is clipped to
+                                    * the scene's eye depth instead (planets
+                                    * embed correctly in the volume)          */
 
 out vec4 frag_color;
 
@@ -204,6 +210,19 @@ void main() {
             if (tExit <= tEnter) discard;
         } else if (abs(h0) > H) {
             discard;                     /* parallel ray outside the slab */
+        }
+    }
+
+    /* Half-res path: clip the march to the opaque scene's depth (sampled in
+     * normalized UV, so the full-res depth texture maps onto the half-res
+     * target). Glow in front of a planet still draws; glow behind does not. */
+    if (u_use_scene_depth > 0.5) {
+        float sd = texture(u_scene_depth, gl_FragCoord.xy / u_screen).r;
+        if (sd < 1.0) {                              /* 1.0 = cleared (sky) */
+            float scene_eye = exp2(sd * log2(FAR + 1.0)) - 1.0;
+            float ray_cos   = max(dot(rd, u_cam_fwd), 1e-4);
+            tExit = min(tExit, scene_eye / ray_cos / radius);
+            if (tExit <= tEnter) discard;
         }
     }
 

@@ -814,7 +814,13 @@ budget samples the disc, not empty bounding sphere), **elliptical**
 (steep-cored smooth glow), **irregular** (clumpy squashed FBM with pink HII
 knots). Each disc axis is tilted off the Earth sightline by the catalogued
 inclination (or uses an explicit catalogued pole), so the iconic Earth views
-are right. Drawn immediately before the nebulae (farther translucents first).
+are right. Drawn immediately before the nebulae (farther translucents first),
+into the shared **half-res volumetric target** (the Milky Way volume makes
+the raymarch fullscreen in every in-galaxy scene): unlike the supernova
+cloud's depth-less layer, the galaxy march stays depth-correct by clipping
+itself to the opaque scene's depth texture (`post_scene_depth_tex()` — the
+post FBO's depth attachment is a texture, not a renderbuffer, for exactly
+this). Direct full-res depth-tested fallback when bloom/post is off.
 
 **Procedural resolved stars** (`galaxy_stars.vert/.frag`,
 `galaxy_render_stars()`, the roadmap §0.1 galaxy → stars step): when the

@@ -20,11 +20,15 @@
 #pragma once
 
 void galaxy_init(void);
+/* scene_depth_tex: GL name of the opaque scene's depth texture when the
+ * caller renders into a depth-less half-res target (the raymarch then clips
+ * itself to scene depth); 0 for the direct full-res path (normal depth test).
+ * screen_w/h must match the *current* render target, not the window. */
 void galaxy_render(const float vp_camrel[16],
                    const float cam_right[3], const float cam_up[3],
                    const float cam_fwd[3], const double cam_pos[3],
                    float fov_tan, float aspect, int screen_w, int screen_h,
-                   float time_s);
+                   float time_s, unsigned int scene_depth_tex);
 void galaxy_shutdown(void);
 
 /* Procedural resolved stars (the §0.1 galaxy → stars scale step): when the

@@ -867,10 +867,16 @@ reference — the HUD names "Andromeda (M31)" as the dominant light when you
 fly out there), field-graph galaxy nodes (`[FieldGraph] … galaxies=10`).
 Verified headless: Magellanic Clouds + Tarantula neighbourhood shot, M31
 tilted disc, M51 face-on spiral with arms, M104 edge-on dust stripe.
+The raymarch renders to the shared **half-res target** (the Milky Way volume
+makes it fullscreen in every in-galaxy scene) and composites back
+depth-correctly: `post.c` exposes the scene depth as a texture
+(`post_scene_depth_tex()`) and `galaxy.frag` clips its march to scene depth,
+so planets embed properly in the glow — better than the old full-res path,
+which blended the whole band over them. Full-res depth-tested fallback when
+bloom/post is off.
 **Remaining:** an AGN preset hosted inside a galaxy, per-region galaxy light
-(the single integrated emitter is a point approximation), authored galaxies
-in universe JSON, and a half-res render target — a screen-filling galaxy
-raymarch costs ~20 fps (same known fix as the supernova cloud).
+(the single integrated emitter is a point approximation), and authored
+galaxies in universe JSON.
 
 ---
 

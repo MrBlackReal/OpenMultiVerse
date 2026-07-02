@@ -66,8 +66,8 @@ static GLuint make_color_tex(int w, int h)
 
 static void destroy_targets(void)
 {
-    if (s_scene_tex)   { glDeleteTextures(1, &s_scene_tex);        s_scene_tex = 0; }
-    if (s_scene_depth) { glDeleteRenderbuffers(1, &s_scene_depth); s_scene_depth = 0; }
+    if (s_scene_tex)   { glDeleteTextures(1, &s_scene_tex);   s_scene_tex = 0; }
+    if (s_scene_depth) { glDeleteTextures(1, &s_scene_depth); s_scene_depth = 0; }
     if (s_scene_fbo)   { glDeleteFramebuffers(1, &s_scene_fbo);    s_scene_fbo = 0; }
     for (int i = 0; i < 2; i++) {
         if (s_blur_tex[i]) { glDeleteTextures(1, &s_blur_tex[i]);     s_blur_tex[i] = 0; }
@@ -88,11 +88,19 @@ static int create_targets(int w, int h)
     s_scene_tex = make_color_tex(w, h);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                            GL_TEXTURE_2D, s_scene_tex, 0);
-    glGenRenderbuffers(1, &s_scene_depth);
-    glBindRenderbuffer(GL_RENDERBUFFER, s_scene_depth);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w, h);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
-                              GL_RENDERBUFFER, s_scene_depth);
+    /* Depth as a texture (not a renderbuffer) so volumetric passes can
+     * sample the opaque scene's depth — the half-res galaxy raymarch
+     * terminates its march at scene depth to embed planets correctly. */
+    glGenTextures(1, &s_scene_depth);
+    glBindTexture(GL_TEXTURE_2D, s_scene_depth);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, w, h, 0,
+                 GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                           GL_TEXTURE_2D, s_scene_depth, 0);
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
         fprintf(stderr, "[post] scene FBO incomplete; bloom disabled\n");
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -159,6 +167,11 @@ void post_init(void)
 
 int post_available(void) { return s_ok; }
 int post_enabled(void)   { return s_ok && s_enabled; }
+
+unsigned int post_scene_depth_tex(void)
+{
+    return post_enabled() && s_scene_fbo ? s_scene_depth : 0;
+}
 
 void post_get_bloom(int *enabled, float *threshold, float *intensity)
 {

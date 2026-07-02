@@ -19,6 +19,12 @@ void post_end(void);        /* run bloom + composite to screen (no-op if disable
 int  post_available(void);  /* shaders compiled OK */
 int  post_enabled(void);    /* available AND turned on */
 
+/* GL name of the current frame's scene depth texture, or 0 when post is
+ * disabled/unavailable (the scene then renders to the default framebuffer,
+ * whose depth cannot be sampled). Consumers must not write depth while
+ * sampling it — volumetrics draw with depth writes off, so this holds. */
+unsigned int post_scene_depth_tex(void);
+
 void post_get_bloom(int *enabled, float *threshold, float *intensity);
 void post_set_bloom(int enabled, float threshold, float intensity);
 

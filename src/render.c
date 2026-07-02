@@ -75,6 +75,7 @@
 #include "supernova.h"
 #include "ui_theme.h"
 #include "settings.h"
+#include "post.h"
 #include <math.h>
 #include <string.h>
 
@@ -1981,14 +1982,66 @@ void render_frame(const float view[16], const float proj[16],
     /* ------------------------------------------------------------------ 2.65. Galaxies (volumetric) */
     /* Real-position volumetric galaxies (Layer 4.2). Drawn before the nebulae:
      * both blend "over" without depth writes, and galaxies are the more
-     * distant translucents, so back-to-front order keeps overlaps correct. */
-    galaxy_render(vp_camrel, cam_right, cam_up, cam_fwd, g_cam.pos,
-                  tanf(FOV * 0.5f * (float)(PI / 180.0)), aspect,
-                  WIN_W, WIN_H, (float)SDL_GetTicks() * 0.001f);
+     * distant translucents, so back-to-front order keeps overlaps correct.
+     *
+     * The Milky Way volume makes this raymarch fullscreen in every in-galaxy
+     * scene, so like the supernova cloud it renders into the half-res target
+     * (¼ the fragments) and composites back. Unlike the cloud it stays
+     * depth-correct: the shader clips its march to the opaque scene's depth
+     * texture (post_scene_depth_tex). Falls back to the direct full-res
+     * depth-tested draw when post/bloom is off (no sampleable depth). */
+    {
+        GLuint gal_depth   = (GLuint)post_scene_depth_tex();
+        int    use_halfres = (s_vol_composite_shader != 0 && s_vol_quad_vao != 0
+                              && gal_depth != 0);
+        GLint  prev_fbo = 0;
+        int    gal_w = WIN_W, gal_h = WIN_H;
+
+        if (use_halfres) {
+            GLfloat prev_clear[4];
+            glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prev_fbo);
+            vol_target_ensure();
+            glBindFramebuffer(GL_FRAMEBUFFER, s_vol_fbo);
+            glViewport(0, 0, s_vol_w, s_vol_h);
+            glGetFloatv(GL_COLOR_CLEAR_VALUE, prev_clear);
+            glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glClearColor(prev_clear[0], prev_clear[1], prev_clear[2], prev_clear[3]);
+            gal_w = s_vol_w;
+            gal_h = s_vol_h;
+        }
+
+        galaxy_render(vp_camrel, cam_right, cam_up, cam_fwd, g_cam.pos,
+                      tanf(FOV * 0.5f * (float)(PI / 180.0)), aspect,
+                      gal_w, gal_h, (float)SDL_GetTicks() * 0.001f,
+                      use_halfres ? gal_depth : 0);
+
+        if (use_halfres) {
+            /* Upscale + composite the half-res galaxy layer over the scene. */
+            glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo);
+            glViewport(0, 0, WIN_W, WIN_H);
+            glUseProgram(s_vol_composite_shader);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, s_vol_color);
+            glUniform1i(s_vol_comp_tex, 0);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(GL_FALSE);
+            glDisable(GL_DEPTH_TEST);
+            glBindVertexArray(s_vol_quad_vao);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            glBindVertexArray(0);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glDepthMask(GL_TRUE);
+            glEnable(GL_DEPTH_TEST);
+            glDisable(GL_BLEND);
+        }
+    }
 
     /* Procedural resolved stars (§0.1 galaxy → stars): additive sparkle
      * following the same density model as the glow above, crossfaded in as
-     * the painted neighbourhood skybox fades out. */
+     * the painted neighbourhood skybox fades out. Always full-res (cheap
+     * points, correct depth test against opaque geometry). */
     galaxy_render_stars(vp_camrel, g_cam.pos, 1.0f - sf_fade,
                         (float)SDL_GetTicks() * 0.001f);
 

@@ -106,7 +106,7 @@ static GLint  s_su_gain, s_su_lum;
 static GLint  s_u_vp, s_u_center, s_u_radius, s_u_right, s_u_up, s_u_fwd;
 static GLint  s_u_oc, s_u_color, s_u_density, s_u_seed, s_u_bill, s_u_fullscreen;
 static GLint  s_u_fov_tan, s_u_aspect, s_u_screen, s_u_steps, s_u_type;
-static GLint  s_u_axis, s_u_time;
+static GLint  s_u_axis, s_u_time, s_u_scene_depth, s_u_use_scene_depth;
 static int    s_enabled = 1;
 
 /* J2000 equatorial RA/Dec -> ecliptic GL unit vector (matches starfield.c). */
@@ -154,6 +154,8 @@ void galaxy_init(void)
     s_u_type       = glGetUniformLocation(s_shader, "u_type");
     s_u_axis       = glGetUniformLocation(s_shader, "u_axis");
     s_u_time       = glGetUniformLocation(s_shader, "u_time");
+    s_u_scene_depth     = glGetUniformLocation(s_shader, "u_scene_depth");
+    s_u_use_scene_depth = glGetUniformLocation(s_shader, "u_use_scene_depth");
 
     const double arcmin = (M_PI / 180.0) / 60.0;
     for (int i = 0; i < GALAXY_COUNT; i++) {
@@ -269,11 +271,17 @@ void galaxy_render(const float vp_camrel[16],
                    const float cam_right[3], const float cam_up[3],
                    const float cam_fwd[3], const double cam_pos[3],
                    float fov_tan, float aspect, int screen_w, int screen_h,
-                   float time_s)
+                   float time_s, unsigned int scene_depth_tex)
 {
     if (!s_enabled || !s_shader || !s_vao) return;
 
     glUseProgram(s_shader);
+    if (scene_depth_tex) {
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, scene_depth_tex);
+        glUniform1i(s_u_scene_depth, 0);
+    }
+    glUniform1f(s_u_use_scene_depth, scene_depth_tex ? 1.0f : 0.0f);
     glUniformMatrix4fv(s_u_vp, 1, GL_FALSE, vp_camrel);
     glUniform3fv(s_u_right, 1, cam_right);
     glUniform3fv(s_u_up,    1, cam_up);
