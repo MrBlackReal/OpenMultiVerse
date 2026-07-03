@@ -1,0 +1,48 @@
+{
+  // Comet at perihelion — a Halley-class comet caught rounding its sun.
+  //
+  // The orbit is authored so the comet passes perihelion (q ≈ 0.59 AU)
+  // ~2 years after epoch: the boot warm-up pre-simulates exactly that long,
+  // so the app opens on the comet in full display — coma blazing, blue ion
+  // tail dead anti-sunward, curved dust tail lagging along the orbit.
+  // Fly outward with it (or crank sim speed) and the tails physically fade
+  // as the incident flux drops.
+  "bodies": [
+    {
+      "name": "Sun",
+      "type": "star",
+      "pos_ly": [0.0, 0.0, 0.0],
+      "mass": 1.989e30,
+      "radius_km": 696000.0,
+      "color": [1.0, 0.92, 0.23]
+    },
+    {
+      "name": "Earth",
+      "type": "planet",
+      "parent": "Sun",
+      "mass": 5.972e24,
+      "radius_km": 6371.0,
+      "color": [0.27, 0.55, 0.95],
+      "keplerian": { "a": 1.0, "e": 0.0167, "i": 0.0, "Omega": 0.0, "omega_tilde": 102.94, "L": 100.46 },
+      "atmosphere": { "color": [0.45, 0.65, 1.0], "intensity": 0.6, "scale": 1.3 }
+    },
+    {
+      // Mean motion n = 360°/75.3 yr → M(epoch) = −2 yr · n ≈ −9.56°, so
+      // perihelion (M = 0) lands right at the end of the 2-year warm-up.
+      "name": "Ikeya",
+      "type": "comet",
+      "parent": "Sun",
+      "mass": 2.2e14,
+      "radius_km": 5.5,
+      "color": [0.62, 0.66, 0.72],
+      "keplerian": {
+        "a": 17.834,
+        "e": 0.96714,
+        "i": 12.0,
+        "Omega": 0.0,
+        "omega_tilde": 0.0,
+        "L": 350.44
+      }
+    }
+  ]
+}

@@ -63,6 +63,7 @@
 #include "starfield.h"
 #include "nebula.h"
 #include "galaxy.h"
+#include "comet.h"
 #include "trails.h"
 #include "rings.h"
 #include "asteroids.h"
@@ -73,6 +74,7 @@
 #include "gl_utils.h"
 #include "math3d.h"
 #include "supernova.h"
+#include "physics.h"   /* g_sim_time — aurora substorm clock */
 #include "ui_theme.h"
 #include "settings.h"
 #include "post.h"
@@ -198,6 +200,10 @@ static GLint  s_at_color     = -1;
 static GLint  s_at_intensity = -1;
 static GLint  s_at_aspect    = -1;
 static GLint  s_at_screen    = -1;
+static GLint  s_at_aurora    = -1;
+static GLint  s_at_aur_shape = -1;
+static GLint  s_at_aur_look  = -1;
+static GLint  s_at_time      = -1;
 
 /* Atmosphere color/intensity/scale are stored per-body in g_bodies[i],
  * loaded from assets/universe.json by universe_load(). */
@@ -431,6 +437,45 @@ static void body_lights(int i, const Body *b,
             col2[2] = top[1].col[2];
         }
     }
+}
+
+/* ---------------------------------------------------------------- aurora storms
+ * Auroras are not always on: the oval sits faint most of the time and flares
+ * when the stellar wind gusts.  Activity is multi-octave value noise over the
+ * SIM clock (substorm ~40 min, storm ~hours, sector structure ~day), seeded
+ * per emitting star, and evaluated at the wind's ARRIVAL time at the planet
+ * (t − dist/450 km/s ≈ 4 days behind at 1 AU) — so one gust sweeps outward
+ * through a system, lighting Earth days before Jupiter.  Cubing the noise
+ * gives the right diet: mostly quiet oval, occasional bright storms. */
+static double aur_hash1(int i, unsigned seed)
+{
+    unsigned h = (unsigned)i * 374761393u + seed;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    return (double)((h ^ (h >> 16)) & 0xffffffu) / (double)0xffffffu;
+}
+
+static double aur_noise1(double x, unsigned seed)
+{
+    double fl = floor(x), f = x - fl;
+    int    i  = (int)fl;
+    f = f * f * (3.0 - 2.0 * f);
+    return aur_hash1(i, seed) * (1.0 - f) + aur_hash1(i + 1, seed) * f;
+}
+
+static double aurora_storm(const RadianceContrib *src, const Body *b)
+{
+    double dx = b->pos[0] - src->pos[0];
+    double dy = b->pos[1] - src->pos[1];
+    double dz = b->pos[2] - src->pos[2];
+    double tw = g_sim_time - sqrt(dx*dx + dy*dy + dz*dz) / 4.5e5;
+    double ts = 3600.0 * (g_settings.aurora_storm_scale > 0.01f
+                          ? g_settings.aurora_storm_scale : 0.01f);
+    unsigned seed = (unsigned)(src->body + 1) * 2654435761u;
+    double n = 0.55 * aur_noise1(tw / (22.0 * ts), seed ^ 0x9e3779b9u)
+             + 0.30 * aur_noise1(tw / ( 5.0 * ts), seed ^ 0x85ebca6bu)
+             + 0.15 * aur_noise1(tw / (0.66 * ts), seed ^ 0xc2b2ae35u);
+    return g_settings.aurora_storm_base
+         + g_settings.aurora_storm_amp * n * n * n;
 }
 
 /* ------------------------------------------------------------------ build preview */
@@ -1250,6 +1295,10 @@ void render_init(void) {
         s_at_intensity = glGetUniformLocation(s_atm_shader, "u_atm_intensity");
         s_at_aspect    = glGetUniformLocation(s_atm_shader, "u_aspect");
         s_at_screen    = glGetUniformLocation(s_atm_shader, "u_screen");
+        s_at_aurora    = glGetUniformLocation(s_atm_shader, "u_aurora");
+        s_at_aur_shape = glGetUniformLocation(s_atm_shader, "u_aur_shape");
+        s_at_aur_look  = glGetUniformLocation(s_atm_shader, "u_aur_look");
+        s_at_time      = glGetUniformLocation(s_atm_shader, "u_time");
         glUseProgram(s_atm_shader);
         glUniform1f(glGetUniformLocation(s_atm_shader, "u_fov_tan"),
                     tanf(FOV * 0.5f * (float)(PI / 180.0)));
@@ -1611,6 +1660,8 @@ static float          *s_rs_dot_sx = NULL, *s_rs_dot_sy = NULL,
                       *s_rs_dot_overlap_alpha = NULL;
 static int            *s_rs_dot_candidate = NULL, *s_rs_dot_vis = NULL;
 static float          *s_rs_dot_data = NULL;
+static float          *s_rs_aur_act = NULL;  /* smoothed aurora storm activity
+                                                (-1 = no sample yet)         */
 static int             s_dot_vbo_cap = 0;   /* # dots the VBO can hold */
 
 static void render_scratch_ensure(int n)
@@ -1631,14 +1682,18 @@ static void render_scratch_ensure(int n)
     s_rs_dot_candidate     = realloc(s_rs_dot_candidate,     (size_t)c * sizeof(int));
     s_rs_dot_vis           = realloc(s_rs_dot_vis,           (size_t)c * sizeof(int));
     s_rs_dot_data          = realloc(s_rs_dot_data,     (size_t)c * 8 * sizeof(float));
+    s_rs_aur_act           = realloc(s_rs_aur_act,          (size_t)c * sizeof(float));
     s_rs_occluders         = realloc(s_rs_occluders,        (size_t)c * sizeof(int));
     if (!s_rs_info || !s_rs_body_px || !s_rs_sphere_alpha || !s_rs_dot_order || !s_rs_dot_stars ||
         !s_rs_dot_planets || !s_rs_dot_moons || !s_rs_dot_sx || !s_rs_dot_sy ||
         !s_rs_dot_overlap_alpha || !s_rs_dot_candidate || !s_rs_dot_vis ||
-        !s_rs_dot_data || !s_rs_occluders) {
+        !s_rs_dot_data || !s_rs_aur_act || !s_rs_occluders) {
         fprintf(stderr, "[render] scratch alloc failed\n");
         exit(1);
     }
+    /* Unlike the per-frame scratch, aurora activity persists across frames
+     * (it is low-passed); mark fresh slots "no sample yet". */
+    for (int i = s_rs_cap; i < c; i++) s_rs_aur_act[i] = -1.0f;
     s_rs_cap = c;
 }
 
@@ -2010,6 +2065,21 @@ void render_frame(const float view[16], const float proj[16],
         glUniform3f(s_at_cam_right, cam_right[0], cam_right[1], cam_right[2]);
         glUniform3f(s_at_cam_up,    cam_up[0],    cam_up[1],    cam_up[2]);
         glUniform3f(s_at_cam_fwd,   cam_fwd[0],   cam_fwd[1],   cam_fwd[2]);
+        float at_now = (float)SDL_GetTicks() * 0.001f;
+        glUniform1f(s_at_time, at_now);
+        /* Real-clock frame dt for the aurora-activity low-pass below. */
+        static float s_at_prev = -1.0f;
+        float at_rdt = (s_at_prev >= 0.0f && at_now > s_at_prev)
+                       ? at_now - s_at_prev : 0.033f;
+        s_at_prev = at_now;
+        /* Aurora look tunables (live g_settings, shared by every body). */
+        glUniform4f(s_at_aur_shape,
+                    sinf(g_settings.aurora_oval_lat * (float)(PI / 180.0)),
+                    g_settings.aurora_oval_width,
+                    0.020f * g_settings.aurora_storm_expand,
+                    0.010f * g_settings.aurora_storm_expand);
+        glUniform3f(s_at_aur_look, g_settings.aurora_gain,
+                    g_settings.aurora_red, g_settings.aurora_violet);
 
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE);   /* additive: glows accumulate */
@@ -2060,6 +2130,49 @@ void render_frame(const float view[16], const float proj[16],
 
             float planet_r = info[i].dr;
             float atm_r    = planet_r * final_scale;
+
+            /* Aurora strength: a PHYSICAL proxy, no per-body art tags.
+             * Dynamo ∝ rotation rate × mass (fast spin + big metallic core
+             * ⇒ field; Venus' 243-day spin or a tidally-locked moon ⇒ ~0),
+             * driven by the stellar wind ∝ √(incident flux from the dominant
+             * RadianceField emitter).  Earth-normalised so Earth ≈ 1; gas
+             * giants clamp (Jupiter's real aurora is brighter but a screen
+             * full of neon is not the goal).  Promoted exoplanets inherit
+             * whatever their rotation/mass/flux imply — same philosophy as
+             * cloud decks and comet activity. */
+            float aur = 0.0f;
+            if (!b->is_star && intensity > 0.0f && b->rotation_rate != 0.0
+                && g_settings.aurora_gain > 0.0f) {
+                RadianceContrib atop[1];
+                if (radiance_field_top(b->pos, i, 1, atop) >= 1
+                    && atop[0].irr > 0.0) {
+                    double dynamo = fabs(b->rotation_rate) / 7.292e-5
+                                  * (b->mass / 5.972e24);
+                    if (dynamo > 1.6) dynamo = 1.6;
+                    double wind = sqrt(atop[0].irr / 1361.0);
+                    if (wind > 1.3) wind = 1.3;
+                    /* Storm gusting runs on the sim clock; frames run on the
+                     * real clock.  At high sim rates the substorm octaves
+                     * cycle many times per frame — the low-pass makes the
+                     * oval breathe through them instead of strobing. */
+                    float tau = g_settings.aurora_smooth_s;
+                    float target = (float)(dynamo * wind
+                                           * aurora_storm(&atop[0], b));
+                    float *sm = &s_rs_aur_act[i];
+                    if (*sm < 0.0f || tau <= 0.0f) *sm = target;
+                    else *sm += (target - *sm) * (at_rdt / (at_rdt + tau));
+                    aur = *sm * lod_a;
+                    if (aur < 0.02f) aur = 0.0f;
+                }
+            }
+            {
+                /* Spin axis in GL world space: ecliptic north = GL +Y,
+                 * obliquity tilts about GL X (same frame as the sphere and
+                 * accretion-disk passes). */
+                double ob = b->obliquity * (PI / 180.0);
+                glUniform4f(s_at_aurora, 0.0f, (float)cos(ob), (float)sin(ob),
+                            aur);
+            }
 
             glUniform3f(s_at_center,   -oc_x, -oc_y, -oc_z);
             glUniform1f(s_at_radius,    atm_r);
@@ -2715,6 +2828,13 @@ void render_frame(const float view[16], const float proj[16],
         glDepthMask(GL_TRUE);
         glDisable(GL_BLEND);
     }
+
+    /* ------------------------------------------------------------------ 6.35. Comets
+     * Coma + ion/dust tails, additive over the scene like the star glare.
+     * comet.c owns the pass; activity comes from the RadianceField, so this
+     * costs nothing in comet-less universes (one flag test per body). */
+    comet_render(vp_camrel, cam_right, cam_up, cam_fwd, g_cam.pos,
+                 (float)SDL_GetTicks() * 0.001f);
 
     /* ------------------------------------------------------------------ 6.4. Black holes
      * Shadow + accretion disk billboards, alpha-blended (the shadow is opaque

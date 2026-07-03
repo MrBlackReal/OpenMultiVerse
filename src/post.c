@@ -56,6 +56,7 @@ static GLuint s_blur_fbo[BLOOM_LEVELS][2], s_blur_tex[BLOOM_LEVELS][2];
 static GLuint s_sh_bright = 0, s_sh_blur = 0, s_sh_comp = 0, s_sh_flare = 0;
 static GLint  s_u_fl_depth, s_u_fl_light_uv, s_u_fl_light_depth;
 static GLint  s_u_fl_intensity, s_u_fl_color, s_u_fl_aspect;
+static GLint  s_u_fl_tune, s_u_fl_tune2;
 static GLint  s_u_bright_scene, s_u_bright_thresh;
 static GLint  s_u_blur_tex, s_u_blur_dir;
 static GLint  s_u_comp_scene, s_u_comp_intensity;
@@ -168,6 +169,8 @@ void post_init(void)
         s_u_fl_intensity   = glGetUniformLocation(s_sh_flare, "u_intensity");
         s_u_fl_color       = glGetUniformLocation(s_sh_flare, "u_color");
         s_u_fl_aspect      = glGetUniformLocation(s_sh_flare, "u_aspect");
+        s_u_fl_tune        = glGetUniformLocation(s_sh_flare, "u_tune");
+        s_u_fl_tune2       = glGetUniformLocation(s_sh_flare, "u_tune2");
     } else {
         fprintf(stderr, "[post] lens flare shader failed; flare disabled\n");
     }
@@ -419,6 +422,10 @@ void post_end(void)
         glUniform1f(s_u_fl_intensity, s_flare_i);
         glUniform3f(s_u_fl_color, s_flare_col[0], s_flare_col[1], s_flare_col[2]);
         glUniform1f(s_u_fl_aspect, (float)WIN_W / (float)WIN_H);
+        glUniform4f(s_u_fl_tune, g_settings.flare_ghosts, g_settings.flare_halo,
+                    g_settings.flare_halo_radius, g_settings.flare_streak);
+        glUniform2f(s_u_fl_tune2, g_settings.flare_streak_len,
+                    g_settings.flare_core);
         draw_quad();
         glDisable(GL_BLEND);
     }

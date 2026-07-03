@@ -326,6 +326,26 @@
     },
 
     {
+      // 1P/Halley — the comet. J2000-epoch elements (retrograde, i > 90°).
+      // Near aphelion (~35 AU) it is a frozen nucleus; comet.c grows the
+      // coma + tails physically from incident flux as it nears the Sun.
+      "name": "Halley",
+      "type": "comet",
+      "parent": "Sun",
+      "mass": 2.2e14,
+      "radius_km": 5.5,
+      "color": [0.62, 0.66, 0.72],
+      "keplerian": {
+        "a": 17.834,
+        "e": 0.96714,
+        "i": 162.2627,
+        "Omega": 58.4201,
+        "omega_tilde": 169.7526,
+        "L": 236.1
+      }
+    },
+
+    {
       "name": "Eris",
       "type": "dwarf_planet",
       "parent": "Sun",

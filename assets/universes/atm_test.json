@@ -19,6 +19,8 @@
       "mass": 5.972e24,
       "radius_km": 6371.0,
       "color": [0.27, 0.55, 0.95],
+      "obliquity_deg": 23.44,
+      "rotation_period_days": 0.99727,
       "keplerian": { "a": 1.0, "e": 0.0, "i": 0.0, "Omega": 0.0, "omega_tilde": 0.0, "L": 0.0 },
       "atmosphere": { "color": [0.45, 0.65, 1.0], "intensity": 0.6, "scale": 1.3 }
     },

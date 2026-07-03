@@ -65,12 +65,30 @@ typedef struct {
     float  vignette;           /* corner darkening 0..1 (0 = off)             */
     float  lens_spikes;        /* star-glare diffraction spike strength (0=off)*/
     float  lens_flare;         /* sun lens-flare overlay strength (0 = off)   */
+    float  flare_ghosts;       /* ghost-sprite chain gain (1 = calibrated)    */
+    float  flare_halo;         /* halo ring gain                              */
+    float  flare_halo_radius;  /* halo ring radius (screen units)             */
+    float  flare_streak;       /* anamorphic streak gain                      */
+    float  flare_streak_len;   /* anamorphic streak length multiplier         */
+    float  flare_core;         /* warm glow at the light itself               */
     float  relativistic;       /* relativistic aberration/Doppler at warp 0..1 */
 
     /* ---- stellar appearance ------------------------------------------ */
     float  star_twinkle;       /* dot brightness shimmer 0..1 (0 = off)       */
     float  star_corona;        /* glare corona streamers 0..1 (0 = off)       */
     float  starspots;          /* star-surface spot/granulation 0..1 (0=off)  */
+
+    /* ---- auroras (atm.frag emission + render.c aurora_storm) ---------- */
+    float  aurora_gain;         /* emission brightness at strength 1 (0=off)  */
+    float  aurora_oval_lat;     /* quiet oval magnetic latitude, degrees      */
+    float  aurora_oval_width;   /* quiet oval gaussian half-width (sin-lat)   */
+    float  aurora_storm_expand; /* how far storms push/thicken the oval (×)   */
+    float  aurora_red;          /* high-altitude red band gain                */
+    float  aurora_violet;       /* bottom violet fringe gain                  */
+    float  aurora_storm_base;   /* stellar-wind activity floor (quiet oval)   */
+    float  aurora_storm_amp;    /* storm amplitude on top of the floor        */
+    float  aurora_storm_scale;  /* octave period multiplier (1 = real hours)  */
+    float  aurora_smooth_s;     /* real-clock activity low-pass τ, seconds    */
 
     /* ---- camera / controls ------------------------------------------- */
     float  fov;                /* vertical field of view (degrees)            */

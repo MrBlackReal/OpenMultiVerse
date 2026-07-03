@@ -21,6 +21,10 @@ uniform float     u_light_depth; /* light's log depth: log2(d+1)/log2(FAR+1) */
 uniform float     u_intensity;   /* setting × flux ramp (0 = skipped on CPU) */
 uniform vec3      u_color;       /* light chromaticity                       */
 uniform float     u_aspect;      /* WIN_W / WIN_H                            */
+uniform vec4      u_tune;        /* x = ghost gain, y = halo gain,
+                                    z = halo radius, w = streak gain
+                                    (1/1/0.38/1 = the calibrated look)       */
+uniform vec2      u_tune2;       /* x = streak length ×, y = core glow gain  */
 
 /* Soft round sprite: 1 in the core, smooth falloff to the radius. */
 float ghost(vec2 p, vec2 c, float r)
@@ -69,23 +73,25 @@ void main()
     c = l * -0.30; col += vec3(0.45, 1.00, 0.55) * 0.24 * ghost(p, c, 0.038);
     c = l *  0.35; col += vec3(0.40, 0.65, 1.00) * 0.27 * ghost(p, c, 0.055);
     c = l *  0.85; col += vec3(0.85, 0.45, 1.00) * 0.19 * ghost(p, c, 0.100);
+    col *= u_tune.x;
 
     /* Halo ring around the screen centre, weighted toward the side opposite
      * the light (where an internal-reflection halo actually lands). */
-    float ringd = length(p) - 0.38;
+    float ringd = length(p) - u_tune.z;
     float ring  = exp(-ringd * ringd / (2.0 * 0.030 * 0.030));
     float lside = (length(p) > 1e-4 && length(l) > 1e-4)
                 ? 0.5 - 0.5 * dot(normalize(p), normalize(l)) : 0.5;
-    col += u_color * (0.14 * ring * (0.25 + 0.75 * lside));
+    col += u_color * (0.14 * u_tune.y * ring * (0.25 + 0.75 * lside));
 
     /* Blue anamorphic streak through the light. */
     vec2  s = v_uv - u_light_uv;
-    float streak = exp(-abs(s.y) * 240.0) * exp(-abs(s.x) * 4.5);
-    col += vec3(0.35, 0.55, 1.00) * (1.30 * streak);
+    float streak = exp(-abs(s.y) * 240.0)
+                 * exp(-abs(s.x) * 4.5 / max(u_tune2.x, 0.05));
+    col += vec3(0.35, 0.55, 1.00) * (1.30 * u_tune.w * streak);
 
     /* Small warm bloom at the light itself (the bloom pass already blazes the
      * core; this just anchors the artifact chain to it). */
-    col += u_color * (0.45 * exp(-length(p - l) * 9.0));
+    col += u_color * (0.45 * u_tune2.y * exp(-length(p - l) * 9.0));
 
     frag_color = vec4(col * k, 1.0);
 }

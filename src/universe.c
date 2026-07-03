@@ -681,7 +681,7 @@ void universe_load(const char *path)
         const char *t = json_str(json_get(bc, "type"), "");
         if (strcmp(t, "star") == 0 || strcmp(t, "black_hole") == 0) n_star++;
         else if (strcmp(t, "planet") == 0 || strcmp(t, "dwarf_planet") == 0 ||
-                 strcmp(t, "asteroid") == 0) n_planet++;
+                 strcmp(t, "asteroid") == 0 || strcmp(t, "comet") == 0) n_planet++;
         else if (strcmp(t, "moon") == 0) n_moon++;
     }
     int done = 0;   /* running body count across passes, for the loading bar */
@@ -794,7 +794,8 @@ void universe_load(const char *path)
             const char *type = json_str(json_get(bn, "type"), "");
             if (strcmp(type, "planet") != 0 &&
                 strcmp(type, "dwarf_planet") != 0 &&
-                strcmp(type, "asteroid") != 0)
+                strcmp(type, "asteroid") != 0 &&
+                strcmp(type, "comet") != 0)
                 continue;
 
             const char *name     = json_str(json_get(bn, "name"),      "unknown");
@@ -857,6 +858,7 @@ void universe_load(const char *path)
             bo->vel[0]         = v[0]; bo->vel[1] = v[1]; bo->vel[2] = v[2];
             bo->col[0]         = col[0]; bo->col[1] = col[1]; bo->col[2] = col[2];
             bo->parent         = par_idx;
+            bo->is_comet       = (strcmp(type, "comet") == 0);
             read_rotation(bn, bo);
             read_atmosphere(bn, bo);
             alloc_trail(bo);

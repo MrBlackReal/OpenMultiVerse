@@ -33,6 +33,11 @@ static const UniversePreset s_presets[] = {
       "A stellar-mass black hole fed by a giant companion overflowing its Roche "
       "lobe. Advance Stellar time and watch (Inspect) the donor feed the hole's "
       "reservoir, sustaining the disk/jets and spinning the hole up." },
+    { "Comet at Perihelion", "assets/universes/comet.json",
+      "A Halley-class comet caught rounding its sun: blazing coma, straight "
+      "blue ion tail pointing dead anti-sunward, curved dust tail lagging "
+      "along the orbit. The display is physical — it grows and fades with "
+      "the incident flux as the orbit carries it in and out." },
     { "Strong Gravity", "assets/universes/strong_gravity.json",
       "G is ~4x stronger — orbits are much faster and tighter." },
     { "Inverse-Cube Forces", "assets/universes/inverse_cube.json",

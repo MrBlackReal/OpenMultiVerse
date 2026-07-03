@@ -40,6 +40,7 @@
 #include "starfield.h"
 #include "nebula.h"
 #include "galaxy.h"
+#include "comet.h"
 #include "trails.h"
 #include "labels.h"
 #include "render.h"
@@ -381,6 +382,8 @@ static void init_runtime_world(void) {
     nebula_init();
     boot_log("Initializing galaxies");
     galaxy_init();
+    boot_log("Initializing comets");
+    comet_init();
     loading_phase("Allocating trails");
     boot_log("Initializing trails");
     trails_gl_init();
@@ -426,6 +429,7 @@ static void shutdown_runtime_world(void) {
     render_shutdown();
     labels_shutdown();
     trails_gl_shutdown();
+    comet_shutdown();
     galaxy_shutdown();
     nebula_shutdown();
     starfield_shutdown();

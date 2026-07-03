@@ -791,14 +791,49 @@ O(N²). See ARCHITECTURE.md §8.1.
 
 ## 2.3 Comets and minor bodies
 
-**Status:** ⛔ todo
+**Status:** 🟡 — coma + both tails + physical sublimation landed (2026-07);
+fragmentation remains
+
+A comet is a normal body (`"type": "comet"` → `Body.is_comet`; the nucleus
+takes the ordinary dot/sphere/physics/label path).  `src/comet.{c,h}` +
+`comet.vert/.frag` draw the volatile display: three additive elements per
+comet, camera-relative floats, per-fragment log depth (the ribbons span a
+large depth range).  Tails draw as crossed ribbon pairs so no viewing angle
+sees a flat quad silhouette.
 
 ### Features
 
-* ion tail
-* dust tail
-* sublimation intensity
-* tidal fragmentation
+* ion tail ✅ — straight, dead anti-sunward from the *dominant RadianceField
+  emitter* (a comet rounding a foreign sun points away from THAT sun), blue,
+  narrow, filamentary streaks advecting tailward on `u_time`
+* dust tail ✅ — **physically simulated syndynes**: each sample is a real
+  grain, back-propagated to its release point on the comet's orbit and then
+  forward-propagated under radiation-pressure-reduced gravity μ(1−β)
+  (two-body Kepler both ways — bracketed Newton, survives e ≈ 0.97 at
+  perihelion where naive Newton scatters; unbound high-β grains take a
+  ballistic fallback).  Grains keep orbiting at nearly the comet's speed,
+  so the tail points mostly anti-sunward and curves toward the orbit with
+  age — it is NOT a contrail marking the path (the first implementation
+  froze grains at their release points; watching it move made the error
+  obvious).  Seven β curves (0.09–0.80, the grain-size spectrum) drawn as
+  one ruled surface = a continuous McNaught-style curved fan; syndynes are
+  terminated by grain–nucleus separation, not age (orbital shear near
+  perihelion separates grains far faster than the differential-acceleration
+  estimate).  Verified: boot + 30-day shots show the fan sweeping with the
+  orbit, ion tail staying sun-locked through it.
+* sublimation intensity ✅ — PHYSICAL: activity ramps with incident flux at
+  the nucleus (log-scaled ~30 W/m² → 1361 W/m², i.e. ~6.7 AU → 1 AU around a
+  Sol-class star, capped ×1.5 inside).  Tail length/brightness/coma all
+  scale with it — no authored keyframes.  Verified: the demo comet blazes at
+  q = 0.586 AU; Halley in the default universe sits quiet at ~26 AU.
+* tidal fragmentation ⛔ (deferred — collision.c's tidal machinery is the
+  natural host when this is picked up)
+
+**Content:** 1P/Halley added to the default universe (real J2000 retrograde
+elements, currently ~26 AU out — frozen nucleus that will light up on
+approach).  New preset "Comet at Perihelion" (`comet.json`, registered):
+orbit authored so the 2-year warm-up lands exactly at perihelion — the app
+opens on the full display.
 
 ---
 
@@ -863,7 +898,36 @@ below exist in source.
   for ✅: time-evolving pattern, not just drift)
 * atmospheric density gradients 🟡 (exponential ρ(h) in the march; no
   per-planet scale-height authoring yet)
-* aurora system ⛔
+* aurora system ✅ (2026-07: emission integrated INTO the atmosphere march —
+  `aurora_emission()` in `atm.frag` accumulates per view sample, attenuated by
+  the air in front of it, so curtains occlude/frame for free.  Oval = gaussian
+  ring of magnetic latitude around the spin pole; curtains = 3-octave
+  longitude value-noise drifting on `u_time`; altitude bands violet fringe →
+  green body → red top (red gain kept low — oblique rays integrate the tall
+  red column far longer than the thin green layer, and a photo-accurate red
+  turned the whole oval pink).  Rays that hit the planet face take an
+  emission-only march shell-entry → surface (depth from shell entry so the
+  sphere's depth test passes) — that's what makes the classic orbital view of
+  the oval against the night-side disc work; scattering pixels are untouched.
+  Strength is a PHYSICAL proxy, no art tags: dynamo ∝ |rotation_rate| × mass
+  (Earth-normalised, clamped) × √(dominant RadianceField flux / 1361) —
+  Earth ≈ 1, Venus' 243-day spin ≈ 0, tidally-locked moons ≈ 0, promoted
+  exoplanets inherit automatically; same philosophy as cloud decks and comet
+  activity.  NOT always on: `aurora_storm()` (render.c) modulates it 0.22–2.5×
+  with multi-octave noise over the SIM clock (substorm ~40 min / storm ~5 h /
+  sector ~22 h), seeded per emitting star and evaluated at the wind's arrival
+  time (t − dist/450 km/s — a gust sweeps outward, Earth flares days before
+  Jupiter).  Cubed noise ⇒ quiet oval ~half the time, real storms ~8%; storms
+  also push the oval equatorward and thicken it (shader derives centre/width
+  from strength).  τ≈1.2 s real-clock low-pass so high sim rates breathe
+  instead of strobing.  Verified headless on the frozen Earth-clone rig:
+  polar view = green curtain fan with red tops, limb view = oval edge-on
+  through the shell, day side buried by sunlight; storm distribution checked
+  offline (median 0.5, p95 1.35); default-universe boot unchanged.  All
+  look/storm parameters (gain, oval lat/width, storm expansion, band colours,
+  storm floor/amplitude/timescale/smoothing) are live Visuals-menu settings
+  persisted in settings.json, as are the lens-flare element gains
+  (ghosts/halo/halo radius/streak/streak length/core).)
 * lightning emission ⛔
 
 ---
@@ -1170,13 +1234,14 @@ consumed by at least one real system; what remains in each is expansion
 6. Relativistic optical effects 🟡 (aberration/Doppler/beaming done; global lensing a dead end)
 7. Filmic camera and HDR optics ✅ (+ multi-scale bloom, true black point, lens flare 2026-07)
 8. Improved atmospheres 🟡 (physical Rayleigh+Mie single scattering landed 2026-07;
-   dynamic clouds / aurora / lightning remain)
+   auroras landed 2026-07; dynamic-cloud evolution / lightning remain)
 9. Stellar lifecycle system ✅
 
 ## Phase C — Universe dynamism
 
 10. Supernova and remnant system ✅
-11. Comets and minor bodies
+11. Comets and minor bodies 🟡 (coma + ion/dust tails + physical sublimation
+    landed 2026-07; tidal fragmentation remains)
 12. Binary / multi-star overlays
 13. Orbit prediction visuals
 

@@ -22,6 +22,17 @@
  * collision shell's red → red-scattering glow), u_atm_intensity stays the
  * overall gain, and both RadianceField lights get the full treatment
  * (u_light2 = 0 is bit-identical to the single-sun path).
+ *
+ * Auroras (u_aurora.w > 0) are emission accumulated inside the same march —
+ * a noise-curtained oval of magnetic latitude around the spin pole, green
+ * body / red top / violet fringe, mostly night-side.  Rays that hit the
+ * planet face — normally discarded, the sphere pass owns them — take an
+ * emission-only march from shell entry to the surface so the oval shows
+ * against the night-side disc from orbit.  Strength comes from the CPU's
+ * physical proxy (rotation dynamo × RadianceField flux × stellar-wind storm
+ * gusting on the sim clock — quiet oval most of the time, occasional storms
+ * that also push the oval equatorward), 0 = off and bit-identical to the
+ * pre-aurora shader.
  */
 
 uniform vec3  u_oc;              /* cam − centre  (camera-relative, AU) */
@@ -41,6 +52,15 @@ uniform float u_light2;          /* secondary strength vs primary, 0..1 */
 uniform vec3  u_light2_col;      /* secondary chromaticity              */
 uniform vec3  u_atm_color;
 uniform float u_atm_intensity;
+uniform vec4  u_aurora;          /* xyz = spin axis (world), w = strength
+                                    (0 = off, bit-identical to before)    */
+uniform vec4  u_aur_shape;       /* x = quiet oval centre (sin mag-lat),
+                                    y = quiet gaussian half-width,
+                                    z = equatorward shift per strength,
+                                    w = widening per strength             */
+uniform vec3  u_aur_look;        /* x = emission gain, y = red band gain,
+                                    z = violet fringe gain                */
+uniform float u_time;            /* seconds — curtain animation           */
 
 out vec4 frag_color;
 
@@ -60,6 +80,60 @@ float phase_rayleigh(float mu) {
 float phase_mie(float mu) {
     float d = 1.0 + MIE_G * MIE_G - 2.0 * MIE_G * mu;
     return (1.0 - MIE_G * MIE_G) / (4.0 * PI_C * d * sqrt(d));
+}
+
+/* 1-D value noise for the aurora curtains. */
+float a_hash(float p) { return fract(sin(p * 127.1) * 43758.5453); }
+float a_noise(float p) {
+    float i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(a_hash(i), a_hash(i + 1.0), f);
+}
+
+/* Auroral emission at a shell sample.  nrm = unit position from the planet
+ * centre, h = shell height 0..1, sun_dir = unit toward the sun.  The oval
+ * is a ring of magnetic latitude around each spin pole; curtains are
+ * longitude noise drifting on u_time; colour runs green (low oxygen line)
+ * → red (high), with a violet fringe at the bottom edge; the night side
+ * carries most of the glow.  Returns radiance to accumulate. */
+vec3 aurora_emission(vec3 nrm, float h, vec3 sun_dir) {
+    /* Storms don't just brighten the oval — they push it equatorward and
+     * thicken it (Kp expansion), so a big gust visibly changes the shape. */
+    float w      = clamp(u_aurora.w, 0.0, 2.5);
+    float centre = u_aur_shape.x - u_aur_shape.z * w;
+    float width  = u_aur_shape.y + u_aur_shape.w * w;
+    float sinlat = dot(nrm, u_aurora.xyz);
+    float oval_d = (abs(sinlat) - centre) / width;
+    float oval   = exp(-oval_d * oval_d);
+    if (oval < 0.003) return vec3(0.0);
+
+    /* Longitude around the spin axis for curtain structure. */
+    vec3 e1 = normalize(abs(u_aurora.y) < 0.98
+                        ? cross(u_aurora.xyz, vec3(0.0, 1.0, 0.0))
+                        : cross(u_aurora.xyz, vec3(1.0, 0.0, 0.0)));
+    vec3 e2 = cross(u_aurora.xyz, e1);
+    float phi  = atan(dot(nrm, e2), dot(nrm, e1));
+    float hemi = sinlat > 0.0 ? 0.0 : 3.7;      /* decouple the two ovals */
+    float curt = a_noise(phi * 14.0 + u_time * 0.21 + hemi)
+               * (0.35 + 0.65 * a_noise(phi * 47.0 - u_time * 0.53 + hemi))
+               * (0.55 + 0.45 * a_noise(phi * 5.0 + u_time * 0.07 + hemi));
+    curt = smoothstep(0.12, 0.55, curt);
+
+    /* Altitude bands: violet fringe → green body → red top.  Green must
+     * dominate: oblique rays integrate the tall red column far longer than
+     * the thin green layer, so the red gain is kept well below what a
+     * side-on curtain photo suggests or the whole oval reads pink. */
+    float g_band = smoothstep(0.03, 0.10, h) * (1.0 - smoothstep(0.16, 0.45, h));
+    float r_band = smoothstep(0.25, 0.50, h) * (1.0 - smoothstep(0.55, 0.85, h));
+    float v_band = smoothstep(0.01, 0.04, h) * (1.0 - smoothstep(0.05, 0.10, h));
+    vec3 col = vec3(0.15, 1.00, 0.35) * g_band
+             + vec3(0.90, 0.18, 0.35) * r_band * u_aur_look.y
+             + vec3(0.55, 0.25, 0.95) * v_band * u_aur_look.z;
+
+    /* Aurora exists on the day side too, but sunlight buries it. */
+    float night = 0.18 + 0.82 * smoothstep(0.25, -0.30, dot(nrm, sun_dir));
+
+    return col * (oval * curt * night);
 }
 
 /* Optical depth (per-channel) from a shell point toward a light, by a short
@@ -102,20 +176,30 @@ void main() {
     /* Discard outside outer atmosphere shell */
     if (p2 > R_atm * R_atm) discard;
 
-    /* Discard where ray hits the planet's front face (sphere renders that) */
+    /* Rays that hit the planet's front face: the sphere pass owns the surface,
+     * so no scattering is added there — but auroral curtains hang ABOVE the
+     * surface and must still draw against the disc (the classic orbital view
+     * of the oval over the night side).  Those pixels take an emission-only
+     * march from shell entry to the surface. */
+    bool  aur_only = false;
+    float t_end;
     float d_inner = R * R - p2;
     if (d_inner >= 0.0) {
         float t = -b - sqrt(d_inner);
-        if (t > 0.0) discard;
+        if (t > 0.0) {
+            if (u_aurora.w <= 0.0) discard;
+            aur_only = true;
+            t_end    = t;
+        }
     }
 
     /* March segment: shell entry (clamped to the camera when inside) to the
-     * shell exit.  The planet-face discard above guarantees the segment never
-     * crosses the solid sphere. */
+     * shell exit — or to the planet surface on the aurora-only path. */
     float t_atm      = -b - sqrt(max(0.0, R_atm * R_atm - p2));
     float t_atm_back = -b + sqrt(max(0.0, R_atm * R_atm - p2));
+    if (!aur_only) t_end = t_atm_back;
     float t0  = max(t_atm, 0.0);
-    float seg = t_atm_back - t0;
+    float seg = t_end - t0;
     if (seg <= 0.0) discard;
 
     float H  = max(R_atm - R, 1e-9);
@@ -158,25 +242,35 @@ void main() {
     vec3 tau_v = vec3(0.0);
     vec3 L  = vec3(0.0);
     vec3 L2 = vec3(0.0);
+    vec3 La = vec3(0.0);
     for (int j = 0; j < N_VIEW; j++) {
         vec3  pos = u_oc + (t0 + (float(j) + jit) * dt) * ray_dir;
-        float h   = clamp((length(pos) - R) / H, 0.0, 1.0);
+        float rr  = length(pos);
+        float h   = clamp((rr - R) / H, 0.0, 1.0);
         vec3  s_r = beta_r * exp(-h / H_RAY);
         float s_m = beta_m * exp(-h / H_MIE);
         tau_v += (s_r + vec3(s_m)) * dl;
         vec3 Tv = exp(-tau_v);
-        vec3 Ts = sun_transmittance(pos, sun_dir, R, R_atm, H, beta_r, beta_m);
-        L += Tv * Ts * (s_r * pr + vec3(s_m * pm)) * dl;
-        if (u_light2 > 0.0) {
-            vec3 Ts2 = sun_transmittance(pos, sun2_dir, R, R_atm, H,
-                                         beta_r, beta_m);
-            L2 += Tv * Ts2 * (s_r * pr2 + vec3(s_m * pm2)) * dl;
+        if (!aur_only) {
+            vec3 Ts = sun_transmittance(pos, sun_dir, R, R_atm, H,
+                                        beta_r, beta_m);
+            L += Tv * Ts * (s_r * pr + vec3(s_m * pm)) * dl;
+            if (u_light2 > 0.0) {
+                vec3 Ts2 = sun_transmittance(pos, sun2_dir, R, R_atm, H,
+                                             beta_r, beta_m);
+                L2 += Tv * Ts2 * (s_r * pr2 + vec3(s_m * pm2)) * dl;
+            }
         }
+        /* Auroral curtains: pure emission attenuated by the air in front of
+         * it (Tv) — no phase function, it IS the light source. */
+        if (u_aurora.w > 0.0)
+            La += Tv * aurora_emission(pos / rr, h, sun_dir) * dl;
     }
 
     vec3 col = L * u_sun_col;
     if (u_light2 > 0.0) col += L2 * u_light2_col * u_light2;
     col *= u_atm_intensity * GAIN;
+    col += La * (u_aurora.w * u_aur_look.x);
 
     if (max(col.r, max(col.g, col.b)) < 0.0005) discard;
 
@@ -190,7 +284,10 @@ void main() {
      * inside the atmosphere shell, so the depth test correctly rejects the
      * glow at pixels occupied by a closer solid body.                    */
     const float FAR = DEPTH_FAR;
-    float eye_depth  = t_atm_back * dot(ray_dir, u_cam_fwd);
+    /* Aurora-only fragments sit against the planet's own surface, which is
+     * BEHIND the shell back face in depth terms — use the shell entry instead
+     * so the depth test against the sphere passes. */
+    float eye_depth  = (aur_only ? t0 : t_atm_back) * dot(ray_dir, u_cam_fwd);
     gl_FragDepth = log2(eye_depth + 1.0) / log2(FAR + 1.0);
 
     /* Radiance out, alpha 1: under GL_SRC_ALPHA/GL_ONE this adds L exactly

@@ -49,11 +49,28 @@ void settings_reset(void)
     g_settings.vignette             = 0.0f;
     g_settings.lens_spikes          = 0.0f;
     g_settings.lens_flare           = 0.25f;
+    g_settings.flare_ghosts         = 1.0f;
+    g_settings.flare_halo           = 1.0f;
+    g_settings.flare_halo_radius    = 0.38f;
+    g_settings.flare_streak         = 1.0f;
+    g_settings.flare_streak_len     = 1.0f;
+    g_settings.flare_core           = 1.0f;
     g_settings.relativistic         = 0.5f;
 
     g_settings.star_twinkle = 0.4f;
     g_settings.star_corona  = 0.4f;
     g_settings.starspots    = 0.35f;
+
+    g_settings.aurora_gain         = 3.5f;
+    g_settings.aurora_oval_lat     = 69.5f;   /* asin(0.937)               */
+    g_settings.aurora_oval_width   = 0.024f;
+    g_settings.aurora_storm_expand = 1.0f;
+    g_settings.aurora_red          = 0.16f;
+    g_settings.aurora_violet       = 0.35f;
+    g_settings.aurora_storm_base   = 0.22f;
+    g_settings.aurora_storm_amp    = 2.6f;
+    g_settings.aurora_storm_scale  = 1.0f;
+    g_settings.aurora_smooth_s     = 1.2f;
 
     g_settings.fov               = 60.0f;
     g_settings.warp_speed_min_au = 200.0f;
@@ -154,10 +171,27 @@ void settings_load(void)
     g_settings.vignette             = (float)json_num(json_get(root, "vignette"),               g_settings.vignette);
     g_settings.lens_spikes          = (float)json_num(json_get(root, "lens_spikes"),            g_settings.lens_spikes);
     g_settings.lens_flare           = (float)json_num(json_get(root, "lens_flare"),             g_settings.lens_flare);
+    g_settings.flare_ghosts         = (float)json_num(json_get(root, "flare_ghosts"),           g_settings.flare_ghosts);
+    g_settings.flare_halo           = (float)json_num(json_get(root, "flare_halo"),             g_settings.flare_halo);
+    g_settings.flare_halo_radius    = (float)json_num(json_get(root, "flare_halo_radius"),      g_settings.flare_halo_radius);
+    g_settings.flare_streak         = (float)json_num(json_get(root, "flare_streak"),           g_settings.flare_streak);
+    g_settings.flare_streak_len     = (float)json_num(json_get(root, "flare_streak_len"),       g_settings.flare_streak_len);
+    g_settings.flare_core           = (float)json_num(json_get(root, "flare_core"),             g_settings.flare_core);
     g_settings.relativistic         = (float)json_num(json_get(root, "relativistic"),           g_settings.relativistic);
     g_settings.star_twinkle = (float)json_num(json_get(root, "star_twinkle"), g_settings.star_twinkle);
     g_settings.star_corona  = (float)json_num(json_get(root, "star_corona"),  g_settings.star_corona);
     g_settings.starspots    = (float)json_num(json_get(root, "starspots"),    g_settings.starspots);
+
+    g_settings.aurora_gain         = (float)json_num(json_get(root, "aurora_gain"),         g_settings.aurora_gain);
+    g_settings.aurora_oval_lat     = (float)json_num(json_get(root, "aurora_oval_lat"),     g_settings.aurora_oval_lat);
+    g_settings.aurora_oval_width   = (float)json_num(json_get(root, "aurora_oval_width"),   g_settings.aurora_oval_width);
+    g_settings.aurora_storm_expand = (float)json_num(json_get(root, "aurora_storm_expand"), g_settings.aurora_storm_expand);
+    g_settings.aurora_red          = (float)json_num(json_get(root, "aurora_red"),          g_settings.aurora_red);
+    g_settings.aurora_violet       = (float)json_num(json_get(root, "aurora_violet"),       g_settings.aurora_violet);
+    g_settings.aurora_storm_base   = (float)json_num(json_get(root, "aurora_storm_base"),   g_settings.aurora_storm_base);
+    g_settings.aurora_storm_amp    = (float)json_num(json_get(root, "aurora_storm_amp"),    g_settings.aurora_storm_amp);
+    g_settings.aurora_storm_scale  = (float)json_num(json_get(root, "aurora_storm_scale"),  g_settings.aurora_storm_scale);
+    g_settings.aurora_smooth_s     = (float)json_num(json_get(root, "aurora_smooth_s"),     g_settings.aurora_smooth_s);
 
     g_settings.fov               = (float)json_num(json_get(root, "fov"),               g_settings.fov);
     g_settings.warp_speed_min_au = (float)json_num(json_get(root, "warp_speed_min_au"), g_settings.warp_speed_min_au);
@@ -245,9 +279,26 @@ int settings_save(void)
             (double)g_settings.vignette, (double)g_settings.lens_spikes,
             (double)g_settings.lens_flare,
             (double)g_settings.relativistic);
+    fprintf(f, "  \"flare_ghosts\": %.6g, \"flare_halo\": %.6g, \"flare_halo_radius\": %.6g,\n",
+            (double)g_settings.flare_ghosts, (double)g_settings.flare_halo,
+            (double)g_settings.flare_halo_radius);
+    fprintf(f, "  \"flare_streak\": %.6g, \"flare_streak_len\": %.6g, \"flare_core\": %.6g,\n",
+            (double)g_settings.flare_streak, (double)g_settings.flare_streak_len,
+            (double)g_settings.flare_core);
     fprintf(f, "  \"star_twinkle\": %.6g, \"star_corona\": %.6g, \"starspots\": %.6g,\n\n",
             (double)g_settings.star_twinkle, (double)g_settings.star_corona,
             (double)g_settings.starspots);
+
+    fprintf(f, "  \"aurora_gain\": %.6g, \"aurora_oval_lat\": %.6g, \"aurora_oval_width\": %.6g,\n",
+            (double)g_settings.aurora_gain, (double)g_settings.aurora_oval_lat,
+            (double)g_settings.aurora_oval_width);
+    fprintf(f, "  \"aurora_storm_expand\": %.6g, \"aurora_red\": %.6g, \"aurora_violet\": %.6g,\n",
+            (double)g_settings.aurora_storm_expand, (double)g_settings.aurora_red,
+            (double)g_settings.aurora_violet);
+    fprintf(f, "  \"aurora_storm_base\": %.6g, \"aurora_storm_amp\": %.6g,\n",
+            (double)g_settings.aurora_storm_base, (double)g_settings.aurora_storm_amp);
+    fprintf(f, "  \"aurora_storm_scale\": %.6g, \"aurora_smooth_s\": %.6g,\n\n",
+            (double)g_settings.aurora_storm_scale, (double)g_settings.aurora_smooth_s);
 
     fprintf(f, "  \"fov\": %.6g,\n", (double)g_settings.fov);
     fprintf(f, "  \"warp_speed_min_au\": %.10g, \"warp_speed_max_au\": %.10g,\n",

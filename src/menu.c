@@ -939,6 +939,19 @@ int menu_render(int current_preset, int *laws_changed, const char **out_load_pat
                     igSliderFloat("Lens flare", &g_settings.lens_flare, 0.0f, 1.0f, "%.2f", 0);
                     igSetItemTooltip("Ghost sprites + halo + anamorphic streak from the "
                                      "dominant sun (0 = off).");
+                    igSliderFloat("Flare ghosts", &g_settings.flare_ghosts, 0.0f, 3.0f, "%.2f", 0);
+                    igSetItemTooltip("Ghost-sprite chain mirrored through the screen "
+                                     "centre (1 = calibrated look).");
+                    igSliderFloat("Flare halo", &g_settings.flare_halo, 0.0f, 3.0f, "%.2f", 0);
+                    igSetItemTooltip("Internal-reflection halo ring strength.");
+                    igSliderFloat("Flare halo radius", &g_settings.flare_halo_radius, 0.1f, 0.7f, "%.2f", 0);
+                    igSetItemTooltip("Halo ring radius in screen units.");
+                    igSliderFloat("Flare streak", &g_settings.flare_streak, 0.0f, 3.0f, "%.2f", 0);
+                    igSetItemTooltip("Blue anamorphic streak strength.");
+                    igSliderFloat("Flare streak length", &g_settings.flare_streak_len, 0.2f, 3.0f, "%.2fx", 0);
+                    igSetItemTooltip("Horizontal reach of the anamorphic streak.");
+                    igSliderFloat("Flare core", &g_settings.flare_core, 0.0f, 3.0f, "%.2f", 0);
+                    igSetItemTooltip("Warm glow anchoring the flare to the sun itself.");
                     igSliderFloat("Relativistic", &g_settings.relativistic, 0.0f, 1.0f, "%.2f", 0);
                     igSetItemTooltip("Aberration + Doppler shift at warp speed. "
                                      "Only visible while moving fast.");
@@ -954,6 +967,42 @@ int menu_render(int current_preset, int *laws_changed, const char **out_load_pat
                     igSetItemTooltip("Animated glare streamers, stronger on hot blue stars.");
                     igSliderFloat("Starspots", &g_settings.starspots, 0.0f, 1.0f, "%.2f", 0);
                     igSetItemTooltip("Granulation and dark spots on close-up star surfaces.");
+                    igPopItemWidth();
+
+                    /* ---- Auroras (persisted in g_settings) ------------ */
+                    igSpacing();
+                    igText("Auroras");
+                    igPushItemWidth(igGetContentRegionAvail().x * 0.55f);
+                    igSliderFloat("Aurora gain", &g_settings.aurora_gain, 0.0f, 10.0f, "%.1f", 0);
+                    igSetItemTooltip("Curtain emission brightness at storm strength 1 "
+                                     "(0 = auroras off).");
+                    igSliderFloat("Oval latitude", &g_settings.aurora_oval_lat, 50.0f, 85.0f, "%.1f deg", 0);
+                    igSetItemTooltip("Magnetic latitude of the quiet-time oval "
+                                     "around each spin pole.");
+                    igSliderFloat("Oval width", &g_settings.aurora_oval_width, 0.005f, 0.08f, "%.3f", 0);
+                    igSetItemTooltip("Quiet-time oval thickness (gaussian half-width "
+                                     "in sin-latitude).");
+                    igSliderFloat("Storm expansion", &g_settings.aurora_storm_expand, 0.0f, 3.0f, "%.2f", 0);
+                    igSetItemTooltip("How far storms push the oval equatorward and "
+                                     "thicken it (0 = shape ignores storms).");
+                    igSliderFloat("Red band", &g_settings.aurora_red, 0.0f, 1.0f, "%.2f", 0);
+                    igSetItemTooltip("High-altitude red oxygen line. Keep low: oblique "
+                                     "rays integrate the tall red column far longer "
+                                     "than the thin green layer.");
+                    igSliderFloat("Violet fringe", &g_settings.aurora_violet, 0.0f, 1.0f, "%.2f", 0);
+                    igSetItemTooltip("Nitrogen fringe at the curtain's bottom edge.");
+                    igSliderFloat("Storm floor", &g_settings.aurora_storm_base, 0.0f, 1.5f, "%.2f", 0);
+                    igSetItemTooltip("Quiet-time activity level (the faint oval "
+                                     "between storms).");
+                    igSliderFloat("Storm amplitude", &g_settings.aurora_storm_amp, 0.0f, 5.0f, "%.1f", 0);
+                    igSetItemTooltip("Peak storm strength on top of the floor "
+                                     "(cubed noise, so big storms stay rare).");
+                    igSliderFloat("Storm timescale", &g_settings.aurora_storm_scale, 0.1f, 10.0f, "%.2fx", 0);
+                    igSetItemTooltip("Multiplies the substorm/storm/sector periods "
+                                     "(~40 min / 5 h / 22 h sim time at 1x).");
+                    igSliderFloat("Storm smoothing", &g_settings.aurora_smooth_s, 0.0f, 10.0f, "%.1f s", 0);
+                    igSetItemTooltip("Real-time low-pass on activity so storms breathe "
+                                     "instead of strobing at high sim rates.");
                     igPopItemWidth();
                 }
 

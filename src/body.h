@@ -27,6 +27,8 @@ typedef struct {
     double fast_acc[3];    /* m/s^2 dominant parent force, RESPA inner step */
     float  col[3];         /* RGB display colour              */
     int    is_star;
+    int    is_comet;       /* 1 = comet nucleus: comet.c draws coma + ion/dust   */
+                           /* tails, activity driven by RadianceField flux       */
     int    is_black_hole;  /* 1 = render as accretion disk + shadow (no glare/   */
                            /* sphere). Also is_star=1 so it acts as a system root */
     float  agn_activity;   /* 0 = quiet hole; >0 = active quasar/AGN: scales     */
