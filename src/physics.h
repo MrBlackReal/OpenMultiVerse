@@ -32,6 +32,14 @@ void physics_respa_inner_system(int root, double dt_inner);
 void physics_respa_end_system(int root, double dt_outer);
 
 void physics_refresh_timestep_model(void);
+/* Flag the timestep model stale (call after any body add/remove). */
+void physics_mark_timestep_dirty(void);
+/* Per-frame: rebuild only if dirty or the safety throttle elapsed. */
+void physics_refresh_timestep_model_if_needed(double real_dt);
+/* Throttled per-body timestep refresh for the active systems only (slot
+ * indices as returned by the main loop's active scan). Frozen systems never
+ * integrate, so only active orbits can drift from the stored model. */
+void physics_refresh_active_timesteps(const int *slots, int n, double real_dt);
 
 /* Recommended maximum outer-step for slow-force stability. */
 double physics_outer_dt_limit(void);
@@ -53,12 +61,14 @@ void   physics_advance_time(double dt);
  * freezes the view ("whole screen flicker"), so we remove it instead. Returns
  * the number of bodies retired this call. */
 int    physics_sanitize_state(void);
+int    physics_sanitize_system(int root);   /* one system's members only */
 
 /* Legacy single-step KDK (kept for reference / one-off use) */
 void physics_step(double dt);
 
 /* Trail helpers */
 void trails_begin_frame_snapshot(void);
+void trails_begin_frame_snapshot_system(int root);   /* one system's members only */
 void trails_tick(double dt);
 void trails_tick_system(int root, double dt);
 void trails_cut_body_at_time(int body_idx, double hit_dt, double frame_dt,

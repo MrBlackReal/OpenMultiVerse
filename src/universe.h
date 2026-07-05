@@ -60,6 +60,10 @@ int universe_add_body(const BodyCreateSpec *spec);
 /* Number of currently alive bodies, excluding absorbed/reused slots. */
 int universe_live_body_count(void);
 
+/* Re-derive every black hole's radius from its mass (laws_schwarzschild_radius).
+ * Call after live edits to g_laws (G) so horizons track the new physics. */
+void universe_refresh_bh_radii(void);
+
 /* True while another runtime body can be placed without exceeding MAX_BODIES. */
 int universe_can_add_body(void);
 

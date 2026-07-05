@@ -1412,12 +1412,18 @@ static void finalize_absorb_body(int target, int impactor, double rel_speed,
     b->alive = 0;
     b->mass = 0.0;
     a->trail_emitting = 1;
+    physics_mark_timestep_dirty();   /* impactor removed — rebuild timestep model */
     labels_add_body(target);
     labels_remove_body(impactor);
     mark_system_dirty(body_root_star(target), SYSTEM_HOT_DURATION);
     if (outcome == COLLISION_VIS_MERGE) outcome_name = "merge";
     else if (outcome == COLLISION_VIS_MAJOR) outcome_name = "major";
     else if (outcome == COLLISION_VIS_CRATER) outcome_name = "crater";
+    /* A black hole's radius is its horizon, always derived from mass (single
+     * root: laws_schwarzschild_radius) — override the volume-conserving
+     * merged_radius the generic merge path just wrote. */
+    if (a->is_black_hole && a->mass > 0.0)
+        a->radius = laws_schwarzschild_radius(a->mass);
     if (tidal) field_graph_notify_tde(target, impactor);
     else       field_graph_notify_merge(target, impactor);
     fprintf(stderr, "[collision] %s absorbed %s (%.0f m/s, %s, %.0f->%.0f km)\n",
@@ -1530,6 +1536,7 @@ static void bh_tidal_pass(int hole, double dt)
 
         h->mass          += shed;
         h->gas_reservoir += shed;
+        h->radius         = laws_schwarzschild_radius(h->mass);  /* horizon tracks mass */
         fed = 1;
 
         /* Controlled inspiral.  A close orbit around a supermassive hole is
@@ -2396,7 +2403,9 @@ void collision_step(double dt)
 {
     double system_radius[MAX_BODIES];
     int resolved[MAX_BODIES] = {0};
-    int members[MAX_BODIES][MAX_BODIES];
+    /* 64 KB — kept off the per-frame stack frame; written before it is read
+     * (bounded by member_count), and collision_step is single-threaded. */
+    static int members[MAX_BODIES][MAX_BODIES];
     int member_count[MAX_BODIES] = {0};
     int active_roots[MAX_BODIES];
     int active_root_count = 0;

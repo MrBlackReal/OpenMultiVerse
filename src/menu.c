@@ -276,7 +276,7 @@ static void menu_render_navigate(void)
     }
 
     igBeginChild_Str("##results", (ImVec2_c){ 0.0f, 0.0f }, ImGuiChildFlags_Borders, 0);
-    const int MAX_RESULTS = 300;
+    const int MAX_RESULTS = 256;
     int shown = 0, capped = 0;
 
     for (int i = 0; i < g_nbodies; i++) {
@@ -806,12 +806,14 @@ int menu_render(int current_preset, int *laws_changed, const char **out_load_pat
                     g_laws.time_scale = (double)tscale;
                     g_laws.lambda     = (double)lam_e15 * 1.0e-15;
                     g_laws.pn_factor  = (double)pn;
+                    universe_refresh_bh_radii();   /* horizons derive from G */
                     if (laws_changed) *laws_changed = 1;
                 }
 
                 igSpacing();
                 if (igButton("Reset to Newtonian", (ImVec2_c){ -1.0f, 0.0f })) {
                     laws_reset();
+                    universe_refresh_bh_radii();   /* horizons derive from G */
                     if (laws_changed) *laws_changed = 1;
                 }
 

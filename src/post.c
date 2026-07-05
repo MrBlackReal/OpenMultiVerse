@@ -51,6 +51,7 @@ static int    s_w = 0, s_h = 0;    /* size the targets were built for */
 static int    s_bw[BLOOM_LEVELS], s_bh[BLOOM_LEVELS];
 
 static GLuint s_scene_fbo = 0, s_scene_tex = 0, s_scene_depth = 0;
+static GLuint s_grab_tex = 0;      /* mid-frame scene snapshot (lazily built) */
 static GLuint s_blur_fbo[BLOOM_LEVELS][2], s_blur_tex[BLOOM_LEVELS][2];
 
 static GLuint s_sh_bright = 0, s_sh_blur = 0, s_sh_comp = 0, s_sh_flare = 0;
@@ -83,6 +84,7 @@ static GLuint make_color_tex(int w, int h)
 static void destroy_targets(void)
 {
     if (s_scene_tex)   { glDeleteTextures(1, &s_scene_tex);   s_scene_tex = 0; }
+    if (s_grab_tex)    { glDeleteTextures(1, &s_grab_tex);    s_grab_tex = 0; }
     if (s_scene_depth) { glDeleteTextures(1, &s_scene_depth); s_scene_depth = 0; }
     if (s_scene_fbo)   { glDeleteFramebuffers(1, &s_scene_fbo);    s_scene_fbo = 0; }
     for (int l = 0; l < BLOOM_LEVELS; l++) {
@@ -211,6 +213,29 @@ int post_enabled(void)   { return s_ok && s_enabled; }
 unsigned int post_scene_depth_tex(void)
 {
     return post_enabled() && s_scene_fbo ? s_scene_depth : 0;
+}
+
+unsigned int post_scene_fbo(void)
+{
+    return post_enabled() && s_scene_fbo ? s_scene_fbo : 0;
+}
+
+unsigned int post_grab_scene(void)
+{
+    if (!post_enabled() || !s_scene_fbo) return 0;
+    if (!s_grab_tex) s_grab_tex = make_color_tex(s_w, s_h);
+
+    /* Copy the scene colour attachment into the snapshot. Bind the scene FBO
+     * as the read target explicitly (a half-res volumetric pass may have left
+     * another read binding), then restore the read binding to the current draw
+     * FBO so subsequent state stays as the caller expects. */
+    GLint draw_fbo = 0;
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw_fbo);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, s_scene_fbo);
+    glBindTexture(GL_TEXTURE_2D, s_grab_tex);
+    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, s_w, s_h);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)draw_fbo);
+    return s_grab_tex;
 }
 
 void post_get_bloom(int *enabled, float *threshold, float *intensity)

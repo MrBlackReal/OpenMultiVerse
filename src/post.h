@@ -25,6 +25,21 @@ int  post_enabled(void);    /* available AND turned on */
  * sampling it — volumetrics draw with depth writes off, so this holds. */
 unsigned int post_scene_depth_tex(void);
 
+/* GL name of the HDR scene FBO the frame is rendering into, or 0 when post is
+ * disabled (scene renders to the default framebuffer). Lets mid-frame passes
+ * that redirect to their own target restore the scene binding without a
+ * glGetIntegerv round-trip. */
+unsigned int post_scene_fbo(void);
+
+/* Snapshot the scene colour rendered so far into a spare texture and return
+ * its GL name (0 when post is disabled/unavailable). The copy is what makes
+ * screen-space refraction-style effects legal mid-frame: the caller keeps
+ * rendering into the scene target while sampling the snapshot — sampling the
+ * live render-target attachment itself would be undefined. Used by the
+ * black-hole pass to gravitationally lens the real background. The snapshot
+ * is only valid until the next post_grab_scene()/post_end(). */
+unsigned int post_grab_scene(void);
+
 void post_get_bloom(int *enabled, float *threshold, float *intensity);
 void post_set_bloom(int enabled, float threshold, float intensity);
 

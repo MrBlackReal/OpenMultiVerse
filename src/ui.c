@@ -333,47 +333,24 @@ static void format_distance(double au, char *buf, size_t n)
 }
 
 /*
- * nearest_body_distance_string — find the nearest body to the camera and
- * format a "name  distance" label.
+ * nearest_body_distance_string — format a "name  distance" label for the
+ * nearest body, from the shared per-frame proximity cache (g_cam_prox — no
+ * private O(N) scans; this used to run one or two full passes per frame with
+ * a sqrt per body).
  *
- * Two-pass logic: the first pass searches all bodies. If the nearest is more
- * than 1000 AU away (i.e. interstellar distances), a second pass finds only
- * the nearest star so the label always shows the most relevant body, not a
- * dead planet orbiting a distant star.
+ * If the nearest body is more than 1000 AU away (interstellar distances),
+ * show the nearest star instead so the label always names the most relevant
+ * body, not a dead planet orbiting a distant star.
  */
 static void nearest_body_distance_string(char *buf, size_t n)
 {
-    int best = -1;
-    double best_d = 1e300;
-
-    for (int i = 0; i < g_nbodies; i++) {
-        if (!g_bodies[i].alive) continue;
-        double dx = g_bodies[i].pos[0] * RS - g_cam.pos[0];
-        double dy = g_bodies[i].pos[1] * RS - g_cam.pos[1];
-        double dz = g_bodies[i].pos[2] * RS - g_cam.pos[2];
-        double d = sqrt(dx*dx + dy*dy + dz*dz);
-        if (d < best_d) {
-            best_d = d;
-            best = i;
-        }
-    }
+    int    best   = g_cam_prox.body;
+    double best_d = g_cam_prox.body_dist_au;
 
     /* Fall back to nearest star if everything is > 1000 AU away */
-    if (best >= 0 && best_d > 1000.0) {
-        best = -1;
-        best_d = 1e300;
-        for (int i = 0; i < g_nbodies; i++) {
-            if (!g_bodies[i].alive) continue;
-            if (!g_bodies[i].is_star) continue;
-            double dx = g_bodies[i].pos[0] * RS - g_cam.pos[0];
-            double dy = g_bodies[i].pos[1] * RS - g_cam.pos[1];
-            double dz = g_bodies[i].pos[2] * RS - g_cam.pos[2];
-            double d = sqrt(dx*dx + dy*dy + dz*dz);
-            if (d < best_d) {
-                best_d = d;
-                best = i;
-            }
-        }
+    if (best >= 0 && best_d > 1000.0 && g_cam_prox.star >= 0) {
+        best   = g_cam_prox.star;
+        best_d = g_cam_prox.star_dist_au;
     }
 
     if (best < 0) {

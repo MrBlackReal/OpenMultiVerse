@@ -153,6 +153,12 @@ typedef struct {
     GLint  loc_light0, loc_shadow_strength;
     GLuint vao_full, vbo_full;
     GLuint vao_lod,  vbo_lod;
+    /* Split upload: only a_M (column 0) changes per frame (rings_tick); the
+     * other 7 floats/particle are static after bake and re-uploaded only when
+     * a despawn event rewrites them (gpu_dirty_*).  vbo_m_* carries the
+     * per-frame M stream — 8× less DMA than re-streaming the whole array. */
+    GLuint vbo_m_full, vbo_m_lod;
+    int    gpu_dirty_full, gpu_dirty_lod;
 
     float  hit_cooldown[RING_COLLISION_SEGMENTS * RING_COLLISION_RADIAL_BINS];
     float  puff_cur, puff_target;
@@ -1048,6 +1054,12 @@ static int despawn_disc_contact_particles(ParticleDisc *d,
                                               ru, rv, rh, other_r_km, severity);
     killed += despawn_contact_particles_array(d, d->data_lod, d->n_arr_lod, d->n_lod,
                                               ru, rv, rh, other_r_km, severity);
+    if (killed > 0) {
+        /* Static particle columns changed — schedule a full GPU re-upload
+         * (render_disc streams only the M column per frame otherwise). */
+        d->gpu_dirty_full = 1;
+        d->gpu_dirty_lod  = 1;
+    }
     return killed;
 }
 
@@ -1487,9 +1499,10 @@ static void update_disc_swept_contact(ParticleDisc *d, int other_idx, double dt)
 
 /* Set up the 8-float-per-particle VAO attribute pointers (loc 0..5).
  * Locations 0..4 are individual floats; loc 5 is vec3 (rgb). */
-static void setup_particle_attribs(void) {
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 1, GL_FLOAT, GL_FALSE, 8*sizeof(float), (void*)(0*sizeof(float)));
+/* Static per-particle attributes (a, e, omega, h, rgb) from the interleaved
+ * buffer bound at call time.  Slot 0 of the stride-8 layout (the baked M0) is
+ * dead padding — a_M is sourced from the separate per-frame M stream below. */
+static void setup_static_attribs(void) {
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, 8*sizeof(float), (void*)(1*sizeof(float)));
     glEnableVertexAttribArray(2);
@@ -1500,6 +1513,25 @@ static void setup_particle_attribs(void) {
     glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, 8*sizeof(float), (void*)(4*sizeof(float)));
     glEnableVertexAttribArray(5);
     glVertexAttribPointer(5, 3, GL_FLOAT, GL_FALSE, 8*sizeof(float), (void*)(5*sizeof(float)));
+}
+
+/* a_M (mean anomaly) from the tightly-packed dynamic stream bound at call time. */
+static void setup_m_attrib(void) {
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 1, GL_FLOAT, GL_FALSE, sizeof(float), (void*)0);
+}
+
+/* Shared scratch for gathering the M column out of the interleaved CPU array
+ * before streaming it (sized to the largest disc). */
+static float *s_m_scratch = NULL;
+static int    s_m_scratch_cap = 0;
+static int m_scratch_ensure(int n) {
+    if (n <= s_m_scratch_cap) return 1;
+    float *grown = realloc(s_m_scratch, (size_t)n * sizeof(float));
+    if (!grown) return 0;
+    s_m_scratch = grown;
+    s_m_scratch_cap = n;
+    return 1;
 }
 
 /* Compile shaders and upload initial particle data for one disc. */
@@ -1524,20 +1556,28 @@ static void init_disc_gl(ParticleDisc *d)
     d->loc_light0 = glGetUniformLocation(d->shader, "u_light0");
     d->loc_shadow_strength = glGetUniformLocation(d->shader, "u_shadow_strength");
 
-    /* Full-count VAO/VBO */
+    /* Full-count VAO: static columns + separate per-frame M stream. */
     d->vao_full = gl_vao_create();
     d->vbo_full = gl_vbo_create(d->n_full * 8 * sizeof(float),
                                 d->data_full, GL_DYNAMIC_DRAW);
-    setup_particle_attribs();
+    setup_static_attribs();
+    d->vbo_m_full = gl_vbo_create(d->n_full * sizeof(float), NULL,
+                                  GL_STREAM_DRAW);
+    setup_m_attrib();
     glBindVertexArray(0);
 
-    /* LOD VAO/VBO */
+    /* LOD VAO: same split. */
     d->vao_lod = gl_vao_create();
     d->vbo_lod = gl_vbo_create(d->n_lod * 8 * sizeof(float),
                                d->data_lod, GL_DYNAMIC_DRAW);
-    setup_particle_attribs();
+    setup_static_attribs();
+    d->vbo_m_lod = gl_vbo_create(d->n_lod * sizeof(float), NULL,
+                                 GL_STREAM_DRAW);
+    setup_m_attrib();
     glBindVertexArray(0);
 
+    d->gpu_dirty_full = 0;
+    d->gpu_dirty_lod  = 0;
 }
 
 /*
@@ -1549,7 +1589,7 @@ static void init_disc_gl(ParticleDisc *d)
  * smaller prefix.  Past RING_FADE_START, alpha fades to zero before the ring
  * is skipped entirely.
  */
-static void render_disc(const ParticleDisc *d, const float vp_camrel[16])
+static void render_disc(ParticleDisc *d, const float vp_camrel[16])
 {
     Body *par = &g_bodies[d->parent_idx];
     float rb1[3], rb2[3], rpole[3];
@@ -1609,11 +1649,15 @@ static void render_disc(const ParticleDisc *d, const float vp_camrel[16])
                                                     RING_SHADOW_FULL_DIST, 1e-5f));
     }
 
+    GLuint vbo_m;
+    int   *gpu_dirty;
+    int    buf_n;          /* total particles in the selected buffer */
     if (dist <= LOD_DIST || d->n_lod <= 0) {
         n = d->n_full;
         data = d->data_full;
         vao = d->vao_full;
         vbo = d->vbo_full;
+        vbo_m = d->vbo_m_full; gpu_dirty = &d->gpu_dirty_full; buf_n = d->n_full;
     } else {
         float lod_t = smootherstep01f((dist - LOD_DIST) /
                                       fmaxf(LOD_FADE_END - LOD_DIST, 1e-5f));
@@ -1627,10 +1671,12 @@ static void render_disc(const ParticleDisc *d, const float vp_camrel[16])
             data = d->data_full;
             vao = d->vao_full;
             vbo = d->vbo_full;
+            vbo_m = d->vbo_m_full; gpu_dirty = &d->gpu_dirty_full; buf_n = d->n_full;
         } else {
             data = d->data_lod;
             vao = d->vao_lod;
             vbo = d->vbo_lod;
+            vbo_m = d->vbo_m_lod; gpu_dirty = &d->gpu_dirty_lod; buf_n = d->n_lod;
         }
     }
     if (n <= 0 || !data || !vao || !vbo) return;
@@ -1706,9 +1752,20 @@ static void render_disc(const ParticleDisc *d, const float vp_camrel[16])
     glUniform1f       (d->loc_shadow_strength, shadow_strength);
 
     glBindVertexArray(vao);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    /* Upload updated M0 values (and unchanged a,e,omega,h,rgb) each frame. */
-    glBufferSubData(GL_ARRAY_BUFFER, 0, n * 8 * sizeof(float), data);
+    /* Static columns (a,e,omega,h,rgb): re-uploaded only after a despawn
+     * event rewrote them — the whole buffer, not the drawn prefix, so a later
+     * closer camera never sees a stale tail. */
+    if (*gpu_dirty) {
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, buf_n * 8 * sizeof(float), data);
+        *gpu_dirty = 0;
+    }
+    /* Per-frame M stream: gather column 0 out of the interleaved CPU array
+     * and upload just the drawn prefix — 1 float/particle instead of 8. */
+    if (!m_scratch_ensure(n)) return;
+    for (int i = 0; i < n; i++) s_m_scratch[i] = data[i * 8];
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_m);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, n * sizeof(float), s_m_scratch);
 
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
@@ -1898,6 +1955,19 @@ void rings_tick(double dt)
         if (!disc->initialized) continue;
         if (disc->parent_idx < 0 || disc->parent_idx >= g_nbodies) continue;
         if (!g_bodies[disc->parent_idx].alive) continue;
+        /* render_disc culls the draw past RING_FADE_END — advancing particle
+         * phases for an invisible ring is wasted work, so freeze it too.
+         * Purely cosmetic rotation: phases resume where they left off when
+         * the camera comes back (same philosophy as frozen far systems). */
+        {
+            const Body *par = &g_bodies[disc->parent_idx];
+            double ddx = par->pos[0] * RS - g_cam.pos[0];
+            double ddy = par->pos[1] * RS - g_cam.pos[1];
+            double ddz = par->pos[2] * RS - g_cam.pos[2];
+            if (ddx*ddx + ddy*ddy + ddz*ddz >=
+                (double)RING_FADE_END * (double)RING_FADE_END)
+                continue;
+        }
         disc_update_response(disc, dt > 0.0 ? (float)dt : 0.0f);
 
         if (disc->motion_blend_duration > 0.0f) {
@@ -2074,12 +2144,17 @@ void rings_shutdown(void)
         free(disc->data_full);   free(disc->data_lod);
         free(disc->n_arr_full);  free(disc->n_arr_lod);
         if (disc->vbo_full)      glDeleteBuffers(1,      &disc->vbo_full);
+        if (disc->vbo_m_full)    glDeleteBuffers(1,      &disc->vbo_m_full);
         if (disc->vao_full)      glDeleteVertexArrays(1, &disc->vao_full);
         if (disc->vbo_lod)       glDeleteBuffers(1,      &disc->vbo_lod);
+        if (disc->vbo_m_lod)     glDeleteBuffers(1,      &disc->vbo_m_lod);
         if (disc->vao_lod)       glDeleteVertexArrays(1, &disc->vao_lod);
         if (disc->shader)        glDeleteProgram(disc->shader);
     }
     free(s_discs);
     s_discs   = NULL;
     s_n_discs = 0;
+    free(s_m_scratch);
+    s_m_scratch = NULL;
+    s_m_scratch_cap = 0;
 }

@@ -112,13 +112,51 @@ void main() {
     tExit = t1;
     if (tExit <= tEnter) discard;
 
-    stepLen = (tExit - tEnter) / 16.0;
+    /* The far fade below zeroes the result anyway — skip the march early. */
+    eye_depth = (tExit * radius) * dot(ray_dir, u_cam_fwd);
+    if (eye_depth >= VOL_FAR * 4.60) discard;
+
+    /* Hollow-cavity skip: every density term is zero below the innermost
+     * reach of the warped shell.  innerWarp ≥ inner − 0.175 (worst-case sum
+     * of its three warp amplitudes) and the deepest term (body) starts at
+     * 0.78 × innerWarp, so radii under cav_r are analytically empty.  A
+     * late-stage cloud (inner → 0.88) is a thin shell — rays through the
+     * middle waste most of their samples there.  Split the march into the
+     * two shell segments and shrink the sample count in proportion to the
+     * skipped length: samples stay at the original per-length density, they
+     * just stop being spent on empty space. */
+    float seg1a = tEnter, seg1b = tExit;        /* first shell segment  */
+    float seg2a = tExit,  seg2b = tExit;        /* second (empty by default) */
+    {
+        float cav_r = 0.78 * (inner - 0.175);
+        if (cav_r > 0.05) {
+            float cdisc = b * b - (dot(oc_local, oc_local) - cav_r * cav_r);
+            if (cdisc > 0.0) {
+                float croot = sqrt(cdisc);
+                seg1b = clamp(-b - croot, tEnter, tExit);
+                seg2a = clamp(-b + croot, tEnter, tExit);
+            }
+        }
+    }
+    float len1 = max(seg1b - seg1a, 0.0);
+    float len2 = max(seg2b - seg2a, 0.0);
+    float lenTotal = len1 + len2;
+    if (lenTotal <= 0.0) discard;
+
+    /* Step count stays fixed at 16: everything above varies continuously per
+     * pixel (segment lengths shrink to zero at the cavity's tangent ring), so
+     * a constant count keeps sample phase continuous too — an adaptive count
+     * quantizes into visible concentric rings. The cavity skip is therefore a
+     * quality redistribution: the same 16 samples concentrate in the shell
+     * instead of being wasted on analytically empty space. */
+    stepLen = lenTotal / 16.0;
 
     for (int i = 0; i < 16; i++) {
         /* March a deformed shell rather than a full dense fog volume. The
          * inner/outer radii are warped independently so large-scale lobes can
          * protrude without collapsing the whole cloud into a uniform sphere. */
-        float t = tEnter + (float(i) + 0.5) * stepLen;
+        float s = (float(i) + 0.5) * stepLen;
+        float t = (s < len1) ? (seg1a + s) : (seg2a + (s - len1));
         vec3 p = oc_local + ray_dir * t;
         float rr = length(p);
         vec3 dir = rr > 1e-4 ? p / rr : vec3(0.0, 0.0, 1.0);
@@ -182,9 +220,9 @@ void main() {
         sampleAlpha = clamp(sampleAlpha, 0.0, 0.32);
         accumColor += sampleCol * sampleAlpha * (1.0 - accumAlpha);
         accumAlpha += sampleAlpha * (1.0 - accumAlpha);
+        if (accumAlpha >= 0.985) break;   /* saturated — rest contributes nothing */
     }
 
-    eye_depth = (tExit * radius) * dot(ray_dir, u_cam_fwd);
     eye_depth = max(eye_depth, 0.0);
     /* Use a soft far fade so very large late-stage clouds disappear gradually
      * instead of popping exactly at the volumetric depth horizon. */

@@ -98,9 +98,19 @@ void main() {
     tExit = t1;
     if (tExit <= tEnter) discard;
 
-    stepLen = (tExit - tEnter) / 18.0;
+    /* The far fade below zeroes the result anyway — skip the march early. */
+    eye_depth = (tExit * radius) * dot(ray_dir, u_cam_fwd);
+    if (eye_depth >= VOL_FAR * 4.60) discard;
 
-    for (int i = 0; i < 18; i++) {
+    /* March resolution scales with how bright the fireball still is: the
+     * late tail (core_intensity ~0.1 lingering for weeks while the flash
+     * sphere has grown past the camera) is a soft fullscreen glow that needs
+     * far fewer samples than the structured early blast. */
+    float peak_w = clamp(max(u_flash_intensity, u_core_intensity), 0.0, 1.0);
+    int n_steps = 6 + int(12.0 * smoothstep(0.02, 0.55, peak_w));
+    stepLen = (tExit - tEnter) / float(n_steps);
+
+    for (int i = 0; i < n_steps; i++) {
         /* March through the reconstructed unit sphere and synthesize density
          * from a combination of central falloff, turbulent distortion, and a
          * warped shell that represents the bright shock front. */
@@ -149,9 +159,9 @@ void main() {
         sampleAlpha = clamp(sampleAlpha, 0.0, 0.38);
         accumColor += sampleCol * sampleAlpha * (1.0 - accumAlpha);
         accumAlpha += sampleAlpha * (1.0 - accumAlpha);
+        if (accumAlpha >= 0.985) break;   /* saturated — rest contributes nothing */
     }
 
-    eye_depth = (tExit * radius) * dot(ray_dir, u_cam_fwd);
     eye_depth = max(eye_depth, 0.0);
     /* Fade against the effective volumetric far limit instead of hard-popping
      * when the reconstructed shell approaches the renderer's depth horizon. */

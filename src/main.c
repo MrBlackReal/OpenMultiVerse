@@ -473,6 +473,7 @@ static void switch_universe(const char *path) {
         fflush(stderr);
         return;
     }
+
     snprintf(s_universe_path, sizeof(s_universe_path), "%s", path);
     fprintf(stdout, "[Sim] switching universe -> %s\n", s_universe_path);
     fflush(stdout);
@@ -497,6 +498,7 @@ static void toggle_fullscreen(void) {
         fprintf(stderr, "[Main] fullscreen toggle: %s\n", SDL_GetError());
         return;
     }
+    
     s_fullscreen = !s_fullscreen;
     update_viewport_size();
 }
@@ -984,18 +986,9 @@ static void camera_move(float dt) {
      * the factor only ever *raises* the set speed once you are far from
      * everything, and approaching a target automatically decelerates. */
     if (s_warp && g_settings.adaptive_warp) {
-        double cx = g_cam.pos[0] * AU, cy = g_cam.pos[1] * AU,
-               cz = g_cam.pos[2] * AU;
-        double best2 = -1.0;
-        for (int i = 0; i < g_nbodies; i++) {
-            if (!g_bodies[i].alive) continue;
-            double dx = g_bodies[i].pos[0] - cx;
-            double dy = g_bodies[i].pos[1] - cy;
-            double dz = g_bodies[i].pos[2] - cz;
-            double d2 = dx*dx + dy*dy + dz*dz;
-            if (best2 < 0.0 || d2 < best2) best2 = d2;
-        }
-        double best_au = best2 > 0.0 ? sqrt(best2) * RS : -1.0;
+        /* Nearest body from the shared per-frame proximity cache (at most one
+         * frame stale — fine for a speed governor). */
+        double best_au = g_cam_prox.body >= 0 ? g_cam_prox.body_dist_au : -1.0;
 
         /* Galaxies are anchors too, or arriving at one would never slow
          * down (their stars aren't bodies): distance to the volume's edge,
@@ -1270,7 +1263,7 @@ int main(int argc, char **argv) {
         /* Physics — RESPA hierarchical integrator */
         if (!g_paused && g_sim_speed > 0.0) {
             const int MAX_OUTER_STEPS = 120;
-            physics_refresh_timestep_model();
+            physics_refresh_timestep_model_if_needed(dt);
             {
                 int sys_n = physics_system_count();
                 /* g_laws.time_scale lets a universe run its clock faster/slower
@@ -1283,25 +1276,51 @@ int main(int argc, char **argv) {
                 const double active_r2 =
                     (ACTIVE_RADIUS_LY * LY) * (ACTIVE_RADIUS_LY * LY);
 
+                /* Collect the ACTIVE (in-radius) systems once — a root star
+                 * cannot cross the multi-ly active boundary within one frame,
+                 * so the timestep-cap loop and the integration loop below both
+                 * reuse this list instead of re-testing every system twice. */
+                static int *s_active_sys = NULL;
+                static int  s_active_sys_cap = 0;
+                if (sys_n > s_active_sys_cap) {
+                    int cap = s_active_sys_cap ? s_active_sys_cap : 64;
+                    while (cap < sys_n) cap *= 2;
+                    s_active_sys = realloc(s_active_sys, (size_t)cap * sizeof(int));
+                    if (!s_active_sys) { fprintf(stderr, "[main] active-sys alloc failed\n"); exit(1); }
+                    s_active_sys_cap = cap;
+                }
+                int n_active = 0;
+                for (int s = 0; s < sys_n; s++)
+                    if (system_cam_dist2(physics_system_root(s), cam_m) <= active_r2)
+                        s_active_sys[n_active++] = s;
+
+                /* Staleness-driven timestep refresh, active systems only.
+                 * Frozen systems' orbits cannot drift, so the full O(N)
+                 * rebuild above runs only on body-set changes. */
+                physics_refresh_active_timesteps(s_active_sys, n_active, dt);
+
                 /* Find the most constrained ACTIVE system and cap to it.  A
                  * frozen distant system must not drag down the timestep (and
                  * thus the frame rate) of the system you are actually in. */
-                for (int s = 0; s < sys_n; s++) {
-                    if (system_cam_dist2(physics_system_root(s), cam_m) > active_r2)
-                        continue;
+                for (int a = 0; a < n_active; a++) {
+                    int s = s_active_sys[a];
                     double dt_outer_max = physics_system_outer_dt_limit(s);
                     double sys_cap = dt_outer_max * MAX_OUTER_STEPS;
                     if (effective_sim_dt > sys_cap)
                         effective_sim_dt = sys_cap;
                 }
 
-                trails_begin_frame_snapshot();
+                /* Trail snapshots are per-system (only integrated bodies can
+                 * move within a frame), so frozen far systems skip the ~200-
+                 * byte-per-body rewrite — at 16k bodies that full sweep was a
+                 * dominant per-frame cost. collision_snapshot_positions stays
+                 * global: it is bounded to MAX_BODIES and collision_step's
+                 * broad pass reads it after this loop. */
                 collision_snapshot_positions();
-                for (int s = 0; s < sys_n; s++) {
+                for (int a = 0; a < n_active; a++) {
+                    int s = s_active_sys[a];
                     int root = physics_system_root(s);
-                    /* Freeze systems outside the active region — they are
-                     * far-field dots, so integrating them is wasted work. */
-                    if (system_cam_dist2(root, cam_m) > active_r2) continue;
+                    trails_begin_frame_snapshot_system(root);
                     double dt_outer_max = physics_system_outer_dt_limit(s);
                     double dt_inner_max = physics_system_inner_dt_limit(s);
                     double sys_dt = effective_sim_dt;
@@ -1318,10 +1337,14 @@ int main(int argc, char **argv) {
                     double dt_inner = dt_outer / n_inner;
 
                     for (int o = 0; o < outer_steps; o++) {
-                        /* Re-snapshot at encounter onset for sub-frame rollback */
+                        /* Re-snapshot at encounter onset for sub-frame rollback.
+                         * Scoped to this system: only its bodies are stepping
+                         * right now, and re-snapshotting already-integrated
+                         * systems mid-frame would overwrite their rollback
+                         * state with post-step positions. */
                         int local_encounter = collision_system_maybe_has_encounter(root, dt_outer);
                         if (local_encounter) {
-                            trails_begin_frame_snapshot();
+                            trails_begin_frame_snapshot_system(root);
                             collision_snapshot_positions();
                         }
                         physics_respa_begin_system(root, dt_outer);
@@ -1352,9 +1375,21 @@ int main(int argc, char **argv) {
                 accretion_step(dt);
                 /* Safety net: if a step produced a non-finite body (NaN/inf),
                  * remove it before it corrupts the camera-relative render math
-                 * and freezes the view. The log tells us a runaway happened. */
+                 * and freezes the view. The log tells us a runaway happened.
+                 * Per-frame the sweep covers only the active systems (frozen
+                 * bodies are never integrated, so they cannot go non-finite);
+                 * a slow full sweep backstops any unaudited mutation path. */
                 {
-                    int scrubbed = physics_sanitize_state();
+                    static double s_sanitize_full_t = 0.0;
+                    int scrubbed = 0;
+                    for (int a = 0; a < n_active; a++)
+                        scrubbed += physics_sanitize_system(
+                                        physics_system_root(s_active_sys[a]));
+                    s_sanitize_full_t += dt;
+                    if (s_sanitize_full_t >= 1.0) {
+                        s_sanitize_full_t = 0.0;
+                        scrubbed += physics_sanitize_state();
+                    }
                     if (scrubbed > 0)
                         fprintf(stderr, "[physics] removed %d non-finite body(ies) "
                                         "after step\n", scrubbed);
@@ -1404,6 +1439,10 @@ int main(int argc, char **argv) {
             float ctr[3] = { eye[0]+fdx,          eye[1]+fdy,          eye[2]+fdz          };
             mat4_lookAt(view, eye, ctr, up);
         }
+
+        /* One shared nearest-star/-body pass for this frame — trail fade, the
+         * HUD readout and the adaptive-warp governor all read g_cam_prox. */
+        body_update_cam_proximity();
 
         /* Bloom: render the scene into an HDR target, then composite the glow
          * to the screen. When disabled/unavailable these are no-ops and we draw

@@ -68,6 +68,17 @@ void trails_gl_init(void)
         s_last_head[i]  = 0;
         s_last_count[i] = 0;
 
+        /* Stars never draw a trail (the render loop skips is_star / NULL-trail
+         * bodies), so don't spend a ~0.25 MB dynamic VBO and a driver round-trip
+         * on each.  At galaxy scale that is tens of thousands of buffers — many
+         * GB of VRAM and seconds of init.  A zero handle is safe: it is never
+         * bound, and glDelete* ignores it. */
+        if (i < g_nbodies && (g_bodies[i].is_star || !g_bodies[i].trail)) {
+            s_vao[i] = 0;
+            s_vbo[i] = 0;
+            continue;
+        }
+
         s_vao[i] = gl_vao_create();
         s_vbo[i] = gl_vbo_create((TRAIL_LEN + 1) * 4 * sizeof(float),
                                  NULL, GL_DYNAMIC_DRAW);
@@ -113,6 +124,12 @@ void trails_add_body(int body_idx)
     for (int i = s_n; i < new_n; i++) {
         s_last_head[i] = 0;
         s_last_count[i] = 0;
+        /* Skip GL resources for stars / trail-less bodies (see trails_gl_init). */
+        if (i < g_nbodies && (g_bodies[i].is_star || !g_bodies[i].trail)) {
+            s_vao[i] = 0;
+            s_vbo[i] = 0;
+            continue;
+        }
         s_vao[i] = gl_vao_create();
         s_vbo[i] = gl_vbo_create((TRAIL_LEN + 1) * 4 * sizeof(float),
                                  NULL, GL_DYNAMIC_DRAW);
@@ -203,12 +220,10 @@ void trails_render(const float vp[16])
     /* Distance from camera to nearest star — controls LOD fade.
      * Computed in render units (AU).  Returns early if trails are fully faded. */
     float trail_fade = 1.0f;
-    if (g_nbodies > 0) {
-        int star = nearest_star_idx();
-        float sdx = (float)(g_cam.pos[0] - g_bodies[star].pos[0] * RS);
-        float sdy = (float)(g_cam.pos[1] - g_bodies[star].pos[1] * RS);
-        float sdz = (float)(g_cam.pos[2] - g_bodies[star].pos[2] * RS);
-        float dist = sqrtf(sdx*sdx + sdy*sdy + sdz*sdz);
+    if (g_nbodies > 0 && g_cam_prox.star >= 0) {
+        /* Nearest-star distance from the shared per-frame proximity cache
+         * (g_cam_prox) — no private O(N) scan. */
+        float dist = (float)g_cam_prox.star_dist_au;
         /* Smooth (Hermite) fade, same endpoints as the old linear ramp —
          * eases in/out so the fade rate has no visible kink (continuous LOD). */
         float t = (dist - SYS_TRAIL_FADE_START)

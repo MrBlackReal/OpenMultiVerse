@@ -104,3 +104,17 @@ static inline double laws_pair_factor(double r2, double r)
     if (g_laws.force_exp == 2.0) return g_laws.G / (r2 * r);
     return g_laws.G * pow(r, -(g_laws.force_exp + 1.0));
 }
+
+/*
+ * laws_schwarzschild_radius — event-horizon radius 2·G·M/c² under THIS
+ * universe's laws.  The single root for black-hole sizing: b->radius is
+ * derived from mass through this at every event that creates or grows a hole
+ * (universe load, stellar-collapse remnant birth, tidal devouring, absorb
+ * merges, accretion growth, live law edits), and everything downstream —
+ * the render passes, the devour horizon, accretion — reads b->radius rather
+ * than re-deriving it.  Never compute a horizon from mass anywhere else.
+ */
+static inline double laws_schwarzschild_radius(double mass_kg)
+{
+    return 2.0 * g_laws.G * mass_kg / (g_laws.c_light * g_laws.c_light);
+}

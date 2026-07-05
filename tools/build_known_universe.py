@@ -133,8 +133,15 @@ def merge(solar, extra_sources):
 
     out, seen = [], set()
     for b in raw:
-        key = norm(b.get("name", ""))
-        if b.get("type") != "star":
+        is_star = b.get("type") == "star"
+        # Namespace the dedup key by star-vs-not so a stellar component and a
+        # planet that differ only in letter case do not collide.  Astronomical
+        # naming uses an uppercase suffix for a stellar companion ("55 Cnc B")
+        # and a lowercase one for a planet ("55 Cnc b"); norm() lowercases both,
+        # so without the namespace the star would be dropped as a "duplicate" of
+        # the planet, orphaning the star's own planets.
+        key = ("star:" if is_star else "obj:") + norm(b.get("name", ""))
+        if not is_star:
             # Re-point a planet at the surviving spelling of its host star.
             canon_parent = canon.get(norm(b.get("parent", "")))
             if canon_parent and canon_parent != b.get("parent", ""):
@@ -143,6 +150,56 @@ def merge(solar, extra_sources):
             continue
         seen.add(key)
         out.append(b)
+    return out
+
+
+def dedup_positional(bodies, eps_ly=0.1):
+    """Drop a star that sits within eps_ly of an earlier-listed star.  The same
+    physical star often appears in two catalogs under unrelatable names (an
+    exoplanet host like "Proxima Cen" vs its bare Gaia source_id), so name
+    de-dup misses it and the render shows two stars on top of each other.
+    Sources are ordered curated-first, so the named/curated entry survives.
+    Stars with bodies parented under them are never dropped (that would orphan
+    the children); real binaries are far tighter than eps_ly and both members
+    are usually curated, so only cross-catalog duplicates match."""
+    has_children = {b.get("parent", "") for b in bodies if b.get("parent")}
+    grid = {}
+
+    def cell(p):
+        return (int(p[0] // eps_ly), int(p[1] // eps_ly), int(p[2] // eps_ly))
+
+    out, dropped = [], 0
+    for b in bodies:
+        if b.get("type") != "star":
+            out.append(b)
+            continue
+        p = b.get("pos_ly", [0.0, 0.0, 0.0])
+        cx, cy, cz = cell(p)
+        dup = False
+        if b.get("name", "") not in has_children:
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for dz in (-1, 0, 1):
+                        for q in grid.get((cx + dx, cy + dy, cz + dz), ()):
+                            d2 = ((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2
+                                  + (p[2] - q[2]) ** 2)
+                            if d2 < eps_ly * eps_ly:
+                                dup = True
+                                break
+                        if dup:
+                            break
+                    if dup:
+                        break
+                if dup:
+                    break
+        if dup:
+            dropped += 1
+            continue
+        grid.setdefault((cx, cy, cz), []).append(p)
+        out.append(b)
+    if dropped:
+        print(f"[known] dropped {dropped} cross-catalog duplicate stars "
+              f"(same position within {eps_ly} ly)")
     return out
 
 
@@ -213,6 +270,7 @@ def main():
     extra = [drop_unplaced(src) for src in extra]
 
     bodies = merge(solar, extra)
+    bodies = dedup_positional(bodies)
     bodies = cap_nearest(bodies, args.max_systems)
 
     universe = {

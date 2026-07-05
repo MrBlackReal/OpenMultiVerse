@@ -180,27 +180,40 @@ void moon_to_state(
 /* ---------------------------------------------------------------- helpers */
 
 /*
- * nearest_star_idx — index of the living star body closest to the camera.
- *
- * Used by trails_render to compute the system-level trail fade distance.
- * Camera position is in AU (render units); body positions are in metres,
- * so body pos is multiplied by RS (= 1/AU) to convert to AU before the
- * distance comparison.
+ * Camera-proximity cache — the nearest star and nearest body to the camera,
+ * refreshed by ONE O(N) pass per frame (body_update_cam_proximity, called
+ * from the main loop).  Trail fade, the HUD nearest-body readout and the
+ * adaptive-warp governor all need this answer; each used to run its own
+ * full-body scan per frame (the HUD did two, with a sqrt per body).
+ * Consumers read the shared result instead.
  */
-int nearest_star_idx(void)
+CamProximity g_cam_prox = { -1, 1e300, -1, 1e300 };
+
+void body_update_cam_proximity(void)
 {
-    int best = 0;
-    double best_d2 = 1e300;
-    int i;
-    for (i = 0; i < g_nbodies; i++) {
-        if (!g_bodies[i].alive || !g_bodies[i].is_star) continue;
+    int    star = -1, body = -1;
+    double star_d2 = 1e300, body_d2 = 1e300;
+    for (int i = 0; i < g_nbodies; i++) {
+        if (!g_bodies[i].alive) continue;
         double dx = g_cam.pos[0] - g_bodies[i].pos[0] * RS;
         double dy = g_cam.pos[1] - g_bodies[i].pos[1] * RS;
         double dz = g_cam.pos[2] - g_bodies[i].pos[2] * RS;
         double d2 = dx*dx + dy*dy + dz*dz;
-        if (d2 < best_d2) { best_d2 = d2; best = i; }
+        if (d2 < body_d2) { body_d2 = d2; body = i; }
+        if (g_bodies[i].is_star && d2 < star_d2) { star_d2 = d2; star = i; }
     }
-    return best;
+    g_cam_prox.star         = star;
+    g_cam_prox.star_dist_au = star >= 0 ? sqrt(star_d2) : 1e300;
+    g_cam_prox.body         = body;
+    g_cam_prox.body_dist_au = body >= 0 ? sqrt(body_d2) : 1e300;
+}
+
+/* nearest_star_idx — index of the living star closest to the camera, from the
+ * per-frame proximity cache (0 if the universe has no living star, matching
+ * the old scan's fallback). */
+int nearest_star_idx(void)
+{
+    return g_cam_prox.star >= 0 ? g_cam_prox.star : 0;
 }
 
 /* Walk the parent chain from body i until a body with parent == -1 is found

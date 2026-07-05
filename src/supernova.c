@@ -28,6 +28,7 @@
 #include "labels.h"
 #include "trails.h"
 #include "universe.h"
+#include "physics.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -328,6 +329,7 @@ static void destroy_subtree(int root_idx)
             g_bodies[root_idx].alive = 0;
             g_bodies[root_idx].mass = 0.0;
             disable_body_visuals(root_idx);
+            physics_mark_timestep_dirty();
         }
         return;
     }
@@ -337,6 +339,7 @@ static void destroy_subtree(int root_idx)
         g_bodies[i].alive = 0;
         g_bodies[i].mass = 0.0;
         disable_body_visuals(i);
+        physics_mark_timestep_dirty();
     }
 }
 
@@ -601,7 +604,10 @@ int supernova_detonate(int star_idx)
         remnant_is_bh  = 1;
         remnant_phase  = STAR_BLACK_HOLE_REMNANT;
         remnant_mass   = clampd_local(msun * 0.30, 5.0, 25.0) * SOLAR_MASS;
-        remnant_radius = fmax(g_bodies[star_idx].radius * 1.5, 0.02 * AU);
+        /* True horizon from mass (single root; the BH render pass sizes the
+         * shadow/disk/lensing from radius, so the old 0.02 AU "visibility"
+         * radius only bloated the devour horizon ~10⁵×, never the visuals). */
+        remnant_radius = laws_schwarzschild_radius(remnant_mass);
         rcol[0] = 0.85f; rcol[1] = 0.92f; rcol[2] = 1.00f;
         violence = 1.0;
     } else if (msun >= 8.0) {

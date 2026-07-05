@@ -184,47 +184,71 @@ static void build_label_texture(int slot, int b)
     TTF_SetFontStyle(s_font, TTF_STYLE_NORMAL);
 }
 
-/*
- * nearest_pinned — top-k selection of the living bodies nearest the camera.
- *
- * want_systems = 1 → root stars only (star-system anchors, incl. black holes);
- * want_systems = 0 → planets only (non-star bodies whose parent is a star, or
- * parentless rogues — same classification as the priority tiers below).
- * Writes up to k body indices into out[], nearest first; returns the count.
- * One O(N) pass with an insertion top-k; k is bounded by LABEL_PIN_MAX.
- */
-static int nearest_pinned(const double cam_m[3], int want_systems, int k, int *out)
+/* Insertion top-k by ascending distance²: place body b (distance² d2) into the
+ * nearest-k lists best_d2[]/out[], updating the running count *n. */
+static inline void pin_insert(double d2, int b, int k,
+                              double *best_d2, int *out, int *n)
 {
-    if (k <= 0) return 0;
-    if (k > LABEL_PIN_MAX) k = LABEL_PIN_MAX;
-    double best_d2[LABEL_PIN_MAX];
-    int n = 0;
+    int i;
+    if (*n < k) i = (*n)++;
+    else if (d2 >= best_d2[k-1]) return;
+    else i = k - 1;
+    while (i > 0 && best_d2[i-1] > d2) {
+        best_d2[i] = best_d2[i-1];
+        out[i]     = out[i-1];
+        i--;
+    }
+    best_d2[i] = d2;
+    out[i]     = b;
+}
+
+/*
+ * nearest_pinned — top-k selection of the living bodies nearest the camera,
+ * for BOTH pinned tiers in a single O(N) pass over g_bodies (folding what were
+ * two separate full scans).  Systems = root stars (anchors, incl. black holes);
+ * planets = non-star bodies whose parent is a star or which are parentless
+ * rogues (moons excluded).  Writes the nearest k_sys systems followed by the
+ * nearest k_pl planets into out[] (nearest first within each tier); returns the
+ * total count.  Each k is bounded by LABEL_PIN_MAX.
+ */
+static int nearest_pinned(const double cam_m[3], int k_sys, int k_pl, int *out)
+{
+    if (k_sys > LABEL_PIN_MAX) k_sys = LABEL_PIN_MAX;
+    if (k_pl  > LABEL_PIN_MAX) k_pl  = LABEL_PIN_MAX;
+    if (k_sys < 0) k_sys = 0;
+    if (k_pl  < 0) k_pl  = 0;
+
+    double sd2[LABEL_PIN_MAX], pd2[LABEL_PIN_MAX];
+    int    sys[LABEL_PIN_MAX], pl[LABEL_PIN_MAX];
+    int    ns = 0, np = 0;
+
     for (int b = 0; b < g_nbodies; b++) {
         const Body *bd = &g_bodies[b];
         if (!bd->alive) continue;
-        if (want_systems) {
-            if (!bd->is_star || bd->parent >= 0) continue;
+
+        int is_sys, is_pl;
+        if (bd->is_star) {
+            is_sys = (bd->parent < 0);   /* root star = system anchor */
+            is_pl  = 0;
         } else {
-            if (bd->is_star) continue;
-            if (bd->parent >= 0 && !g_bodies[bd->parent].is_star) continue; /* moon */
+            /* planet: parent is a star, or a parentless rogue (moons excluded) */
+            is_sys = 0;
+            is_pl  = !(bd->parent >= 0 && !g_bodies[bd->parent].is_star);
         }
+        if (!is_sys && !is_pl) continue;
+
         double dx = bd->pos[0] - cam_m[0];
         double dy = bd->pos[1] - cam_m[1];
         double dz = bd->pos[2] - cam_m[2];
         double d2 = dx*dx + dy*dy + dz*dz;
-        int i;
-        if (n < k) i = n++;
-        else if (d2 >= best_d2[k-1]) continue;
-        else i = k - 1;
-        while (i > 0 && best_d2[i-1] > d2) {
-            best_d2[i] = best_d2[i-1];
-            out[i]     = out[i-1];
-            i--;
-        }
-        best_d2[i] = d2;
-        out[i]     = b;
+
+        if (is_sys && k_sys) pin_insert(d2, b, k_sys, sd2, sys, &ns);
+        else if (is_pl && k_pl) pin_insert(d2, b, k_pl, pd2, pl, &np);
     }
-    return n;
+
+    for (int i = 0; i < ns; i++) out[i]      = sys[i];
+    for (int i = 0; i < np; i++) out[ns + i] = pl[i];
+    return ns + np;
 }
 
 /* Cache slot currently holding body `b`, or -1 if none.  Linear scan over the
@@ -360,9 +384,8 @@ void labels_render(const float view[16], const float proj[16],
     /* Pinned nearest set: always label the nearest M star systems and N
      * planets, regardless of the active region / far cutoff (see top note). */
     int pinned[2 * LABEL_PIN_MAX];
-    int n_pinned = nearest_pinned(cam_m, 1, g_settings.label_pin_systems, pinned);
-    n_pinned += nearest_pinned(cam_m, 0, g_settings.label_pin_planets,
-                               pinned + n_pinned);
+    int n_pinned = nearest_pinned(cam_m, g_settings.label_pin_systems,
+                                  g_settings.label_pin_planets, pinned);
 
     /* Feed list for the slot cache: pinned bodies first (so they can never be
      * squeezed out by a full active set), then the active bodies not already

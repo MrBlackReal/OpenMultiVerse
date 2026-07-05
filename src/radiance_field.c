@@ -37,6 +37,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 /* Physical constants (SI). */
 #define L_SUN      3.828e26        /* solar luminosity, W                    */
@@ -104,6 +105,11 @@ static int      s_cap   = 0;
 /* Per-body luminosity lookup (0 for non-emitters), sized to g_nbodies. */
 static double *s_body_lum = NULL;
 static int     s_body_lum_cap = 0;
+
+/* Scratch for radiance_field_sample: per-emitter irradiance from its first
+ * pass, reused by the contributor count so emitter_irr is not evaluated twice. */
+static double *s_sample_irr = NULL;
+static int     s_sample_irr_cap = 0;
 
 /* Rebuild throttle. */
 static double s_since_rebuild = 0.0;
@@ -178,6 +184,78 @@ static double emitter_irr(const Emitter *e, const double pos_m[3],
     return e->lum / (4.0 * PI * d2);
 }
 
+/* ── spatial hash over star emitters (accelerates radiance_field_top) ───────
+ * radiance_field_top used to scan every emitter (~10k for a galaxy catalog)
+ * on each call, dozens of times per frame.  Body-backed emitters (stars/BHs)
+ * are bucketed into a uniform 4-ly grid at rebuild, so a query scans only the
+ * emitters in the cells around the query point, plus the handful of body-less
+ * area emitters (nebulae/galaxies/supernovae) which are always considered
+ * (they are the legitimately bright-but-distant sources).
+ *
+ * Correct for the visible result: a resolved body's parent star sits in the
+ * same 4-ly cell and outshines anything a cell away by many orders of
+ * magnitude (parent ≈ light-minutes vs neighbours ≈ light-years), so the ±1
+ * neighbourhood never drops the true dominant emitter.  Only a body with NO
+ * star within a few ly — an isolated rogue, rarely resolved and dim anyway —
+ * could differ, and then only in its faintest contributor.  Disabled below
+ * GRID_MIN_EMITTERS so every existing small preset stays bit-identical. */
+#define GRID_CELL_M       (4.0 * 9.461e15)   /* 4 light-years, in metres      */
+#define GRID_RADIUS       1                  /* ±1 cell → 3×3×3 search         */
+#define GRID_MIN_EMITTERS 512
+
+static int      *s_grid_head   = NULL;   /* [nbuckets] head emitter, -1 empty */
+static int      *s_grid_next   = NULL;   /* [s_count] next in same bucket      */
+static int       s_grid_nbuckets = 0;
+static int      *s_area_em     = NULL;   /* indices of body-less emitters      */
+static int       s_area_count  = 0, s_area_cap = 0;
+static unsigned *s_em_stamp    = NULL;   /* [s_count] per-query visited stamp   */
+static unsigned  s_query_stamp = 0;
+static int       s_grid_active = 0;      /* 0 = fall back to the exact full scan */
+
+static inline int grid_cell(double x) { return (int)floor(x / GRID_CELL_M); }
+
+static inline unsigned grid_hash(int cx, int cy, int cz)
+{
+    unsigned h = (unsigned)cx * 73856093u ^ (unsigned)cy * 19349663u
+               ^ (unsigned)cz * 83492791u;
+    return h & (unsigned)(s_grid_nbuckets - 1);
+}
+
+/* (Re)build the emitter grid + area list from the current s_em[].  Called at
+ * the end of every rebuild. */
+static void radiance_field_grid_build(void)
+{
+    s_grid_active = 0;
+    s_area_count  = 0;
+    for (int e = 0; e < s_count; e++) {
+        if (s_em[e].body >= 0) continue;
+        if (s_area_count >= s_area_cap) {
+            s_area_cap = s_area_cap ? s_area_cap * 2 : 64;
+            s_area_em  = realloc(s_area_em, (size_t)s_area_cap * sizeof(int));
+        }
+        s_area_em[s_area_count++] = e;
+    }
+    if (s_count < GRID_MIN_EMITTERS) return;   /* keep the exact full scan */
+
+    int nb = 1;
+    while (nb < 2 * s_count) nb <<= 1;
+    s_grid_nbuckets = nb;
+    s_grid_head = realloc(s_grid_head, (size_t)nb * sizeof(int));
+    s_grid_next = realloc(s_grid_next, (size_t)s_count * sizeof(int));
+    s_em_stamp  = realloc(s_em_stamp,  (size_t)s_count * sizeof(unsigned));
+    if (!s_grid_head || !s_grid_next || !s_em_stamp) return;  /* stay full-scan */
+    for (int b = 0; b < nb; b++) s_grid_head[b] = -1;
+    memset(s_em_stamp, 0, (size_t)s_count * sizeof(unsigned));
+    for (int e = 0; e < s_count; e++) {
+        if (s_em[e].body < 0) continue;
+        double p[3]; emitter_pos(&s_em[e], p);
+        unsigned b = grid_hash(grid_cell(p[0]), grid_cell(p[1]), grid_cell(p[2]));
+        s_grid_next[e] = s_grid_head[b];
+        s_grid_head[b] = e;
+    }
+    s_grid_active = 1;
+}
+
 /* ── public API ───────────────────────────────────────────────────────────── */
 
 void radiance_field_init(void)
@@ -193,6 +271,13 @@ void radiance_field_shutdown(void)
 {
     free(s_em);       s_em = NULL;
     free(s_body_lum); s_body_lum = NULL;
+    free(s_grid_head); s_grid_head = NULL;
+    free(s_grid_next); s_grid_next = NULL;
+    free(s_area_em);   s_area_em   = NULL;
+    free(s_em_stamp);  s_em_stamp  = NULL;
+    free(s_sample_irr); s_sample_irr = NULL; s_sample_irr_cap = 0;
+    s_grid_nbuckets = s_area_count = s_area_cap = 0;
+    s_grid_active = 0; s_query_stamp = 0;
     s_count = s_cap = s_body_lum_cap = 0;
 }
 
@@ -322,6 +407,8 @@ void radiance_field_rebuild(void)
 
     s_since_rebuild = 0.0;
     s_last_nbodies  = g_nbodies;
+
+    radiance_field_grid_build();
 }
 
 void radiance_field_tick(double dt)
@@ -346,12 +433,19 @@ int radiance_field_sample(const double pos_m[3], int exclude_body,
     memset(out, 0, sizeof(*out));
     out->dominant = -1;
 
+    if (s_sample_irr_cap < s_count) {
+        s_sample_irr = realloc(s_sample_irr, (size_t)s_count * sizeof(double));
+        if (!s_sample_irr) { s_sample_irr_cap = 0; return 0; }
+        s_sample_irr_cap = s_count;
+    }
+
     double total = 0.0;
     double best  = 0.0;
     int    best_e = -1;
 
     for (int e = 0; e < s_count; e++) {
         double irr = emitter_irr(&s_em[e], pos_m, exclude_body);
+        s_sample_irr[e] = irr;
         if (irr <= 0.0) continue;
         total += irr;
         if (irr > best) { best = irr; best_e = e; }
@@ -376,10 +470,11 @@ int radiance_field_sample(const double pos_m[3], int exclude_body,
     out->color[1] = de->col[1];
     out->color[2] = de->col[2];
 
-    /* Count meaningful contributors (> 0.1% of the total). */
+    /* Count meaningful contributors (> 0.1% of the total) from the cached
+     * irradiances — no second emitter_irr pass. */
     double floor_irr = total * 1e-3;
     for (int e = 0; e < s_count; e++)
-        if (emitter_irr(&s_em[e], pos_m, exclude_body) >= floor_irr)
+        if (s_sample_irr[e] >= floor_irr)
             out->n_sources++;
     return 1;
 }
@@ -395,29 +490,70 @@ int radiance_field_dominant(const double pos_m[3], int exclude_body)
     return best_e >= 0 ? s_em[best_e].body : -1;
 }
 
+/* Insert emitter e (with precomputed irradiance irr > 0) into the descending
+ * top-k list out[0..k-1], updating the running count *n.  Shared by the grid
+ * and full-scan paths of radiance_field_top. */
+static inline void rf_topk_insert(int e, double irr, int k,
+                                  RadianceContrib *out, int *n)
+{
+    int i;
+    if (*n < k) i = (*n)++;
+    else if (irr <= out[k-1].irr) return;
+    else i = k - 1;
+    while (i > 0 && out[i-1].irr < irr) {
+        out[i] = out[i-1];
+        i--;
+    }
+    out[i].body   = s_em[e].body;
+    out[i].nebula = s_em[e].nebula;
+    out[i].irr    = irr;
+    emitter_pos(&s_em[e], out[i].pos);
+    out[i].col[0] = s_em[e].col[0];
+    out[i].col[1] = s_em[e].col[1];
+    out[i].col[2] = s_em[e].col[2];
+}
+
 int radiance_field_top(const double pos_m[3], int exclude_body,
                        int k, RadianceContrib *out)
 {
     if (k <= 0) return 0;
     int n = 0;
-    for (int e = 0; e < s_count; e++) {
-        double irr = emitter_irr(&s_em[e], pos_m, exclude_body);
-        if (irr <= 0.0) continue;
-        int i;
-        if (n < k) i = n++;
-        else if (irr <= out[k-1].irr) continue;
-        else i = k - 1;
-        while (i > 0 && out[i-1].irr < irr) {
-            out[i] = out[i-1];
-            i--;
+
+    /* Exact full scan for small universes (grid disabled) — bit-identical. */
+    if (!s_grid_active) {
+        for (int e = 0; e < s_count; e++) {
+            double irr = emitter_irr(&s_em[e], pos_m, exclude_body);
+            if (irr > 0.0) rf_topk_insert(e, irr, k, out, &n);
         }
-        out[i].body   = s_em[e].body;
-        out[i].nebula = s_em[e].nebula;
-        out[i].irr    = irr;
-        emitter_pos(&s_em[e], out[i].pos);
-        out[i].col[0] = s_em[e].col[0];
-        out[i].col[1] = s_em[e].col[1];
-        out[i].col[2] = s_em[e].col[2];
+        return n;
+    }
+
+    /* Body-less area emitters (nebulae/galaxies/supernovae) are few and can be
+     * bright from far away — always considered. */
+    for (int a = 0; a < s_area_count; a++) {
+        int e = s_area_em[a];
+        double irr = emitter_irr(&s_em[e], pos_m, exclude_body);
+        if (irr > 0.0) rf_topk_insert(e, irr, k, out, &n);
+    }
+
+    /* Star emitters: only the cells around the query point.  A fresh per-query
+     * stamp dedups emitters reached through more than one neighbour cell that
+     * hashed to the same bucket. */
+    if (++s_query_stamp == 0) {   /* wraparound guard (astronomically rare) */
+        memset(s_em_stamp, 0, (size_t)s_count * sizeof(unsigned));
+        s_query_stamp = 1;
+    }
+    int cx = grid_cell(pos_m[0]), cy = grid_cell(pos_m[1]), cz = grid_cell(pos_m[2]);
+    for (int dz = -GRID_RADIUS; dz <= GRID_RADIUS; dz++)
+    for (int dy = -GRID_RADIUS; dy <= GRID_RADIUS; dy++)
+    for (int dx = -GRID_RADIUS; dx <= GRID_RADIUS; dx++) {
+        unsigned b = grid_hash(cx + dx, cy + dy, cz + dz);
+        for (int e = s_grid_head[b]; e >= 0; e = s_grid_next[e]) {
+            if (s_em_stamp[e] == s_query_stamp) continue;
+            s_em_stamp[e] = s_query_stamp;
+            double irr = emitter_irr(&s_em[e], pos_m, exclude_body);
+            if (irr > 0.0) rf_topk_insert(e, irr, k, out, &n);
+        }
     }
     return n;
 }

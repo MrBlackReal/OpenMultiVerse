@@ -22,12 +22,6 @@ static double eddington_luminosity(double mass_kg)
     return L_EDD_PER_MSUN * (mass_kg / SOLAR_MASS_KG);
 }
 
-/* Schwarzschild radius (m) from mass. */
-static double schwarzschild_radius(double mass_kg)
-{
-    return 2.0 * G_GRAV * mass_kg / (C_LIGHT * C_LIGHT);
-}
-
 /* Prograde Kerr ISCO radius in units of M (= GM/c²), Bardeen 1972. */
 static double kerr_risco_M(double a)
 {
@@ -59,8 +53,11 @@ void accretion_init_body(Body *b)
 
     /* Seed the dimensionless spin a* from the authored rotation_rate: a* = Ω·Rs/c
      * (matches render.c bh_scales), signed by rotation sense, clamped to the
-     * Thorne limit. This is now the source of truth for the ISCO. */
-    double Rs = schwarzschild_radius(b->mass > 0.0 ? b->mass : 1.0);
+     * Thorne limit. This is now the source of truth for the ISCO.
+     * Rs comes in as b->radius — every creation site derives it from mass via
+     * laws_schwarzschild_radius() before calling here; this module never
+     * computes a horizon itself. */
+    double Rs = b->radius > 0.0 ? b->radius : 1.0;
     double a  = b->rotation_rate * Rs / C_LIGHT;
     if (a >  A_MAX) a =  A_MAX;
     if (a < -A_MAX) a = -A_MAX;
@@ -176,6 +173,7 @@ void accretion_step(double dt_real_sec)
 
         b->gas_reservoir -= dM;              /* deplete */
         b->mass           = Mnew;            /* the hole grows as it eats */
+        b->radius         = laws_schwarzschild_radius(Mnew);   /* horizon tracks mass */
 
         double L   = ACC_ETA * mdot * C_LIGHT * C_LIGHT;
         double edd = L / eddington_luminosity(b->mass);

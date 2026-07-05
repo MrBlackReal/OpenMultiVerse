@@ -141,9 +141,25 @@ typedef struct {
     float  color[3];
     float  fade_start;   /* camera distance (AU) at which the belt begins to fade */
     float  fade_end;     /* camera distance (AU) at which the belt is fully invisible */
+    float  extent_au;    /* outer reach of the belt (a_max·(1+e_max), with margin) */
 
     int    initialized;
 } Belt;
+
+/* Belts are shader-faded to nothing past fade_end AU from the camera —
+ * integrating and re-uploading an invisible belt is wasted work.  Anchored to
+ * body 0's system (bake offsets by g_bodies[0]), so gate on the camera's
+ * distance to that anchor; frozen belts resume where they left off, the same
+ * philosophy as frozen far star systems. */
+static int belt_in_range(const Belt *b)
+{
+    if (g_nbodies <= 0) return 1;
+    double dx = g_bodies[0].pos[0] * RS - g_cam.pos[0];
+    double dy = g_bodies[0].pos[1] * RS - g_cam.pos[1];
+    double dz = g_bodies[0].pos[2] * RS - g_cam.pos[2];
+    double lim = (double)b->fade_end + (double)b->extent_au;
+    return dx*dx + dy*dy + dz*dz < lim * lim;
+}
 
 static Belt  *s_belts      = NULL;
 static int    s_n_belts    = 0;
@@ -262,6 +278,9 @@ void asteroids_init(const char *path)
         b->color[2]   = (float)json_num(json_idx(col, 2), 0.6);
         b->fade_start = fade_start;
         b->fade_end   = fade_end;
+        /* ×1.5 margin: perturbed particles drift somewhat past their baked
+         * aphelion, and the visibility gate must stay conservative. */
+        b->extent_au  = a_max * (1.0f + e_max) * 1.5f;
         b->p = bake(n, a_min, a_max, e_max, i_max, seed);
         if (b->p) init_belt_gl(b);
         if (n > max_n) max_n = n;
@@ -291,6 +310,12 @@ void asteroids_init(const char *path)
  * g_bodies[] reads.
  */
 void asteroids_step(double dt) {
+    /* Nothing to integrate → skip the O(N) major-body gather below too. */
+    int any = 0;
+    for (int b = 0; b < s_n_belts; b++)
+        if (s_belts[b].initialized && belt_in_range(&s_belts[b])) { any = 1; break; }
+    if (!any) return;
+
     double bx[MAX_MAJOR], by[MAX_MAJOR], bz[MAX_MAJOR], bgm[MAX_MAJOR];
     int nb = 0;
     for (int j = 0; j < g_nbodies && nb < MAX_MAJOR; j++) {
@@ -308,6 +333,7 @@ void asteroids_step(double dt) {
     for (int b = 0; b < s_n_belts; b++) {
         Belt *belt = &s_belts[b];
         if (!belt->initialized) continue;
+        if (!belt_in_range(belt)) continue;   /* invisible → frozen, no cost */
 
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
@@ -344,6 +370,7 @@ static void render_belt(Belt *b, const float vp[16],
                         double cam_x, double cam_y, double cam_z)
 {
     if (!b->initialized || !s_upload_buf) return;
+    if (!belt_in_range(b)) return;   /* fully faded: skip upload + draw too */
 
     /* Subtract camera position in double before casting to float to avoid
      * float32 cancellation at large world-space distances (e.g. Kuiper Belt). */

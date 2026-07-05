@@ -46,7 +46,9 @@
  */
 #include "universe.h"
 #include "body.h"
+#include "physics.h"
 #include "accretion.h"
+#include "comet.h"
 #include "json.h"
 #include "common.h"
 #include "loading.h"
@@ -114,6 +116,24 @@ static void ensure_capacity(int needed)
  */
 static void alloc_trail(Body *bo)
 {
+    /* Stars (and black holes, which set is_star) never render a trail —
+     * trails.c skips is_star bodies unconditionally.  Allocating the ~0.5 MB
+     * circular buffer for each is pure waste and the single largest per-body
+     * cost at galaxy scale (millions of stars), so leave trail == NULL for
+     * them.  Every trail consumer already guards on b->trail, so a NULL trail
+     * is safe.  Release any buffer a reused slot carried over from a prior
+     * planet life. */
+    if (bo->is_star) {
+        free(bo->trail);          bo->trail = NULL;
+        free(bo->trail_seg_len);  bo->trail_seg_len = NULL;
+        bo->trail_head = 0;
+        bo->trail_count = 0;
+        bo->trail_accum = 0.0;
+        bo->trail_total_len = 0.0;
+        bo->trail_fade = 1.0;
+        bo->trail_emitting = 0;
+        return;
+    }
     if (bo->trail)
         memset(bo->trail, 0, TRAIL_LEN * 3 * sizeof(double));
     else
@@ -166,13 +186,56 @@ static int find_body_index(const char *name, int n)
     return -1;
 }
 
-/* True if some alive body in [0, limit) is named exactly `name`. */
-static int name_taken(const char *name, int limit)
+/* FNV-1a hash of a NUL-terminated string. */
+static unsigned name_hash(const char *s)
 {
-    for (int i = 0; i < limit; i++)
-        if (g_bodies[i].alive && strcmp(g_bodies[i].name, name) == 0)
-            return 1;
-    return 0;
+    unsigned h = 2166136261u;
+    while (*s) { h ^= (unsigned char)*s++; h *= 16777619u; }
+    return h;
+}
+
+/*
+ * NameMap — open-addressing name→body-index map used during loading to resolve
+ * parent links in O(1) average instead of a linear find_body_index() scan per
+ * body (which was O(n_children × n_bodies) and dominated load at galaxy scale).
+ * Stores body indices, so a g_bodies[] realloc during load does not invalidate
+ * it.  On a name collision the first-inserted (lowest) index wins, matching
+ * find_body_index()'s "first match" semantics.
+ */
+typedef struct { int *slot; unsigned mask; } NameMap;
+
+static int namemap_init(NameMap *m, int n)
+{
+    int cap = 1;
+    while (cap < (n < 1 ? 1 : n) * 2) cap <<= 1;
+    m->slot = (int *)malloc((size_t)cap * sizeof(int));
+    if (!m->slot) { m->mask = 0; return 0; }
+    for (int i = 0; i < cap; i++) m->slot[i] = -1;
+    m->mask = (unsigned)cap - 1;
+    return 1;
+}
+
+static void namemap_insert(NameMap *m, int idx)
+{
+    if (!m->slot) return;
+    unsigned h = name_hash(g_bodies[idx].name) & m->mask;
+    while (m->slot[h] != -1) {
+        if (strcmp(g_bodies[m->slot[h]].name, g_bodies[idx].name) == 0)
+            return;                       /* keep the first-inserted index */
+        h = (h + 1) & m->mask;
+    }
+    m->slot[h] = idx;
+}
+
+static int namemap_find(const NameMap *m, const char *name)
+{
+    if (!m->slot) return find_body_index(name, g_nbodies);   /* alloc-fail fallback */
+    unsigned h = name_hash(name) & m->mask;
+    while (m->slot[h] != -1) {
+        if (strcmp(g_bodies[m->slot[h]].name, name) == 0) return m->slot[h];
+        h = (h + 1) & m->mask;
+    }
+    return -1;
 }
 
 /*
@@ -183,14 +246,39 @@ static int name_taken(const char *name, int limit)
  * The first occurrence of a name keeps it; each later duplicate gets the next
  * free " (2)", " (3)", ... suffix.  No-op when names are already unique, so the
  * common case is untouched.  Call once after a universe is fully loaded.
+ *
+ * Uses an open-addressing hash set of body indices (keyed by name) so the whole
+ * pass is O(n); the previous pairwise form was O(n²) and, with the names already
+ * unique, still cost billions of strcmps at galaxy scale (tens of thousands of
+ * catalogued stars).
  */
 static void dedupe_body_names(void)
 {
-    int renamed = 0;
-    for (int i = 0; i < g_nbodies; i++) {
-        if (!g_bodies[i].alive) continue;
-        if (!name_taken(g_bodies[i].name, i)) continue;   /* unique so far */
+    int n = g_nbodies;
+    if (n <= 1) return;
 
+    int cap = 1;
+    while (cap < n * 2) cap <<= 1;          /* load factor <= 0.5 */
+    int *slot = (int *)malloc((size_t)cap * sizeof(int));
+    if (!slot) return;                      /* skip dedup rather than crash */
+    for (int i = 0; i < cap; i++) slot[i] = -1;
+    unsigned mask = (unsigned)cap - 1;
+
+    int renamed = 0;
+    for (int i = 0; i < n; i++) {
+        if (!g_bodies[i].alive) continue;
+
+        /* Probe for this name among already-inserted bodies. */
+        unsigned h = name_hash(g_bodies[i].name) & mask;
+        int taken = 0;
+        while (slot[h] != -1) {
+            if (strcmp(g_bodies[slot[h]].name, g_bodies[i].name) == 0) { taken = 1; break; }
+            h = (h + 1) & mask;
+        }
+        if (!taken) { slot[h] = i; continue; }   /* unique — insert at empty h */
+
+        /* Duplicate: take the next free " (N)" suffix, testing each candidate
+         * against the set (each probe is O(1) average). */
         char base[32];
         snprintf(base, sizeof base, "%s", g_bodies[i].name);
         for (int suffix = 2; ; suffix++) {
@@ -198,13 +286,21 @@ static void dedupe_body_names(void)
             /* Truncate the base so "<base> (NN)" always fits the 31-char field
              * (18 + " (" + up to 10 digits + ")" = 31). */
             snprintf(cand, sizeof cand, "%.18s (%d)", base, suffix);
-            if (!name_taken(cand, g_nbodies)) {           /* unique vs everyone */
+            unsigned hc = name_hash(cand) & mask;
+            int c_taken = 0;
+            while (slot[hc] != -1) {
+                if (strcmp(g_bodies[slot[hc]].name, cand) == 0) { c_taken = 1; break; }
+                hc = (hc + 1) & mask;
+            }
+            if (!c_taken) {
                 snprintf(g_bodies[i].name, sizeof g_bodies[i].name, "%s", cand);
+                slot[hc] = i;
                 renamed++;
                 break;
             }
         }
     }
+    free(slot);
     if (renamed)
         fprintf(stdout, "[universe] de-duplicated %d body name%s for safe lookup\n",
                 renamed, renamed == 1 ? "" : "s");
@@ -247,6 +343,15 @@ int universe_live_body_count(void)
         if (g_bodies[i].alive) n++;
     }
     return n;
+}
+
+void universe_refresh_bh_radii(void)
+{
+    for (int i = 0; i < g_nbodies; i++) {
+        Body *b = &g_bodies[i];
+        if (!b->alive || !b->is_black_hole || b->mass <= 0.0) continue;
+        b->radius = laws_schwarzschild_radius(b->mass);
+    }
 }
 
 int universe_can_add_body(void)
@@ -365,6 +470,10 @@ static void load_snapshot(const JsonNode *bodies_arr)
         bo->dust_torus     = (float)json_num(json_get(bn, "torus"), 0.0);
         bo->mass    = json_num(json_get(bn, "mass"), 0.0);
         bo->radius  = json_num(json_get(bn, "radius_km"), 1.0) * 1000.0;
+        /* Snapshot restore: black-hole radius re-derived from mass, the same
+         * single root as a fresh load (keeps stale snapshots consistent). */
+        if (bo->is_black_hole && bo->mass > 0.0)
+            bo->radius = laws_schwarzschild_radius(bo->mass);
         read_color(json_get(bn, "color"), bo->col);
         read_rotation(bn, bo);
         read_atmosphere(bn, bo);
@@ -734,6 +843,19 @@ void universe_load(const char *path)
             strncpy(bo->name, name, 31); bo->name[31] = '\0';
             bo->mass           = mass;
             bo->radius         = rad_km * 1000.0;
+            /* Black holes: radius is derived from mass (single root:
+             * laws_schwarzschild_radius), never authored.  Warn when the JSON
+             * carries a materially different radius_km so preset authors see
+             * the override. */
+            if (is_bh && mass > 0.0) {
+                double rs = laws_schwarzschild_radius(mass);
+                if (json_get(bn, "radius_km") &&
+                    fabs(bo->radius - rs) > 0.05 * rs)
+                    fprintf(stderr, "[Universe] %s: radius_km %.4g overridden "
+                            "by Schwarzschild radius %.4g km (from mass)\n",
+                            name, rad_km, rs / 1000.0);
+                bo->radius = rs;
+            }
             bo->pos[0]         = px; bo->pos[1] = py; bo->pos[2] = pz;
             bo->col[0]         = col[0]; bo->col[1] = col[1]; bo->col[2] = col[2];
             bo->is_star        = 1;
@@ -787,6 +909,13 @@ void universe_load(const char *path)
      * ================================================================ */
     fprintf(stdout, "[Boot] Universe pass 2/3: planets, dwarf planets, and asteroids\n");
     fflush(stdout);
+
+    /* Parent-lookup accelerator: seed with every star just loaded, then keep it
+     * updated as planets and moons are added so pass 2/3 resolve parents in O(1)
+     * average instead of a linear scan each (see NameMap). */
+    NameMap nmap;
+    namemap_init(&nmap, n_total);
+    for (int i = 0; i < g_nbodies; i++) namemap_insert(&nmap, i);
     {
         JsonNode *bn;
         int kp = 0;
@@ -805,11 +934,15 @@ void universe_load(const char *path)
             float       col[3];
             read_color(json_get(bn, "color"), col);
 
-            int par_idx = find_body_index(par_name, g_nbodies);
+            int par_idx = namemap_find(&nmap, par_name);
             if (par_idx < 0) {
-                fprintf(stderr, "[universe] orbiting body '%s': parent '%s' not found\n",
+                /* Orphaned body — its parent star is absent (e.g. dropped as a
+                 * cross-catalog duplicate, or missing a distance).  At galaxy
+                 * scale, merged real catalogs will always have a few of these;
+                 * skip the one body rather than aborting the whole load. */
+                fprintf(stderr, "[universe] orbiting body '%s': parent '%s' not found — skipping\n",
                         name, par_name);
-                json_free(root); exit(1);
+                continue;
             }
 
             /* GM for keplerian_to_state() in AU³/day².  The elements describe
@@ -862,6 +995,7 @@ void universe_load(const char *path)
             read_rotation(bn, bo);
             read_atmosphere(bn, bo);
             alloc_trail(bo);
+            namemap_insert(&nmap, (int)(bo - g_bodies));   /* so moons can find it */
             done++; kp++;
             if ((kp & (LOAD_REPORT_STRIDE - 1)) == 0)
                 load_report("Generating planets", kp, n_planet, done, n_total);
@@ -897,11 +1031,13 @@ void universe_load(const char *path)
             float       col[3];
             read_color(json_get(bn, "color"), col);
 
-            int par_idx = find_body_index(par_name, g_nbodies);
+            int par_idx = namemap_find(&nmap, par_name);
             if (par_idx < 0) {
-                fprintf(stderr, "[universe] moon '%s': parent '%s' not found\n",
+                /* Orphaned moon — skip rather than abort the whole load (see the
+                 * planet pass above for the galaxy-scale rationale). */
+                fprintf(stderr, "[universe] moon '%s': parent '%s' not found — skipping\n",
                         name, par_name);
-                json_free(root); exit(1);
+                continue;
             }
 
             /* Cache parent state before potential realloc in ensure_capacity() */
@@ -944,12 +1080,14 @@ void universe_load(const char *path)
             read_rotation(bn, bo);
             read_atmosphere(bn, bo);
             alloc_trail(bo);
+            namemap_insert(&nmap, (int)(bo - g_bodies));   /* moons can parent moons */
             done++; km++;
             if ((km & (LOAD_REPORT_STRIDE - 1)) == 0)
                 load_report("Placing moons", km, n_moon, done, n_total);
         }
         load_report("Placing moons", km, n_moon, done, n_total);
     }
+    free(nmap.slot);
 
     /* ================================================================
      * Post-processing — per star system:
@@ -972,45 +1110,70 @@ void universe_load(const char *path)
     loading_status("Linking star systems");
     loading_indeterminate();
     loading_tick();
+    /* Linear O(n) system post-processing.  The previous form nested a full-body
+     * scan inside the per-star loop (O(n_stars × n_bodies)) and dominated load
+     * time at galaxy scale.  Precompute each body's root star once, then do the
+     * centre-of-mass correction, bulk proper-motion, and membership counts in
+     * single passes.  (NB: `root` is already the parsed-JSON node in this
+     * function, so the per-body root-star array is `root_star`.) */
+    int *root_star = (int *)malloc((size_t)g_nbodies * sizeof(int));
+    int *sys_count = (int *)calloc((size_t)g_nbodies, sizeof(int));
+    if (!root_star || !sys_count) {
+        fprintf(stderr, "[universe] post-process alloc failed\n");
+        exit(1);
+    }
+    for (i = 0; i < g_nbodies; i++)
+        root_star[i] = root_star_of(i);
+
+    /* CoM correction + membership count in a single ascending pass.  Subtracting
+     * each member's momentum contribution directly from its root star, in global
+     * index order, reproduces the previous per-star loop's exact floating-point
+     * operation sequence (each star still receives its own terms in ascending i
+     * order), so the result is bit-identical — just O(n) instead of O(n²). */
+    for (i = 0; i < g_nbodies; i++) {
+        int r = root_star[i];
+        if (r < 0) continue;
+        sys_count[r]++;
+        if (i == r || !g_bodies[r].is_star || g_bodies[r].mass <= 0.0) continue;
+        g_bodies[r].vel[0] -= g_bodies[i].mass * g_bodies[i].vel[0] / g_bodies[r].mass;
+        g_bodies[r].vel[1] -= g_bodies[i].mass * g_bodies[i].vel[1] / g_bodies[r].mass;
+        g_bodies[r].vel[2] -= g_bodies[i].mass * g_bodies[i].vel[2] / g_bodies[r].mass;
+    }
+
     int n_stars = 0;
+    for (s = 0; s < g_nbodies; s++)
+        if (g_bodies[s].is_star) {
+            n_stars++;
+            if ((n_stars & (LOAD_REPORT_STRIDE - 1)) == 0) loading_tick();
+        }
+
+    /* Bulk proper-motion: add each system's velocity uniformly to its members. */
+    for (i = 0; i < g_nbodies; i++) {
+        int r = root_star[i];
+        if (r < 0) continue;
+        if (bv[r][0] != 0.0 || bv[r][1] != 0.0 || bv[r][2] != 0.0) {
+            g_bodies[i].vel[0] += bv[r][0];
+            g_bodies[i].vel[1] += bv[r][1];
+            g_bodies[i].vel[2] += bv[r][2];
+        }
+    }
+
+    /* Log only multi-body systems: at galaxy scale most stars are lone points,
+     * so a line each would spam the boot log and stall on stdout.  The
+     * interesting systems (a star with planets/moons) still print. */
     for (s = 0; s < g_nbodies; s++) {
-        if (!g_bodies[s].is_star) continue;
-        n_stars++;
-        if ((n_stars & (LOAD_REPORT_STRIDE - 1)) == 0)
-            loading_tick();
-
-        /* CoM correction: zero net internal momentum by adjusting only the star */
-        for (i = 0; i < g_nbodies; i++) {
-            if (i == s || root_star_of(i) != s) continue;
-            g_bodies[s].vel[0] -=
-                g_bodies[i].mass * g_bodies[i].vel[0] / g_bodies[s].mass;
-            g_bodies[s].vel[1] -=
-                g_bodies[i].mass * g_bodies[i].vel[1] / g_bodies[s].mass;
-            g_bodies[s].vel[2] -=
-                g_bodies[i].mass * g_bodies[i].vel[2] / g_bodies[s].mass;
-        }
-
-        /* Apply bulk proper-motion velocity uniformly to the whole system */
-        if (bv[s][0] != 0.0 || bv[s][1] != 0.0 || bv[s][2] != 0.0) {
-            for (i = 0; i < g_nbodies; i++) {
-                if (root_star_of(i) != s) continue;
-                g_bodies[i].vel[0] += bv[s][0];
-                g_bodies[i].vel[1] += bv[s][1];
-                g_bodies[i].vel[2] += bv[s][2];
-            }
-        }
-
-        int cnt = 0;
-        for (i = 0; i < g_nbodies; i++)
-            if (root_star_of(i) == s) cnt++;
+        if (!g_bodies[s].is_star || sys_count[s] <= 1) continue;
         fprintf(stdout,
-                "[universe] '%s' at (%.3g, %.3g, %.3g) ly  -  %d bod%s\n",
+                "[universe] '%s' at (%.3g, %.3g, %.3g) ly  -  %d bodies\n",
                 g_bodies[s].name,
                 g_bodies[s].pos[0] / LY,
                 g_bodies[s].pos[1] / LY,
                 g_bodies[s].pos[2] / LY,
-                cnt, cnt == 1 ? "y" : "ies");
+                sys_count[s]);
     }
+
+    free(root_star);
+    free(sys_count);
 
     fprintf(stdout, "[universe] total: %d bodies across %d star%s\n",
             g_nbodies, n_stars, n_stars == 1 ? "" : "s");
@@ -1020,6 +1183,8 @@ void universe_load(const char *path)
      * name-keyed subsystems (rings, asteroid belts, build-mode rebind, labels)
      * can never bind to the wrong body. */
     dedupe_body_names();
+
+    comet_notify_bodies_changed();   /* rebuild the comet index cache */
 
     free(bv);
     json_free(root);
@@ -1092,6 +1257,10 @@ int universe_add_body(const BodyCreateSpec *spec)
     /* Keep names unique so labels and name-keyed lookups stay unambiguous even
      * if the user names a new body the same as an existing one. */
     ensure_unique_name(idx);
+
+    /* The body set changed: force the next frame to rebuild the timestep model
+     * so this body (e.g. a freshly promoted star system) integrates at once. */
+    physics_mark_timestep_dirty();
 
     return idx;
 }

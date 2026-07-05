@@ -42,6 +42,7 @@
 #include "gl_utils.h"
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 /* Activity ramp: log10(flux) mapped 30 W/m² → 0, 1361 W/m² → 1, capped 1.5
  * inside 1 AU so a sungrazer blazes without blowing out. */
@@ -70,6 +71,29 @@ static GLuint s_vao = 0, s_vbo = 0;
 static GLint  s_u_vp, s_u_cam_fwd, s_u_kind, s_u_act, s_u_col;
 static GLint  s_u_time, s_u_seed, s_u_curve, s_u_gain;
 static int    s_ok = 0;
+
+/* Cached comet slot indices: is_comet is only ever set by the universe
+ * loader, so scanning all g_nbodies (16k at catalog scale) every frame to
+ * find the handful (often zero) of comets was pure waste.  Rebuilt when the
+ * loader invalidates it; slot reuse can only *remove* a comet, which the
+ * per-entry alive/is_comet check in comet_render handles. */
+static int *s_comets   = NULL;
+static int  s_n_comets = -1;     /* -1 = stale: rebuild on next render */
+
+void comet_notify_bodies_changed(void) { s_n_comets = -1; }
+
+static void comet_list_ensure(void)
+{
+    if (s_n_comets >= 0) return;
+    s_n_comets = 0;
+    for (int i = 0; i < g_nbodies; i++) {
+        if (!g_bodies[i].alive || !g_bodies[i].is_comet) continue;
+        int *grown = realloc(s_comets, (size_t)(s_n_comets + 1) * sizeof(int));
+        if (!grown) return;                   /* keep the shorter list */
+        s_comets = grown;
+        s_comets[s_n_comets++] = i;
+    }
+}
 
 void comet_init(void)
 {
@@ -325,8 +349,10 @@ void comet_render(const float vp_camrel[16],
 {
     if (!s_ok) return;
 
+    comet_list_ensure();
     int begun = 0;
-    for (int i = 0; i < g_nbodies; i++) {
+    for (int ci = 0; ci < s_n_comets; ci++) {
+        int i = s_comets[ci];
         const Body *b = &g_bodies[i];
         if (!b->alive || !b->is_comet) continue;
 
@@ -490,4 +516,5 @@ void comet_shutdown(void)
     glDeleteProgram(s_shader);
     s_vbo = s_vao = s_shader = 0;
     s_ok = 0;
+    free(s_comets); s_comets = NULL; s_n_comets = -1;
 }

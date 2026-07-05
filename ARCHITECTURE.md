@@ -104,7 +104,7 @@ OpenMultiVerse/
 │       ├── build_line.vert / build_line.frag
 │       ├── ui.vert / ui.frag
 │       ├── supernova_billboard.vert / supernova_core.frag / supernova_cloud.frag
-│       ├── bh.vert / bh.frag                    (black hole: disk + shadow + photon ring)
+│       ├── bh.vert / bh.frag                    (black hole: disk + shadow + background lensing)
 │       ├── nebula.vert / nebula.frag            (volumetric raymarched nebulae)
 │       ├── star_dot.vert                        (per-point sized star dots)
 │       └── post_quad.vert + bloom_bright/blur/composite.frag   (HDR bloom)
@@ -431,7 +431,8 @@ Integrator API:
 
 | Function | Purpose |
 |---|---|
-| `physics_refresh_timestep_model()` | Rebuild per-body and per-system timestep data |
+| `physics_refresh_timestep_model()` | Full rebuild of membership (CSR) + per-body/per-system timestep data; runs only when the body set changes (dirty flag) |
+| `physics_refresh_active_timesteps()` | Throttled per-body timestep refresh for the active systems only — frozen systems never integrate, so only active orbits can drift from the stored model |
 | `physics_respa_begin_system()` | Slow half-kick for one root-star system |
 | `physics_respa_inner_system()` | Fast KDK substeps for moon-parent forces |
 | `physics_respa_end_system()` | Slow half-kick, rotation update |
@@ -1276,8 +1277,11 @@ essentials:
 
 `main.c` and `collision.c` cooperate to avoid missing fast impacts:
 
-1. At the start of a physics frame, `trails_begin_frame_snapshot()` and
-   `collision_snapshot_positions()` capture state.
+1. At the start of a physics frame, `collision_snapshot_positions()` captures
+   state globally (bounded by `MAX_BODIES`); trail snapshots are per-system —
+   `trails_begin_frame_snapshot_system(root)` runs for each active system just
+   before it integrates (frozen systems never move, so at galaxy scale this
+   avoids an O(16k) write sweep every frame).
 2. For each system, `collision_system_close_approach_subdivide()` can multiply
    the outer-step count.
 3. Before each outer step, `collision_system_maybe_has_encounter()` can request
@@ -1363,7 +1367,7 @@ Current pass order (within `render_frame`):
 | 3 | Inspection pick | Updates highlighted body from screen center |
 | 4 | Spheres | Ray-sphere billboard shader (excludes black holes) |
 | 5 | Atmospheres/heat glows | Additive atmospheric shell shader |
-| 6 | Black holes | `bh` billboard: accretion disk + shadow + photon ring |
+| 6 | Black holes | `bh` billboard: accretion disk + shadow + lensed real background (scene snapshot via `post_grab_scene()`) |
 | 7 | Nebulae | World-space volumetric raymarch (depth test on, writes off) |
 | 8 | Supernova cloud | Volumetric ejecta raymarch — rendered to a **half-res** target then composited back (`vol_composite`); core/flash stays full-res |
 | 9 | Supernova core/flash | Hot core and flash shader |
@@ -1455,7 +1459,7 @@ Small-body rendering (continuous LOD):
 | `supernova_billboard.vert` | Shared billboard vertex shader for supernova passes |
 | `supernova_core.frag` | Supernova flash/core rendering |
 | `supernova_cloud.frag` | Supernova ejecta cloud rendering |
-| `bh.vert/frag` | Black hole: inclined accretion disk, opaque shadow, photon ring, Doppler beaming |
+| `bh.vert/frag` | Black hole: inclined accretion disk, opaque shadow, Doppler beaming, gravitational lensing of the real background (escaped bent rays re-project to screen UV and sample a `post_grab_scene()` snapshot of the scene rendered so far; procedural stars are the fallback off-screen or with post off) |
 | `nebula.vert/frag` | World-space volumetric raymarched nebulae (domain-warped FBM) |
 | `post_quad.vert` + `bloom_bright/blur/composite.frag` | HDR bloom: bright-pass → separable Gaussian → additive composite |
 | `post_quad.vert` + `vol_composite.frag` | Upscale + composite the half-res supernova-cloud layer back over the scene (premultiplied over) |

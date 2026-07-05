@@ -124,7 +124,21 @@ void keplerian_to_state(
         double gm_au_day2,
         double pos_m[3], double vel_ms[3]);
 
-/* Index of the star body nearest to the camera (camera.h must be included first). */
+/* Camera-proximity cache: nearest star / nearest body to the camera, in AU.
+ * Refreshed by ONE shared O(N) pass per frame (body_update_cam_proximity,
+ * called from the main loop) — consumers (trail fade, HUD readout, adaptive
+ * warp) read this instead of each running their own full-body scan.
+ * Indices are -1 when the universe holds no matching living body. */
+typedef struct {
+    int    star;          /* nearest living star */
+    double star_dist_au;
+    int    body;          /* nearest living body of any kind */
+    double body_dist_au;
+} CamProximity;
+extern CamProximity g_cam_prox;
+void body_update_cam_proximity(void);
+
+/* Index of the star body nearest to the camera, from g_cam_prox. */
 int nearest_star_idx(void);
 
 /* Walk parent links to find the owning root star for a body. */

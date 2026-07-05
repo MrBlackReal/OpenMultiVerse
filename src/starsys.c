@@ -9,6 +9,7 @@
 #include "starsys.h"
 #include "body.h"
 #include "universe.h"
+#include "physics.h"
 #include "galaxy.h"
 #include "laws.h"
 #include "lifecycle.h"   /* SOLAR_MASS_KG */
@@ -273,6 +274,7 @@ static void demote(Promoted *p)
             continue;
         g_bodies[idx].alive = 0;
     }
+    physics_mark_timestep_dirty();   /* bodies removed — rebuild timestep model */
     fprintf(stdout, "[StarSys] demoted '%s' (%d bodies)\n", p->name, p->nbody);
     p->active = 0;
 }

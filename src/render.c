@@ -258,6 +258,8 @@ static GLint  s_bh_disk     = -1;
 static GLint  s_bh_disk_in  = -1;
 static GLint  s_bh_disk_temp = -1;
 static GLint  s_bh_disk_rate = -1;
+static GLint  s_bh_scene     = -1;
+static GLint  s_bh_has_scene = -1;
 
 /* AGN relativistic jets — axis-aligned billboard, additive glow. */
 static GLuint s_jet_shader   = 0;
@@ -340,9 +342,13 @@ static GLint  s_sn_cloud_screen = -1;
  * each); when the cloud fills the screen it dominates the frame. Render it at
  * half resolution (¼ the fragments) into s_vol_color, then composite it back
  * over the scene — the standard volumetrics optimisation. */
-static GLuint s_vol_fbo = 0;
-static GLuint s_vol_color = 0;          /* RGBA16F, half-res, premultiplied */
-static int    s_vol_w = 0, s_vol_h = 0;
+/* Two cached targets: slot 0 at half res (galaxy layer, distant supernovae),
+ * slot 1 at quarter res for a supernova pass whose volume surrounds the
+ * camera — a fullscreen smoke volume is soft everywhere, so the extra
+ * downscale is invisible while cutting the raymarch fragments 4× further. */
+static GLuint s_vol_fbo[2]   = { 0, 0 };
+static GLuint s_vol_color[2] = { 0, 0 };  /* RGBA16F, premultiplied */
+static int    s_vol_w[2] = { 0, 0 }, s_vol_h[2] = { 0, 0 };
 static GLuint s_vol_composite_shader = 0;
 static GLint  s_vol_comp_tex = -1;
 static GLuint s_vol_quad_vao = 0, s_vol_quad_vbo = 0;
@@ -737,46 +743,52 @@ static float supernova_distance_fade_local(float dist, float radius)
     return 1.0f - (float)smoothstepd(fade_start, fade_end, dist);
 }
 
-/* (Re)create the half-res volumetric target at half the current window size.
- * Colour only (no depth attachment): the cloud is composited as a translucent
- * foreground layer, so it isn't depth-tested against the scene while at half
- * res — a brief, contained trade-off during a supernova in exchange for ¼ the
- * raymarch fragments and robustness (a scaling depth-blit from a multisampled
- * default framebuffer is not portable). */
-static void vol_target_ensure(void)
+/* (Re)create a reduced-res volumetric target: slot 0 at half the window size,
+ * slot 1 at a quarter. Colour only (no depth attachment): the layer is
+ * composited as translucent foreground, so it isn't depth-tested against the
+ * scene while reduced — a brief, contained trade-off during a supernova in
+ * exchange for the fragment savings and robustness (a scaling depth-blit from
+ * a multisampled default framebuffer is not portable). */
+static void vol_target_ensure(int slot)
 {
-    int hw = WIN_W > 1 ? WIN_W / 2 : 1;
-    int hh = WIN_H > 1 ? WIN_H / 2 : 1;
-    if (s_vol_fbo && hw == s_vol_w && hh == s_vol_h) return;
-    s_vol_w = hw;
-    s_vol_h = hh;
-    if (!s_vol_fbo)   glGenFramebuffers(1, &s_vol_fbo);
-    if (!s_vol_color) glGenTextures(1, &s_vol_color);
-    glBindTexture(GL_TEXTURE_2D, s_vol_color);
+    int div = slot ? 4 : 2;
+    int hw = WIN_W > div - 1 ? WIN_W / div : 1;
+    int hh = WIN_H > div - 1 ? WIN_H / div : 1;
+    if (s_vol_fbo[slot] && hw == s_vol_w[slot] && hh == s_vol_h[slot]) return;
+    s_vol_w[slot] = hw;
+    s_vol_h[slot] = hh;
+    if (!s_vol_fbo[slot])   glGenFramebuffers(1, &s_vol_fbo[slot]);
+    if (!s_vol_color[slot]) glGenTextures(1, &s_vol_color[slot]);
+    glBindTexture(GL_TEXTURE_2D, s_vol_color[slot]);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, hw, hh, 0, GL_RGBA, GL_FLOAT, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glBindTexture(GL_TEXTURE_2D, 0);
-    glBindFramebuffer(GL_FRAMEBUFFER, s_vol_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, s_vol_fbo[slot]);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                           GL_TEXTURE_2D, s_vol_color, 0);
+                           GL_TEXTURE_2D, s_vol_color[slot], 0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 /* Physical scales of a black hole, for realistic rendering sizes:
- *   rs_m    — Schwarzschild radius 2GM/c² (metres), from mass;
+ *   rs_m    — Schwarzschild radius (metres): read from b->radius, which every
+ *             creating/growing event derives from mass through
+ *             laws_schwarzschild_radius() — the single root.  Rendering never
+ *             re-derives it, so visuals, devour horizon and accretion always
+ *             agree;
  *   a_star  — dimensionless spin, from Ω·Rs/c (surface-speed proxy), 0..0.998;
  *   isco_rs — prograde Kerr ISCO (Bardeen 1972) in Rs units: 3 at a*=0 down to
  *             ~0.5 near-maximal, i.e. the inner accretion-disk edge.
- * Everything the BH/jet/torus passes draw is expressed in Rs, so deriving Rs
- * from mass makes the whole engine scale physically with the hole's mass. */
+ * Everything the BH/jet/torus passes draw is expressed in Rs, so the whole
+ * engine scales physically with the hole's mass. */
 static void bh_scales(const Body *b, double *rs_m, double *a_star, double *isco_rs)
 {
-    const double G = 6.674e-11, C = 2.99792458e8;
-    double M  = b->mass > 0.0 ? b->mass : 1.0;
-    double Rs = 2.0 * G * M / (C * C);
+    const double C = 2.99792458e8;
+    double Rs = b->radius > 0.0
+              ? b->radius
+              : laws_schwarzschild_radius(b->mass > 0.0 ? b->mass : 1.0);
     /* Spin magnitude comes from the evolved a* (accretion.c spins it up); fall
      * back to the raw rotation_rate only for a hole that never got seeded. */
     double a  = fabs(b->spin_a);
@@ -883,9 +895,16 @@ static float star_dot_hdr_gain(int idx, float dcam)
  * matches the corona brightness — the dot fades precisely as the glare
  * brightens, with no visible seam.
  *
+ * Occluders come from the caller's near-star list (dot_stars): an occluding
+ * star must sit closer than the target along the view ray with any effect
+ * confined to ~15 star radii of it, so it is always itself a near star —
+ * scanning all g_nbodies for it was pure waste at catalog scale (and wrongly
+ * counted glare-less black holes, which the near list excludes).
+ *
  * Returns 1.0 (fully visible) if no star intersects.
  */
-static float body_point_star_glare_visibility(int body_idx) {
+static float body_point_star_glare_visibility(int body_idx,
+                                              const int *stars, int nstars) {
     Body *b = &g_bodies[body_idx];
 
     double bx = b->pos[0] * RS - g_cam.pos[0];
@@ -901,7 +920,8 @@ static float body_point_star_glare_visibility(int body_idx) {
     double uz = bz / bd;
     double visibility = 1.0;
 
-    for (int i = 0; i < g_nbodies; i++) {
+    for (int si = 0; si < nstars; si++) {
+        int i = stars[si];
         if (i == body_idx) continue;
         Body *s = &g_bodies[i];
         if (!s->alive || !s->is_star) continue;
@@ -1153,6 +1173,8 @@ void render_init(void) {
         s_bh_disk_in  = glGetUniformLocation(s_bh_shader, "u_disk_in");
         s_bh_disk_temp = glGetUniformLocation(s_bh_shader, "u_disk_temp");
         s_bh_disk_rate = glGetUniformLocation(s_bh_shader, "u_disk_rate");
+        s_bh_scene     = glGetUniformLocation(s_bh_shader, "u_scene");
+        s_bh_has_scene = glGetUniformLocation(s_bh_shader, "u_has_scene");
     }
 
     /* --- AGN jet shader --- */
@@ -1657,11 +1679,18 @@ static float          *s_rs_sphere_alpha = NULL;  /* continuous-LOD blend: spher
 static int            *s_rs_dot_order = NULL, *s_rs_dot_stars = NULL,
                       *s_rs_dot_planets = NULL, *s_rs_dot_moons = NULL;
 static float          *s_rs_dot_sx = NULL, *s_rs_dot_sy = NULL,
-                      *s_rs_dot_overlap_alpha = NULL;
+                      *s_rs_dot_overlap_alpha = NULL,
+                      *s_rs_glare_vis = NULL;   /* per-frame glare-occlusion memo */
 static int            *s_rs_dot_candidate = NULL, *s_rs_dot_vis = NULL;
 static float          *s_rs_dot_data = NULL;
 static float          *s_rs_aur_act = NULL;  /* smoothed aurora storm activity
                                                 (-1 = no sample yet)         */
+/* body_lights() output cached in the sphere pass and reused by the atmosphere
+ * pass — both run over the identical resolved set, so recomputing the two-light
+ * RadianceField query (O(emitters)) twice per body per frame is pure waste. */
+typedef struct { float sr1[3], col1[3], sr2[3], col2[3], w2; } BodyLightCache;
+static BodyLightCache *s_rs_light = NULL;
+static char           *s_rs_light_valid = NULL;   /* 1 = cached this frame */
 static int             s_dot_vbo_cap = 0;   /* # dots the VBO can hold */
 
 static void render_scratch_ensure(int n)
@@ -1679,15 +1708,20 @@ static void render_scratch_ensure(int n)
     s_rs_dot_sx            = realloc(s_rs_dot_sx,            (size_t)c * sizeof(float));
     s_rs_dot_sy            = realloc(s_rs_dot_sy,            (size_t)c * sizeof(float));
     s_rs_dot_overlap_alpha = realloc(s_rs_dot_overlap_alpha, (size_t)c * sizeof(float));
+    s_rs_glare_vis         = realloc(s_rs_glare_vis,         (size_t)c * sizeof(float));
     s_rs_dot_candidate     = realloc(s_rs_dot_candidate,     (size_t)c * sizeof(int));
     s_rs_dot_vis           = realloc(s_rs_dot_vis,           (size_t)c * sizeof(int));
     s_rs_dot_data          = realloc(s_rs_dot_data,     (size_t)c * 8 * sizeof(float));
     s_rs_aur_act           = realloc(s_rs_aur_act,          (size_t)c * sizeof(float));
+    s_rs_light             = realloc(s_rs_light,            (size_t)c * sizeof(*s_rs_light));
+    s_rs_light_valid       = realloc(s_rs_light_valid,      (size_t)c * sizeof(char));
     s_rs_occluders         = realloc(s_rs_occluders,        (size_t)c * sizeof(int));
     if (!s_rs_info || !s_rs_body_px || !s_rs_sphere_alpha || !s_rs_dot_order || !s_rs_dot_stars ||
         !s_rs_dot_planets || !s_rs_dot_moons || !s_rs_dot_sx || !s_rs_dot_sy ||
-        !s_rs_dot_overlap_alpha || !s_rs_dot_candidate || !s_rs_dot_vis ||
-        !s_rs_dot_data || !s_rs_aur_act || !s_rs_occluders) {
+        !s_rs_dot_overlap_alpha || !s_rs_glare_vis ||
+        !s_rs_dot_candidate || !s_rs_dot_vis ||
+        !s_rs_dot_data || !s_rs_aur_act || !s_rs_light || !s_rs_light_valid ||
+        !s_rs_occluders) {
         fprintf(stderr, "[render] scratch alloc failed\n");
         exit(1);
     }
@@ -1783,6 +1817,8 @@ void render_frame(const float view[16], const float proj[16],
     BodyRenderInfo *info = s_rs_info;
     float *body_px = s_rs_body_px;   /* projected radius in pixels; used for fade thresholds */
     memset(body_px, 0, (size_t)g_nbodies * sizeof(float));
+    /* Invalidate the per-frame body_lights cache before the sphere pass fills it. */
+    memset(s_rs_light_valid, 0, (size_t)g_nbodies * sizeof(char));
     s_rs_nocc = 0;   /* rebuilt below: sphere-rendered non-star occluders */
 
     for (int i = 0; i < g_nbodies; i++) {
@@ -1893,6 +1929,16 @@ void render_frame(const float view[16], const float proj[16],
          * field is empty (e.g. a universe with no stars). */
         float sr1[3], col1[3], sr2[3], w2, col2[3];
         body_lights(i, b, sr1, col1, sr2, &w2, col2);
+        /* Cache for the atmosphere pass (same body, same lighting). */
+        {
+            BodyLightCache *lc = &s_rs_light[i];
+            for (int k = 0; k < 3; k++) {
+                lc->sr1[k] = sr1[k]; lc->col1[k] = col1[k];
+                lc->sr2[k] = sr2[k]; lc->col2[k] = col2[k];
+            }
+            lc->w2 = w2;
+            s_rs_light_valid[i] = 1;
+        }
 
         glUniform3f(s_sp_center,  -oc_x, -oc_y, -oc_z);
         glUniform1f(s_sp_radius,   dr);
@@ -2124,9 +2170,22 @@ void render_frame(const float view[16], const float proj[16],
             float oc_y = (float)((cam_my - b->pos[1]) * RS);
             float oc_z = (float)((cam_mz - b->pos[2]) * RS);
             /* Same two-light RadianceField lighting as the sphere pass, so
-             * the atmosphere's day side agrees with the surface's. */
+             * the atmosphere's day side agrees with the surface's — reuse the
+             * value the sphere pass already computed for this body this frame
+             * (a resolved-body atmosphere always has a matching sphere pass;
+             * fall back to a fresh query only if the sphere pass skipped it,
+             * e.g. a black hole with a heat glow). */
             float sr1[3], col1[3], sr2[3], w2, col2[3];
-            body_lights(i, b, sr1, col1, sr2, &w2, col2);
+            if (s_rs_light_valid[i]) {
+                const BodyLightCache *lc = &s_rs_light[i];
+                for (int k = 0; k < 3; k++) {
+                    sr1[k] = lc->sr1[k]; col1[k] = lc->col1[k];
+                    sr2[k] = lc->sr2[k]; col2[k] = lc->col2[k];
+                }
+                w2 = lc->w2;
+            } else {
+                body_lights(i, b, sr1, col1, sr2, &w2, col2);
+            }
 
             float planet_r = info[i].dr;
             float atm_r    = planet_r * final_scale;
@@ -2212,17 +2271,17 @@ void render_frame(const float view[16], const float proj[16],
         int    gal_w = WIN_W, gal_h = WIN_H;
 
         if (use_halfres) {
-            GLfloat prev_clear[4];
-            glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prev_fbo);
-            vol_target_ensure();
-            glBindFramebuffer(GL_FRAMEBUFFER, s_vol_fbo);
-            glViewport(0, 0, s_vol_w, s_vol_h);
-            glGetFloatv(GL_COLOR_CLEAR_VALUE, prev_clear);
-            glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-            glClear(GL_COLOR_BUFFER_BIT);
-            glClearColor(prev_clear[0], prev_clear[1], prev_clear[2], prev_clear[3]);
-            gal_w = s_vol_w;
-            gal_h = s_vol_h;
+            /* Scene target is known (post's HDR FBO, or 0) — no glGet
+             * round-trip; glClearBufferfv clears without touching the global
+             * clear colour, so no save/restore either. */
+            static const GLfloat clear0[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            prev_fbo = (GLint)post_scene_fbo();
+            vol_target_ensure(0);
+            glBindFramebuffer(GL_FRAMEBUFFER, s_vol_fbo[0]);
+            glViewport(0, 0, s_vol_w[0], s_vol_h[0]);
+            glClearBufferfv(GL_COLOR, 0, clear0);
+            gal_w = s_vol_w[0];
+            gal_h = s_vol_h[0];
         }
 
         galaxy_render(vp_camrel, cam_right, cam_up, cam_fwd, g_cam.pos,
@@ -2236,7 +2295,7 @@ void render_frame(const float view[16], const float proj[16],
             glViewport(0, 0, WIN_W, WIN_H);
             glUseProgram(s_vol_composite_shader);
             glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, s_vol_color);
+            glBindTexture(GL_TEXTURE_2D, s_vol_color[0]);
             glUniform1i(s_vol_comp_tex, 0);
             glEnable(GL_BLEND);
             glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
@@ -2271,23 +2330,37 @@ void render_frame(const float view[16], const float proj[16],
      * is near the blast. Render it into a half-res target (¼ the fragments) and
      * composite it back over the scene; fall back to a direct full-res draw if
      * the composite shader is unavailable. */
+    /* Quarter-res slot when any blast volume surrounds the camera (the
+     * fullscreen-raster state): the whole screen marches the volume, and a
+     * screen-filling smoke layer has no edge detail to lose — this is exactly
+     * the state that otherwise dominates the frame. Both supernova passes use
+     * the same slot so they upsample consistently. */
+    int sn_vol_slot = 0;
+    for (int i = 0; i < sn_count; i++) {
+        const SupernovaRenderEvent *e = &sn_events[i];
+        float cover = e->cloud_radius > e->flash_radius ? e->cloud_radius
+                                                        : e->flash_radius;
+        if (supernova_fullscreen_raster_local(e->pos, cam_fwd, cover, 1.34f)) {
+            sn_vol_slot = 1;
+            break;
+        }
+    }
+
     if (sn_count > 0 && s_supernova_cloud_shader) {
         int   use_halfres = (s_vol_composite_shader != 0 && s_vol_quad_vao != 0);
         GLint prev_fbo = 0;
         float screen_w = (float)WIN_W, screen_h = (float)WIN_H;
 
         if (use_halfres) {
-            GLfloat prev_clear[4];
-            glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prev_fbo);
-            vol_target_ensure();
-            glBindFramebuffer(GL_FRAMEBUFFER, s_vol_fbo);
-            glViewport(0, 0, s_vol_w, s_vol_h);
-            glGetFloatv(GL_COLOR_CLEAR_VALUE, prev_clear);
-            glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-            glClear(GL_COLOR_BUFFER_BIT);
-            glClearColor(prev_clear[0], prev_clear[1], prev_clear[2], prev_clear[3]);
-            screen_w = (float)s_vol_w;
-            screen_h = (float)s_vol_h;
+            /* Same no-glGet redirect as the galaxy half-res block above. */
+            static const GLfloat clear0[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            prev_fbo = (GLint)post_scene_fbo();
+            vol_target_ensure(sn_vol_slot);
+            glBindFramebuffer(GL_FRAMEBUFFER, s_vol_fbo[sn_vol_slot]);
+            glViewport(0, 0, s_vol_w[sn_vol_slot], s_vol_h[sn_vol_slot]);
+            glClearBufferfv(GL_COLOR, 0, clear0);
+            screen_w = (float)s_vol_w[sn_vol_slot];
+            screen_h = (float)s_vol_h[sn_vol_slot];
         }
 
         glUseProgram(s_supernova_cloud_shader);
@@ -2354,7 +2427,7 @@ void render_frame(const float view[16], const float proj[16],
             glViewport(0, 0, WIN_W, WIN_H);
             glUseProgram(s_vol_composite_shader);
             glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, s_vol_color);
+            glBindTexture(GL_TEXTURE_2D, s_vol_color[sn_vol_slot]);
             glUniform1i(s_vol_comp_tex, 0);
             glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
             glBindVertexArray(s_vol_quad_vao);
@@ -2368,7 +2441,31 @@ void render_frame(const float view[16], const float proj[16],
         glDisable(GL_BLEND);
     }
 
+    /* The core/flash raymarch is as fragment-bound as the cloud (18 steps ×
+     * 5 FBM) and used to draw fullscreen at FULL resolution — when the camera
+     * sits inside the expanding flash sphere it alone dominated the frame
+     * (~4× the cloud's cost). Render it into the same half-res target and
+     * composite it back additively: its blend (SRC_ALPHA, ONE) is linear, so
+     * summing layers into a black texture and adding the texture to the scene
+     * is exactly equivalent, minus the depth test the cloud pass already
+     * trades away at half res. */
     if (sn_count > 0 && s_supernova_core_shader) {
+        int   use_halfres = (s_vol_composite_shader != 0 && s_vol_quad_vao != 0);
+        GLint prev_fbo = 0;
+        float screen_w = (float)WIN_W, screen_h = (float)WIN_H;
+
+        if (use_halfres) {
+            /* Same no-glGet redirect as the galaxy half-res block above. */
+            static const GLfloat clear0[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            prev_fbo = (GLint)post_scene_fbo();
+            vol_target_ensure(sn_vol_slot);
+            glBindFramebuffer(GL_FRAMEBUFFER, s_vol_fbo[sn_vol_slot]);
+            glViewport(0, 0, s_vol_w[sn_vol_slot], s_vol_h[sn_vol_slot]);
+            glClearBufferfv(GL_COLOR, 0, clear0);
+            screen_w = (float)s_vol_w[sn_vol_slot];
+            screen_h = (float)s_vol_h[sn_vol_slot];
+        }
+
         glUseProgram(s_supernova_core_shader);
         glUniformMatrix4fv(s_sn_core_vp, 1, GL_FALSE, vp_camrel);
         glUniform3f(s_sn_core_right, cam_right[0], cam_right[1], cam_right[2]);
@@ -2376,12 +2473,15 @@ void render_frame(const float view[16], const float proj[16],
         glUniform3f(s_sn_core_fwd, cam_fwd[0], cam_fwd[1], cam_fwd[2]);
         glUniform1f(s_sn_core_fov_tan, tanf(FOV * 0.5f * (float)(PI / 180.0)));
         glUniform1f(s_sn_core_aspect, aspect);
-        glUniform2f(s_sn_core_screen, (float)WIN_W, (float)WIN_H);
+        glUniform2f(s_sn_core_screen, screen_w, screen_h);
 
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE);
         glDepthMask(GL_FALSE);
-        glEnable(GL_DEPTH_TEST);
+        /* Half-res layer carries no scene depth (see cloud pass note); the
+         * full-res fallback keeps testing so planets occlude the fireball. */
+        if (use_halfres) glDisable(GL_DEPTH_TEST);
+        else             glEnable(GL_DEPTH_TEST);
         glBindVertexArray(s_sphere_vao);
 
         for (int i = 0; i < sn_count; i++) {
@@ -2434,7 +2534,26 @@ void render_frame(const float view[16], const float proj[16],
         }
 
         glBindVertexArray(0);
+
+        if (use_halfres) {
+            /* Upscale + add the half-res glow layer over the scene (the target
+             * already holds accumColor·accumAlpha summed, so plain addition
+             * reproduces the direct SRC_ALPHA/ONE draw). */
+            glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo);
+            glViewport(0, 0, WIN_W, WIN_H);
+            glUseProgram(s_vol_composite_shader);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, s_vol_color[sn_vol_slot]);
+            glUniform1i(s_vol_comp_tex, 0);
+            glBlendFunc(GL_ONE, GL_ONE);
+            glBindVertexArray(s_vol_quad_vao);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            glBindVertexArray(0);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+
         glDepthMask(GL_TRUE);
+        glEnable(GL_DEPTH_TEST);
         glDisable(GL_BLEND);
     }
 
@@ -2562,8 +2681,11 @@ void render_frame(const float view[16], const float proj[16],
             if (!g_bodies[i].alive) continue;
             /* Beyond the far-field horizon: culled (true-depth falloff) */
             if (info[i].dcam > g_settings.farfield_horizon_au) continue;
-            /* Pre-filter: fully occluded by a star's glare corona */
-            if (body_point_star_glare_visibility(i) <= 0.02f) continue;
+            /* Pre-filter: fully occluded by a star's glare corona.  Memoized
+             * (s_rs_glare_vis) — the upload loop below reuses the value. */
+            s_rs_glare_vis[i] = body_point_star_glare_visibility(i, dot_stars,
+                                                                 dot_ns);
+            if (s_rs_glare_vis[i] <= 0.02f) continue;
             /* Pre-filter: star has grown large enough that its glare disc replaces its dot */
             if (g_bodies[i].is_star &&
                 body_px[i] * STAR_GLARE_BILL_SCALE >= lod_glare_hi) continue;
@@ -2626,7 +2748,7 @@ void render_frame(const float view[16], const float proj[16],
 
             float f = b->is_star ? 1.0f : system_dot_fade_for_body(i);
             f *= dot_overlap_alpha[i];
-            f *= body_point_star_glare_visibility(i);
+            f *= s_rs_glare_vis[i];   /* memoized in the overlap pre-filter */
             f *= farfield_horizon_fade(info[i].dcam);
             if (f <= 0.0f) continue;
 
@@ -2840,13 +2962,50 @@ void render_frame(const float view[16], const float proj[16],
      * Shadow + accretion disk billboards, alpha-blended (the shadow is opaque
      * so it occludes the background; the disk/ring write HDR-bright colour that
      * bloom turns into a glow).  Depth-tested so a nearer body occludes the BH;
-     * drawn at true camera-relative depth and culled past the far-field horizon. */
-    if (s_bh_shader) {
+     * drawn at true camera-relative depth and culled past the far-field horizon.
+     *
+     * The shadow/jet/torus/AGN-core passes below each used to scan all g_nbodies
+     * and re-run bh_scales() (pow/log10) for the same holes.  Collect the (few)
+     * black holes once here with their scales cached, and let every pass iterate
+     * this list instead.  Holes past the far-field horizon are culled here (so
+     * bh_scales never runs for them — positions are fixed within the frame, so
+     * this is exactly the cull each pass used to apply). */
+    static int    *s_bh_list  = NULL;
+    static double *s_bh_rs     = NULL, *s_bh_astar = NULL, *s_bh_isco = NULL;
+    static int     s_bh_cap    = 0;
+    int n_bh = 0;
+    for (int i = 0; i < g_nbodies; i++) {
+        if (!g_bodies[i].alive || !g_bodies[i].is_black_hole) continue;
+        {
+            float rx = (float)(g_bodies[i].pos[0] * RS - g_cam.pos[0]);
+            float ry = (float)(g_bodies[i].pos[1] * RS - g_cam.pos[1]);
+            float rz = (float)(g_bodies[i].pos[2] * RS - g_cam.pos[2]);
+            if (rx*rx + ry*ry + rz*rz > g_settings.farfield_horizon_au *
+                                        g_settings.farfield_horizon_au)
+                continue;   /* past horizon → invisible in every pass below */
+        }
+        if (n_bh >= s_bh_cap) {
+            s_bh_cap   = s_bh_cap ? s_bh_cap * 2 : 16;
+            s_bh_list  = realloc(s_bh_list,  (size_t)s_bh_cap * sizeof(int));
+            s_bh_rs    = realloc(s_bh_rs,    (size_t)s_bh_cap * sizeof(double));
+            s_bh_astar = realloc(s_bh_astar, (size_t)s_bh_cap * sizeof(double));
+            s_bh_isco  = realloc(s_bh_isco,  (size_t)s_bh_cap * sizeof(double));
+            if (!s_bh_list || !s_bh_rs || !s_bh_astar || !s_bh_isco) {
+                fprintf(stderr, "[render] bh list alloc failed\n"); exit(1);
+            }
+        }
+        s_bh_list[n_bh] = i;
+        bh_scales(&g_bodies[i], &s_bh_rs[n_bh], &s_bh_astar[n_bh], &s_bh_isco[n_bh]);
+        n_bh++;
+    }
+
+    if (s_bh_shader && n_bh > 0) {
         glUseProgram(s_bh_shader);
         glUniformMatrix4fv(s_bh_vp, 1, GL_FALSE, vp_camrel);
         glUniform3f(s_bh_right, cam_right[0], cam_right[1], cam_right[2]);
         glUniform3f(s_bh_up,    cam_up[0],    cam_up[1],    cam_up[2]);
         glUniform1f(s_bh_time,  (float)SDL_GetTicks() * 0.001f);
+        glUniform1i(s_bh_scene, 0);
 
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -2855,18 +3014,26 @@ void render_frame(const float view[16], const float proj[16],
         glDepthFunc(GL_LEQUAL);
         glBindVertexArray(s_sphere_vao);
 
-        for (int i = 0; i < g_nbodies; i++) {
-            if (!g_bodies[i].alive || !g_bodies[i].is_black_hole) continue;
+        for (int bi = 0; bi < n_bh; bi++) {
+            int i = s_bh_list[bi];
 
             float rx = (float)(g_bodies[i].pos[0] * RS - g_cam.pos[0]);
             float ry = (float)(g_bodies[i].pos[1] * RS - g_cam.pos[1]);
             float rz = (float)(g_bodies[i].pos[2] * RS - g_cam.pos[2]);
             if (rx*cam_fwd[0] + ry*cam_fwd[1] + rz*cam_fwd[2] < 0.0f) continue;
 
-            float dist   = sqrtf(rx*rx + ry*ry + rz*rz);
-            if (dist > g_settings.farfield_horizon_au) continue;  /* past horizon → culled */
-            double rs_m, a_star, isco_rs;
-            bh_scales(&g_bodies[i], &rs_m, &a_star, &isco_rs);
+            /* Snapshot the scene rendered so far (galaxies, nebulae, dots —
+             * and any hole already drawn this pass) so the raymarch bends the
+             * *real* background around the hole; per-hole grabs let one hole
+             * lense another's image instead of erasing it where the enlarged
+             * lens quads overlap.  0 when post is off → the shader falls back
+             * to procedural stars. */
+            GLuint scene_grab = (GLuint)post_grab_scene();
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, scene_grab);
+            glUniform1i(s_bh_has_scene, scene_grab ? 1 : 0);
+
+            double rs_m = s_bh_rs[bi], isco_rs = s_bh_isco[bi];
             float radius = (float)(rs_m * RS);   /* horizon radius from mass */
 
             glUniform3f(s_bh_center, rx, ry, rz);
@@ -2940,17 +3107,15 @@ void render_frame(const float view[16], const float proj[16],
         glDepthFunc(GL_LEQUAL);
         glBindVertexArray(s_sphere_vao);
 
-        for (int i = 0; i < g_nbodies; i++) {
-            if (!g_bodies[i].alive || !g_bodies[i].is_black_hole) continue;
+        for (int bi = 0; bi < n_bh; bi++) {
+            int i = s_bh_list[bi];
             if (g_bodies[i].agn_activity <= 0.0f) continue;
 
             float rx = (float)(g_bodies[i].pos[0] * RS - g_cam.pos[0]);
             float ry = (float)(g_bodies[i].pos[1] * RS - g_cam.pos[1]);
             float rz = (float)(g_bodies[i].pos[2] * RS - g_cam.pos[2]);
             float dist   = sqrtf(rx * rx + ry * ry + rz * rz);
-            if (dist > g_settings.farfield_horizon_au) continue;  /* past horizon → culled */
-            double rs_m, a_star, isco_rs;
-            bh_scales(&g_bodies[i], &rs_m, &a_star, &isco_rs);
+            double rs_m = s_bh_rs[bi], a_star = s_bh_astar[bi];
             float radius = (float)(rs_m * RS);
 
             /* Blandford–Znajek: jets are powered by spin, so length and strength
@@ -2999,17 +3164,14 @@ void render_frame(const float view[16], const float proj[16],
         glDepthFunc(GL_LEQUAL);
         glBindVertexArray(s_sphere_vao);
 
-        for (int i = 0; i < g_nbodies; i++) {
-            if (!g_bodies[i].alive || !g_bodies[i].is_black_hole) continue;
+        for (int bi = 0; bi < n_bh; bi++) {
+            int i = s_bh_list[bi];
             if (g_bodies[i].dust_torus <= 0.0f) continue;
 
             float rx = (float)(g_bodies[i].pos[0] * RS - g_cam.pos[0]);
             float ry = (float)(g_bodies[i].pos[1] * RS - g_cam.pos[1]);
             float rz = (float)(g_bodies[i].pos[2] * RS - g_cam.pos[2]);
-            float dist   = sqrtf(rx * rx + ry * ry + rz * rz);
-            if (dist > g_settings.farfield_horizon_au) continue;  /* past horizon → culled */
-            double rs_m, a_star, isco_rs;
-            bh_scales(&g_bodies[i], &rs_m, &a_star, &isco_rs);
+            double rs_m = s_bh_rs[bi];
             float radius = (float)(rs_m * RS);
             double ob = g_bodies[i].obliquity * (PI / 180.0);
 
@@ -3060,17 +3222,15 @@ void render_frame(const float view[16], const float proj[16],
         glDepthFunc(GL_LEQUAL);
         glBindVertexArray(s_sphere_vao);
 
-        for (int i = 0; i < g_nbodies; i++) {
-            if (!g_bodies[i].alive || !g_bodies[i].is_black_hole) continue;
+        for (int bi = 0; bi < n_bh; bi++) {
+            int i = s_bh_list[bi];
             if (g_bodies[i].agn_activity <= 0.0f) continue;
 
             float rx = (float)(g_bodies[i].pos[0] * RS - g_cam.pos[0]);
             float ry = (float)(g_bodies[i].pos[1] * RS - g_cam.pos[1]);
             float rz = (float)(g_bodies[i].pos[2] * RS - g_cam.pos[2]);
             float dist = sqrtf(rx * rx + ry * ry + rz * rz);
-            if (dist > g_settings.farfield_horizon_au) continue;  /* past horizon → culled */
-            double rs_m, a_star, isco_rs;
-            bh_scales(&g_bodies[i], &rs_m, &a_star, &isco_rs);
+            double rs_m = s_bh_rs[bi], a_star = s_bh_astar[bi];
             float radius = (float)(rs_m * RS);
 
             /* Beamed core lights up when the jet points at the camera (pole-on),

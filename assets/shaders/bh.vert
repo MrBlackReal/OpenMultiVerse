@@ -21,7 +21,11 @@ uniform vec3  u_cam_up;
 out vec2 v_uv;
 out vec3 v_world;
 
-const float BILL_SCALE = 11.0;
+/* Must cover bh.frag's LENS_OUT: the outer analytic-lensing radius (Rs units),
+ * far beyond the raymarched core — out to where the true deflection falls
+ * below a pixel — so the background warp fades out physically instead of
+ * cutting off at the quad edge. */
+const float BILL_SCALE = 2000.0;
 
 void main() {
     vec2 off   = a_uv * 2.0 - 1.0;          /* -1 .. +1 */

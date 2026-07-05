@@ -13,8 +13,11 @@
  *   - the accretion disk — a real annulus in the hole's equatorial plane — is
  *     sampled wherever the bent ray crosses it, so the far side lenses up over
  *     the top into the Einstein arc and the near side sweeps under the front,
- *   - escaped rays pick up a faint lensed star field (procedural), fading to
- *     transparent where the ray is undeflected so the real background shows.
+ *   - escaped rays sample the real rendered background (post scene snapshot)
+ *     along their bent exit direction, so galaxies/trails/stars behind the
+ *     hole visibly warp around it; outside the marched core an analytic
+ *     weak-field deflection continues the warp smoothly out to LENS_OUT
+ *     (procedural stars are the fallback off-screen or with post off).
  *
  * The result is view-correct: orbit the hole and the disk tilts from face-on to
  * edge-on for real, instead of the old camera-locked billboard squash.
@@ -38,6 +41,8 @@ uniform float u_disk_in;      /* inner disk edge (ISCO) in Rs, from spin   */
 uniform float u_disk_temp;    /* disk hotness 0..1 (from mass + accretion) */
 uniform float u_disk_rate;    /* visual Keplerian swirl rate (from mass)   */
 uniform mat4  u_vp;           /* view-projection (camera-relative) — for true depth */
+uniform sampler2D u_scene;    /* scene rendered so far (post grab) — lensed bg  */
+uniform int   u_has_scene;    /* 1 when u_scene is valid (post enabled)         */
 
 /* Disk geometry, in horizon-radius (Rs) units.  The inner edge is the ISCO,
  * supplied per-hole (u_disk_in) since it depends on spin (3 Rs at a*=0 down to
@@ -45,6 +50,21 @@ uniform mat4  u_vp;           /* view-projection (camera-relative) — for true 
 const float DISK_OUT = 6.5;
 const int   STEPS    = 160;
 const float BOUND    = 9.0;   /* march only within this radius (Rs) of the hole */
+/* Beyond BOUND the geodesic march hands off to the analytic weak-field
+ * deflection α(b) = 2/b + 15π/16·b⁻² + 16/3·b⁻³ (Rs units, radians), scaled
+ * by the fraction of the bend that actually lies ahead of the camera, so the
+ * background warp falls off continuously instead of stopping at the march
+ * bound and warped features (trails, rings, galaxies) stay geometrically
+ * continuous with their unwarped surroundings.  LENS_OUT is where the true
+ * deflection drops below ~a pixel (α(2000) ≈ 1 mrad ≈ 1 px at 1080p/60°) —
+ * the taper to exactly zero there removes at most that much, so the field is
+ * physically faithful to the pixel level, not an artistic cutoff.  bh.vert's
+ * BILL_SCALE must cover LENS_OUT. */
+const float LENS_OUT = 2000.0;
+
+float weak_defl(float b) {
+    return 2.0 / b + 2.9452431 / (b * b) + 5.3333333 / (b * b * b);
+}
 
 float hash13(vec3 p) {
     p  = fract(p * 0.1031);
@@ -89,17 +109,28 @@ void main() {
     /* Skip the straight run-up: jump to where the ray enters the bounding
      * sphere around the hole (outside it, spacetime is ~flat here). */
     float tca = -dot(p, d);
-    float b2  = dot(p, p) - tca * tca;        /* impact parameter²               */
-    if (b2 > BOUND * BOUND) discard;                             /* misses: bg  */
-    float thc = sqrt(BOUND * BOUND - b2);
-    p += d * max(tca - thc, 0.0);
+    vec3  pca = p + d * tca;                  /* closest-approach point (Rs)     */
+    float b2  = dot(pca, pca);                /* impact param², stable form:
+                                                 error ~|p|·ε instead of the
+                                                 ~|p|²·ε of |p|²−tca², which is
+                                                 garbage past |p| ~ 1e4 Rs; this
+                                                 stays sub-Rs out to ~1e7, far
+                                                 beyond where the lens field is
+                                                 even a pixel wide.             */
+    if (b2 > LENS_OUT * LENS_OUT) discard;    /* beyond even the analytic lens  */
+    bool marched = b2 <= BOUND * BOUND;       /* geodesic core vs analytic ring */
+    float h2 = 0.0;
+    if (marched) {
+        float thc = sqrt(BOUND * BOUND - b2);
+        p += d * max(tca - thc, 0.0);
 
-    /* Per-pixel start jitter: phase-shifts the march so the higher-order photon
-     * images inside the shadow dither into fine noise instead of hard concentric
-     * bands (stable per pixel — no temporal shimmer). */
-    p += d * (hash13(vec3(gl_FragCoord.xy, 0.0)) - 0.5) * 0.08;
+        /* Per-pixel start jitter: phase-shifts the march so the higher-order
+         * photon images inside the shadow dither into fine noise instead of
+         * hard concentric bands (stable per pixel — no temporal shimmer). */
+        p += d * (hash13(vec3(gl_FragCoord.xy, 0.0)) - 0.5) * 0.08;
 
-    float h2 = dot(cross(p, d), cross(p, d)); /* conserved angular momentum²     */
+        h2 = dot(cross(p, d), cross(p, d));   /* conserved angular momentum²     */
+    }
 
     /* Orthonormal basis in the disk plane for the azimuthal angle. */
     vec3 n   = normalize(u_disk_normal);
@@ -119,7 +150,7 @@ void main() {
     bool  hit        = false;                 /* did the ray meet an opaque surf */
     vec3  hit_p      = vec3(0.0);             /* hole-frame hit pos (Rs units)   */
 
-    for (int i = 0; i < STEPS; i++) {
+    for (int i = 0; marched && i < STEPS; i++) {
         /* Adaptive step: fine near the hole (where the ray curves hard and the
          * higher-order photon images live), coarse far out. */
         float r  = length(p);
@@ -230,13 +261,73 @@ void main() {
     if (swallowed) {
         alpha = 1.0;                          /* opaque black shadow (disk over) */
     } else {
-        /* Lensed star background for escaped rays; fade in with deflection so
-         * undeflected rays stay transparent and the real starfield shows. */
-        float defl = acos(clamp(dot(normalize(d), rd), -1.0, 1.0));
-        float w    = smoothstep(0.04, 0.40, defl);
-        float st   = stars(normalize(d)) * w;
-        col   += vec3(st) * (1.0 - alpha);
-        alpha  = max(alpha, st);
+        /* Lensed background for escaped rays.  The marched core already has
+         * the exact bent exit direction in d; outside BOUND, bend the view ray
+         * analytically by α(b) toward the hole (lens equation β = θ − α),
+         * tapered so the deflection reaches exactly zero at LENS_OUT — a
+         * single continuous displacement field with no boundary circle.
+         *
+         * When the scene snapshot is available (post enabled), the bent
+         * direction is re-projected to screen UV and the *real* rendered
+         * background (galaxies, nebulae, star dots) is sampled at full weight
+         * — a galaxy behind the hole genuinely warps around the shadow, and
+         * where the bend is tiny the sample equals the pixel underneath, so
+         * the effect edge is seamless by construction.  The background is
+         * treated as at infinity (direction-only re-projection), exact for
+         * the far field the warp mostly shows.  Procedural stars remain the
+         * fallback where the bent ray leaves the screen or when post is off. */
+        vec3 dir;
+        if (marched) {
+            dir = normalize(d);
+        } else {
+            float b  = sqrt(b2);
+            float a  = weak_defl(b)
+                     - weak_defl(LENS_OUT) * smoothstep(BOUND, LENS_OUT, b);
+            /* α(b) is the full −∞→+∞ deflection; the camera only sees the
+             * bend accumulated ahead of it.  Fraction = (1 + t/√(t²+b²))/2,
+             * t = signed distance to closest approach: → 1 far outside the
+             * field, ½ at perihelion, → 0 receding.  (The marched core gets
+             * this for free by integrating from the camera.) */
+            a *= 0.5 * (1.0 + tca / sqrt(tca * tca + b2));
+            /* Rotate rd by a toward the hole, in the (ray, hole) plane. */
+            vec3 ch = normalize(u_center);
+            vec3 tw = normalize(ch - rd * dot(ch, rd));
+            dir = normalize(rd * cos(a) + tw * sin(a));
+        }
+
+        /* Premultiplied composite: S is light-so-far, A its coverage.  The
+         * disk accumulated above feeds the same convention the blend state
+         * applies (src.rgb·src.a), so converting back at the end keeps the
+         * disk's look bit-identical when no background is sampled. */
+        vec3  S = disk_col * disk_a;
+        float A = disk_a;
+
+        float ws = 0.0;                        /* weight actually served by scene */
+        if (u_has_scene == 1) {
+            vec4 clip = u_vp * vec4(dir, 0.0); /* direction at infinity */
+            if (clip.w > 0.0) {
+                vec2 uv = clip.xy / clip.w * 0.5 + 0.5;
+                vec2 m  = min(uv, 1.0 - uv);   /* distance to nearest edge */
+                float edge = clamp(min(m.x, m.y) * 12.0, 0.0, 1.0);
+                if (edge > 0.0) {
+                    vec3 bg = texture(u_scene, uv).rgb;
+                    ws = edge;
+                    S += bg * ws * (1.0 - A);
+                    A += ws * (1.0 - A);
+                }
+            }
+        }
+
+        /* Procedural star fallback covers the weight the scene couldn't,
+         * faded in with deflection so it never paints noise over the real
+         * (barely warped) background far from the hole. */
+        float defl = acos(clamp(dot(dir, rd), -1.0, 1.0));
+        float st = stars(dir) * smoothstep(0.02, 0.30, defl) * (1.0 - ws);
+        S += vec3(st) * st * (1.0 - A);
+        A  = max(A, st);
+
+        col   = S / max(A, 1e-3);
+        alpha = A;
     }
 
     if (alpha < 0.004) discard;

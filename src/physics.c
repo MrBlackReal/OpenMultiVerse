@@ -89,6 +89,30 @@ int    g_paused    = 0;
 static double s_outer_dt_limit = LAWS_DEFAULT_OUTER_DT_DEFAULT;
 static double s_inner_dt_limit = LAWS_DEFAULT_INNER_DT_MAX;
 
+/* Rebuilding the timestep model is O(N) (several passes over all bodies) and
+ * used to run every frame — a dominant cost at galaxy scale.  It only needs to
+ * rerun when the body set changes (add/remove) or, as a safety net for slowly
+ * evolving eccentric orbits and any removal path that forgot to flag itself,
+ * on a slow throttle.  s_timestep_dirty forces an immediate rebuild (so a
+ * freshly promoted system integrates the same frame); the 0.5 s throttle
+ * matches the radiance-field rebuild cadence and bounds staleness. */
+static int    s_timestep_dirty    = 1;
+static double s_timestep_throttle = 0.0;
+#define TIMESTEP_REFRESH_SEC 0.5
+
+/* Wall-clock staleness alone is not enough: at high sim speeds 0.5 s of real
+ * time can span many orbital periods, letting perturbation ratios and
+ * post-encounter orbits drift arbitrarily far from the model.  So also track
+ * *simulated* time since the last refresh and refresh once it exceeds a
+ * quarter of the fastest orbital period — but never more often than
+ * TIMESTEP_REFRESH_MIN_SEC of wall time.  Both staleness triggers drive
+ * physics_refresh_active_timesteps() (active systems only, using the fastest
+ * period among *active* systems); only a body-set change (dirty) triggers the
+ * full O(N) membership+timestep rebuild — frozen systems cannot drift. */
+#define TIMESTEP_REFRESH_MIN_SEC 0.05
+static double s_sim_since_refresh = 0.0;   /* sim seconds since last refresh  */
+static double s_min_period        = 0.0;   /* fastest dyn_period; 0 = none    */
+
 /* Per-system / per-body tables.  Heap-allocated and grown to g_nbodies so the
  * engine is no longer hard-capped at MAX_BODIES bodies (which a galaxy-scale
  * universe far exceeds).  Capacities: all sized to s_cap >= g_nbodies; the
@@ -105,6 +129,7 @@ static double s_inner_dt_limit = LAWS_DEFAULT_INNER_DT_MAX;
 static int    *s_system_roots        = NULL;   /* [s_cap]   */
 static double *s_system_outer_dt     = NULL;   /* [s_cap]   */
 static double *s_system_inner_dt     = NULL;   /* [s_cap]   */
+static double *s_system_min_period   = NULL;   /* [s_cap] fastest member period */
 static int    *s_root_to_slot        = NULL;   /* [s_cap]   */
 static int    *s_body_system_slot    = NULL;   /* [s_cap]   */
 static int    *s_member_off          = NULL;   /* [s_cap+1] */
@@ -131,6 +156,7 @@ static void physics_ensure_capacity(int nbodies)
     s_system_roots        = realloc(s_system_roots,        (size_t)cap * sizeof(int));
     s_system_outer_dt     = realloc(s_system_outer_dt,     (size_t)cap * sizeof(double));
     s_system_inner_dt     = realloc(s_system_inner_dt,     (size_t)cap * sizeof(double));
+    s_system_min_period   = realloc(s_system_min_period,   (size_t)cap * sizeof(double));
     s_root_to_slot        = realloc(s_root_to_slot,        (size_t)cap * sizeof(int));
     s_body_system_slot    = realloc(s_body_system_slot,    (size_t)cap * sizeof(int));
     s_member_off          = realloc(s_member_off,    (size_t)(cap + 1) * sizeof(int));
@@ -139,6 +165,7 @@ static void physics_ensure_capacity(int nbodies)
     s_act_slots           = realloc(s_act_slots,           (size_t)cap * sizeof(int));
     s_act_d2              = realloc(s_act_d2,              (size_t)cap * sizeof(double));
     if (!s_system_roots || !s_system_outer_dt || !s_system_inner_dt ||
+        !s_system_min_period ||
         !s_root_to_slot || !s_body_system_slot || !s_member_off ||
         !s_member_pool || !s_system_member_count ||
         !s_act_slots || !s_act_d2) {
@@ -179,6 +206,7 @@ static int ensure_system_slot(int root)
     s_system_roots[s_nsystems] = root;
     s_system_outer_dt[s_nsystems] = OUTER_DT_DEFAULT;
     s_system_inner_dt[s_nsystems] = INNER_DT_MAX;
+    s_system_min_period[s_nsystems] = 0.0;
     s_system_member_count[s_nsystems] = 0;
     s_root_to_slot[root] = s_nsystems;
     return s_nsystems++;
@@ -200,9 +228,17 @@ static int timestep_anchor(int i)
     if (g_bodies[i].parent >= 0 && g_bodies[g_bodies[i].parent].alive)
         return g_bodies[i].parent;
 
+    /* With gravity isolation on (the default) an orphan can only be captured
+     * by its own system, so score just the CSR members instead of all bodies
+     * — the global scan made every orphan O(N) at galaxy scale. */
+    int slot = (s_cap > 0) ? s_body_system_slot[i] : -1;
+    int use_members = (g_laws.gravity_isolation != 0.0) && slot >= 0;
+    int count = use_members ? s_system_member_count[slot] : g_nbodies;
+
     int best = -1;
     double best_score = 1e300;
-    for (int j = 0; j < g_nbodies; j++) {
+    for (int k = 0; k < count; k++) {
+        int j = use_members ? sys_member(slot, k) : k;
         if (j == i || !g_bodies[j].alive) continue;
         if (g_bodies[j].mass <= 0.0) continue;
         double dx = g_bodies[j].pos[0] - g_bodies[i].pos[0];
@@ -270,18 +306,29 @@ static double satellite_perturbation_ratio(int i)
     parent_acc = G_CONST * g_bodies[parent].mass / pr2;
     if (parent_acc <= 0.0) return 0.0;
 
-    for (int j = 0; j < g_nbodies; j++) {
-        double dx, dy, dz, r2, acc;
-        if (j == i || j == parent || !g_bodies[j].alive) continue;
-        if (is_ancestor_of(i, j)) continue;   /* skip own children */
+    /* With gravity isolation on (the default) only same-system bodies perturb
+     * this moon — the force kernel skips cross-system pairs entirely — so
+     * scan just the CSR members.  The global scan made every moon O(N) per
+     * timestep rebuild at galaxy scale. */
+    {
+        int slot = (s_cap > 0) ? s_body_system_slot[i] : -1;
+        int use_members = (g_laws.gravity_isolation != 0.0) && slot >= 0;
+        int count = use_members ? s_system_member_count[slot] : g_nbodies;
 
-        dx = g_bodies[j].pos[0] - g_bodies[i].pos[0];
-        dy = g_bodies[j].pos[1] - g_bodies[i].pos[1];
-        dz = g_bodies[j].pos[2] - g_bodies[i].pos[2];
-        r2 = dx*dx + dy*dy + dz*dz + SOFTENING*SOFTENING;
-        if (r2 <= 0.0) continue;
-        acc = G_CONST * g_bodies[j].mass / r2;
-        if (acc > max_other_acc) max_other_acc = acc;
+        for (int k = 0; k < count; k++) {
+            double dx, dy, dz, r2, acc;
+            int j = use_members ? sys_member(slot, k) : k;
+            if (j == i || j == parent || !g_bodies[j].alive) continue;
+            if (is_ancestor_of(i, j)) continue;   /* skip own children */
+
+            dx = g_bodies[j].pos[0] - g_bodies[i].pos[0];
+            dy = g_bodies[j].pos[1] - g_bodies[i].pos[1];
+            dz = g_bodies[j].pos[2] - g_bodies[i].pos[2];
+            r2 = dx*dx + dy*dy + dz*dz + SOFTENING*SOFTENING;
+            if (r2 <= 0.0) continue;
+            acc = G_CONST * g_bodies[j].mass / r2;
+            if (acc > max_other_acc) max_other_acc = acc;
+        }
     }
 
     return max_other_acc / parent_acc;
@@ -319,10 +366,97 @@ static int has_fast_parent(int i) {
  *   3. For moons: compute perturbation ratio and tighten dt_outer if needed.
  *   4. Accumulate per-system and global dt limits.
  */
-void physics_refresh_timestep_model(void)
+/*
+ * refresh_system_timesteps — recompute per-body timesteps and the slot's
+ * dt/period limits for ONE system's members.  The full rebuild calls this for
+ * every slot; physics_refresh_active_timesteps() calls it for just the active
+ * systems (frozen systems never integrate, so their orbits — and therefore
+ * their stored timesteps — cannot drift).
+ */
+static void refresh_system_timesteps(int slot)
+{
+    double slot_outer = OUTER_DT_DEFAULT;
+    double slot_inner = INNER_DT_MAX;
+    double slot_min_T = 0.0;
+
+    if (slot < 0 || slot >= s_nsystems) return;
+
+    for (int mi = 0; mi < s_system_member_count[slot]; mi++) {
+        int i = sys_member(slot, mi);
+        Body *b = &g_bodies[i];
+        b->dyn_period = 0.0;
+        b->dyn_dt_outer = OUTER_DT_DEFAULT;
+        b->dyn_dt_inner = INNER_DT_MAX;
+        b->dyn_bucket = 0;
+
+        if (!b->alive || b->is_star) continue;
+
+        int anchor = timestep_anchor(i);
+        double T = estimate_period_about(i, anchor);
+        if (T <= 0.0) continue;
+        if (slot_min_T <= 0.0 || T < slot_min_T) slot_min_T = T;
+
+        double dt_outer = T / OUTER_PERIOD_DIVISOR;
+        double dt_inner = T / INNER_PERIOD_DIVISOR;
+        double perturb = 0.0;
+        if (dt_outer < OUTER_DT_MIN) dt_outer = OUTER_DT_MIN;
+        if (dt_outer > OUTER_DT_DEFAULT) dt_outer = OUTER_DT_DEFAULT;
+        if (dt_inner < INNER_DT_MIN) dt_inner = INNER_DT_MIN;
+        if (dt_inner > INNER_DT_MAX) dt_inner = INNER_DT_MAX;
+
+        if (is_satellite(i)) {
+            perturb = satellite_perturbation_ratio(i);
+
+            /* Tighten dt_outer toward dt_inner when third-body acceleration
+             * is a significant fraction of the parent acceleration.  Without
+             * this, the slow-force integrator becomes inaccurate enough that
+             * it can numerically eject weakly-bound outer moons. */
+            if (perturb > 0.20) dt_outer = fmin(dt_outer, dt_inner * 1.5);
+            else if (perturb > 0.10) dt_outer = fmin(dt_outer, dt_inner * 2.0);
+            else if (perturb > 0.05) dt_outer = fmin(dt_outer, dt_inner * 3.0);
+            else if (perturb > 0.02) dt_outer = fmin(dt_outer, dt_inner * 4.0);
+            else if (perturb > 0.01) dt_outer = fmin(dt_outer, dt_inner * 6.0);
+
+            if (dt_outer < OUTER_DT_MIN) dt_outer = OUTER_DT_MIN;
+        }
+
+        b->dyn_period = T;
+        b->dyn_dt_outer = dt_outer;
+        b->dyn_dt_inner = dt_inner;
+        /* Priority bucket for close-approach subdivision in main.c:
+         * higher bucket = shorter period = more frequent trail sampling needed */
+        if (dt_inner <= 10.0 * 60.0) b->dyn_bucket = 3;
+        else if (dt_inner <= 60.0 * 60.0) b->dyn_bucket = 2;
+        else if (dt_inner <= 6.0 * 60.0 * 60.0) b->dyn_bucket = 1;
+
+        if (dt_outer < slot_outer) slot_outer = dt_outer;
+        if (is_satellite(i) && dt_inner < slot_inner) slot_inner = dt_inner;
+    }
+
+    s_system_outer_dt[slot]   = slot_outer;
+    s_system_inner_dt[slot]   = slot_inner;
+    s_system_min_period[slot] = slot_min_T;
+}
+
+/* Fold every slot's limits into the global accessors + the staleness period. */
+static void recompute_global_limits(void)
 {
     double best_outer = OUTER_DT_DEFAULT;
     double best_inner = INNER_DT_MAX;
+    double min_T      = 0.0;
+    for (int s = 0; s < s_nsystems; s++) {
+        if (s_system_outer_dt[s] < best_outer) best_outer = s_system_outer_dt[s];
+        if (s_system_inner_dt[s] < best_inner) best_inner = s_system_inner_dt[s];
+        double mt = s_system_min_period[s];
+        if (mt > 0.0 && (min_T <= 0.0 || mt < min_T)) min_T = mt;
+    }
+    s_outer_dt_limit = best_outer;
+    s_inner_dt_limit = best_inner;
+    s_min_period     = min_T;
+}
+
+void physics_refresh_timestep_model(void)
+{
     s_nsystems = 0;
 
     physics_ensure_capacity(g_nbodies > 0 ? g_nbodies : 1);
@@ -364,68 +498,80 @@ void physics_refresh_timestep_model(void)
         s_member_pool[s_member_off[slot] + s_system_member_count[slot]++] = i;
     }
 
-    /* Compute per-body timesteps */
+    /* Reset dyn state for every body — including slotless ones (dead, or no
+     * star root), which the per-slot pass below never visits. */
     for (int i = 0; i < g_nbodies; i++) {
-        Body *b = &g_bodies[i];
-        b->dyn_period = 0.0;
-        b->dyn_dt_outer = OUTER_DT_DEFAULT;
-        b->dyn_dt_inner = INNER_DT_MAX;
-        b->dyn_bucket = 0;
-
-        if (!b->alive || b->is_star) continue;
-
-        int anchor = timestep_anchor(i);
-        double T = estimate_period_about(i, anchor);
-        if (T <= 0.0) continue;
-
-        double dt_outer = T / OUTER_PERIOD_DIVISOR;
-        double dt_inner = T / INNER_PERIOD_DIVISOR;
-        double perturb = 0.0;
-        if (dt_outer < OUTER_DT_MIN) dt_outer = OUTER_DT_MIN;
-        if (dt_outer > OUTER_DT_DEFAULT) dt_outer = OUTER_DT_DEFAULT;
-        if (dt_inner < INNER_DT_MIN) dt_inner = INNER_DT_MIN;
-        if (dt_inner > INNER_DT_MAX) dt_inner = INNER_DT_MAX;
-
-        if (is_satellite(i)) {
-            perturb = satellite_perturbation_ratio(i);
-
-            /* Tighten dt_outer toward dt_inner when third-body acceleration
-             * is a significant fraction of the parent acceleration.  Without
-             * this, the slow-force integrator becomes inaccurate enough that
-             * it can numerically eject weakly-bound outer moons. */
-            if (perturb > 0.20) dt_outer = fmin(dt_outer, dt_inner * 1.5);
-            else if (perturb > 0.10) dt_outer = fmin(dt_outer, dt_inner * 2.0);
-            else if (perturb > 0.05) dt_outer = fmin(dt_outer, dt_inner * 3.0);
-            else if (perturb > 0.02) dt_outer = fmin(dt_outer, dt_inner * 4.0);
-            else if (perturb > 0.01) dt_outer = fmin(dt_outer, dt_inner * 6.0);
-
-            if (dt_outer < OUTER_DT_MIN) dt_outer = OUTER_DT_MIN;
-        }
-
-        b->dyn_period = T;
-        b->dyn_dt_outer = dt_outer;
-        b->dyn_dt_inner = dt_inner;
-        /* Priority bucket for close-approach subdivision in main.c:
-         * higher bucket = shorter period = more frequent trail sampling needed */
-        if (dt_inner <= 10.0 * 60.0) b->dyn_bucket = 3;
-        else if (dt_inner <= 60.0 * 60.0) b->dyn_bucket = 2;
-        else if (dt_inner <= 6.0 * 60.0 * 60.0) b->dyn_bucket = 1;
-
-        /* Accumulate per-system and global limits */
-        {
-            int slot = s_body_system_slot[i];
-            if (slot >= 0) {
-                if (dt_outer < s_system_outer_dt[slot]) s_system_outer_dt[slot] = dt_outer;
-                if (is_satellite(i) && dt_inner < s_system_inner_dt[slot]) s_system_inner_dt[slot] = dt_inner;
-            }
-        }
-
-        if (dt_outer < best_outer) best_outer = dt_outer;
-        if (is_satellite(i) && dt_inner < best_inner) best_inner = dt_inner;
+        g_bodies[i].dyn_period = 0.0;
+        g_bodies[i].dyn_dt_outer = OUTER_DT_DEFAULT;
+        g_bodies[i].dyn_dt_inner = INNER_DT_MAX;
+        g_bodies[i].dyn_bucket = 0;
     }
 
-    s_outer_dt_limit = best_outer;
-    s_inner_dt_limit = best_inner;
+    /* Compute per-body timesteps, slot by slot */
+    for (int s = 0; s < s_nsystems; s++)
+        refresh_system_timesteps(s);
+    recompute_global_limits();
+
+    s_timestep_dirty     = 0;
+    s_timestep_throttle  = 0.0;
+    s_sim_since_refresh  = 0.0;
+}
+
+/* Flag the timestep model stale so the next frame rebuilds it immediately.
+ * Called whenever the body set changes (universe_add_body and removal paths). */
+void physics_mark_timestep_dirty(void)
+{
+    s_timestep_dirty = 1;
+}
+
+/* Per-frame entry point: full rebuild (membership + every slot's timesteps)
+ * only when the body set changed (dirty).  Staleness-driven refreshes are
+ * handled by physics_refresh_active_timesteps() below — frozen systems never
+ * integrate, so their orbits (and therefore their stored timesteps) cannot
+ * drift, and the O(N) full rebuild does not belong on a periodic trigger.
+ * At 16k catalog bodies the old behaviour rebuilt everything every frame:
+ * ultra-short-period catalog planets pushed the ¼-period staleness bound
+ * below the frame time. */
+void physics_refresh_timestep_model_if_needed(double real_dt)
+{
+    s_timestep_throttle += real_dt;
+    if (s_timestep_dirty)
+        physics_refresh_timestep_model();
+}
+
+/*
+ * physics_refresh_active_timesteps — throttled per-body timestep refresh for
+ * just the ACTIVE systems (slot indices in `slots`).  Refreshes when the wall
+ * throttle elapsed, or when the *simulation* advanced ≥ ¼ of the fastest
+ * orbital period among the active systems (floored at
+ * TIMESTEP_REFRESH_MIN_SEC of wall time so short-period systems cannot drag
+ * it back to every frame).  Membership (CSR) is not touched — that only
+ * changes when the body set does, which flags dirty. */
+void physics_refresh_active_timesteps(const int *slots, int n, double real_dt)
+{
+    (void)real_dt;   /* throttle accumulated in _if_needed each frame */
+
+    double min_T = 0.0;
+    for (int k = 0; k < n; k++) {
+        int s = slots[k];
+        if (s < 0 || s >= s_nsystems) continue;
+        double mt = s_system_min_period[s];
+        if (mt > 0.0 && (min_T <= 0.0 || mt < min_T)) min_T = mt;
+    }
+
+    int sim_stale = min_T > 0.0 &&
+                    s_sim_since_refresh >= 0.25 * min_T &&
+                    s_timestep_throttle >= TIMESTEP_REFRESH_MIN_SEC;
+    if (!sim_stale && s_timestep_throttle < TIMESTEP_REFRESH_SEC)
+        return;
+
+    for (int k = 0; k < n; k++)
+        if (slots[k] >= 0 && slots[k] < s_nsystems)
+            refresh_system_timesteps(slots[k]);
+    recompute_global_limits();
+
+    s_timestep_throttle = 0.0;
+    s_sim_since_refresh = 0.0;
 }
 
 /* Accessor functions for the main loop to query computed timestep limits */
@@ -513,25 +659,51 @@ double physics_system_inner_dt_limit(int idx)
     return s_system_inner_dt[idx];
 }
 
-void physics_advance_time(double dt) { g_sim_time += dt; }
+void physics_advance_time(double dt)
+{
+    g_sim_time          += dt;
+    s_sim_since_refresh += dt;   /* sim-time staleness of the timestep model */
+}
+
+/* Remove body i if its position/velocity went non-finite. Returns 1 if removed. */
+static int sanitize_body(int i)
+{
+    Body *b = &g_bodies[i];
+    if (!b->alive) return 0;
+    for (int k = 0; k < 3; k++) {
+        if (!isfinite(b->pos[k]) || !isfinite(b->vel[k])) {
+            b->alive = 0;
+            b->mass = 0.0;
+            b->trail_emitting = 0;
+            return 1;
+        }
+    }
+    return 0;
+}
 
 int physics_sanitize_state(void)
 {
     int removed = 0;
-    for (int i = 0; i < g_nbodies; i++) {
-        Body *b = &g_bodies[i];
-        int bad = 0;
-        if (!b->alive) continue;
-        for (int k = 0; k < 3; k++) {
-            if (!isfinite(b->pos[k]) || !isfinite(b->vel[k])) { bad = 1; break; }
-        }
-        if (bad) {
-            b->alive = 0;
-            b->mass = 0.0;
-            b->trail_emitting = 0;
-            removed++;
-        }
-    }
+    for (int i = 0; i < g_nbodies; i++)
+        removed += sanitize_body(i);
+    if (removed) s_timestep_dirty = 1;   /* body set changed — rebuild next frame */
+    return removed;
+}
+
+/* System-scoped variant: check only the members of root's star system.
+ * Non-finite state comes from integration blowups, and only active systems
+ * integrate — so the per-frame NaN sweep only needs the active members
+ * (main.c keeps a slow global sweep as a safety net for unaudited paths).
+ * root < 0 or an unbuilt CSR falls back to the global scan. */
+int physics_sanitize_system(int root)
+{
+    int slot = (root >= 0 && root < s_cap) ? s_root_to_slot[root] : -1;
+    if (slot < 0) return physics_sanitize_state();
+
+    int removed = 0;
+    for (int mi = 0; mi < s_system_member_count[slot]; mi++)
+        removed += sanitize_body(sys_member(slot, mi));
+    if (removed) s_timestep_dirty = 1;   /* body set changed — rebuild next frame */
     return removed;
 }
 
@@ -1364,10 +1536,12 @@ static void trail_rebuild_segment(Body *b,
 /* ── collision rollback support ─────────────────────────────────────────── */
 
 /*
- * trails_begin_frame_snapshot — save full trail state for every body at the
- * start of a physics frame.
+ * trails_begin_frame_snapshot — save full trail state at the start of a
+ * physics frame.
  *
- * Called once per frame before physics integration begins.  The snapshot
+ * The main loop calls the _system variant per active system just before that
+ * system integrates (frozen systems never move, so they never need a fresh
+ * snapshot); the global form remains for the root<0 fallback.  The snapshot
  * captures every field needed to completely undo any trail emission that
  * happens during the frame: buffer head/count, accumulated partial segment
  * length, total physical trail length, and the previous position/velocity
@@ -1376,27 +1550,46 @@ static void trail_rebuild_segment(Body *b,
  * This data is used by trails_cut_body_at_time() to restore a body's trail
  * to its pre-frame state when a collision is detected mid-frame.
  */
+static void snapshot_body_trail(Body *b)
+{
+    b->trail_frame_accum = b->trail_accum;
+    b->trail_frame_head = b->trail_head;
+    b->trail_frame_count = b->trail_count;
+    b->trail_frame_total_len = b->trail_total_len;
+    b->trail_frame_pos[0] = b->pos[0];
+    b->trail_frame_pos[1] = b->pos[1];
+    b->trail_frame_pos[2] = b->pos[2];
+    b->trail_frame_vel[0] = b->vel[0];
+    b->trail_frame_vel[1] = b->vel[1];
+    b->trail_frame_vel[2] = b->vel[2];
+    b->trail_frame_prev_pos[0] = b->trail_prev_pos[0];
+    b->trail_frame_prev_pos[1] = b->trail_prev_pos[1];
+    b->trail_frame_prev_pos[2] = b->trail_prev_pos[2];
+    b->trail_frame_prev_vel[0] = b->trail_prev_vel[0];
+    b->trail_frame_prev_vel[1] = b->trail_prev_vel[1];
+    b->trail_frame_prev_vel[2] = b->trail_prev_vel[2];
+}
+
 void trails_begin_frame_snapshot(void)
 {
-    for (int i = 0; i < g_nbodies; i++) {
-        Body *b = &g_bodies[i];
-        b->trail_frame_accum = b->trail_accum;
-        b->trail_frame_head = b->trail_head;
-        b->trail_frame_count = b->trail_count;
-        b->trail_frame_total_len = b->trail_total_len;
-        b->trail_frame_pos[0] = b->pos[0];
-        b->trail_frame_pos[1] = b->pos[1];
-        b->trail_frame_pos[2] = b->pos[2];
-        b->trail_frame_vel[0] = b->vel[0];
-        b->trail_frame_vel[1] = b->vel[1];
-        b->trail_frame_vel[2] = b->vel[2];
-        b->trail_frame_prev_pos[0] = b->trail_prev_pos[0];
-        b->trail_frame_prev_pos[1] = b->trail_prev_pos[1];
-        b->trail_frame_prev_pos[2] = b->trail_prev_pos[2];
-        b->trail_frame_prev_vel[0] = b->trail_prev_vel[0];
-        b->trail_frame_prev_vel[1] = b->trail_prev_vel[1];
-        b->trail_frame_prev_vel[2] = b->trail_prev_vel[2];
+    for (int i = 0; i < g_nbodies; i++)
+        snapshot_body_trail(&g_bodies[i]);
+}
+
+/* System-scoped variant: snapshot only the members of root's star system.
+ * Only integrated bodies can move within a frame, so frozen (out-of-active-
+ * region) systems never need their ~200-byte trail snapshot rewritten — at
+ * galaxy scale that turns an every-frame O(16k) write sweep into O(active).
+ * root < 0 or an unbuilt CSR falls back to the global snapshot. */
+void trails_begin_frame_snapshot_system(int root)
+{
+    int slot = (root >= 0 && root < s_cap) ? s_root_to_slot[root] : -1;
+    if (slot < 0) {
+        trails_begin_frame_snapshot();
+        return;
     }
+    for (int mi = 0; mi < s_system_member_count[slot]; mi++)
+        snapshot_body_trail(&g_bodies[sys_member(slot, mi)]);
 }
 
 /*

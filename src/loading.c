@@ -142,8 +142,10 @@ static void step_anim(void) {
     if (dt > 0.1) dt = 0.1;          /* don't snap after a long blocking phase */
 
     /* Fade. */
-    if (s_fade < s_fade_target)      s_fade = fmin(s_fade_target, s_fade + dt / FADE_IN_DUR);
-    else if (s_fade > s_fade_target) s_fade = fmax(s_fade_target, s_fade - dt / FADE_OUT_DUR);
+    if (s_fade < s_fade_target)
+        s_fade = fmin(s_fade_target, s_fade + dt / FADE_IN_DUR);
+    else if (s_fade > s_fade_target)
+        s_fade = fmax(s_fade_target, s_fade - dt / FADE_OUT_DUR);
 
     /* Progress easing (exponential approach). */
     double k = 1.0 - exp(-dt * PROG_EASE);
@@ -271,10 +273,12 @@ void loading_init(SDL_Window *win) {
 void loading_reload_fonts(void) {
     if (s_pct_font && s_pct_font != s_font) TTF_CloseFont(s_pct_font);
     if (s_font) TTF_CloseFont(s_font);
+    
     s_font = s_pct_font = NULL;
 
     s_font     = ui_theme_open_font(STATUS_FONT);
     s_pct_font = ui_theme_open_font(PCT_FONT);
+
     if (!s_pct_font) s_pct_font = s_font;
     if (!s_font) fprintf(stderr, "[Loading] no font\n");
 
