@@ -1069,6 +1069,98 @@ static void save_screenshot_ppm(const char *path) {
     free(px);
 }
 
+/* ── per-frame active-system integration ──────────────────────────────────────
+ *
+ * The RESPA integration of one star system touches only that system's own
+ * members (under gravity_isolation), exactly like the OpenMP-parallel warm-up
+ * loop — so independent systems can integrate concurrently.  The obstacle is
+ * the collision machinery interleaved in the outer-step loop:
+ * collision_snapshot_positions() is a GLOBAL write and collision_step_system()
+ * can add/remove bodies, neither of which is safe under threads.
+ *
+ * We therefore split the active set: a system is "hot" if the read-only
+ * encounter predicate says a collision / close approach is possible this frame
+ * (these are inherently the low-index <MAX_BODIES systems the collision code can
+ * even touch).  Cold systems integrate in parallel; hot systems run serially
+ * with the exact original collision semantics.  When gravity_isolation is off
+ * (deliberately-coupled clusters) cross-system force reads would race concurrent
+ * position writes, so everything falls back to serial.
+ */
+
+/* Compute one system's RESPA step schedule for a frame of `sys_dt` seconds. */
+static void system_step_schedule(int s, double sys_dt, int *outer_steps,
+                                 double *dt_outer, int *n_inner, double *dt_inner)
+{
+    int    root         = physics_system_root(s);
+    double dt_outer_max = physics_system_outer_dt_limit(s);
+    double dt_inner_max = physics_system_inner_dt_limit(s);
+
+    int    osteps = (int)(sys_dt / dt_outer_max) + 1;
+    double douter = sys_dt / osteps;
+    /* Subdivide further through a detected close approach. */
+    int    ca = collision_system_close_approach_subdivide(root, douter);
+    osteps *= ca;
+    douter /= ca;
+    int    ninner = (int)(douter / dt_inner_max) + 1;
+
+    *outer_steps = osteps;
+    *dt_outer    = douter;
+    *n_inner     = ninner;
+    *dt_inner    = douter / ninner;
+}
+
+/* Cold path: independent integration only — safe to run from a worker thread.
+ * No encounter branch fires (the system was classified as collision-free). */
+static void integrate_system_cold(int s, double sys_dt)
+{
+    int root = physics_system_root(s);
+    int outer_steps, n_inner;
+    double dt_outer, dt_inner;
+
+    trails_begin_frame_snapshot_system(root);
+    system_step_schedule(s, sys_dt, &outer_steps, &dt_outer, &n_inner, &dt_inner);
+
+    for (int o = 0; o < outer_steps; o++) {
+        physics_respa_begin_system(root, dt_outer);
+        for (int i = 0; i < n_inner; i++)
+            physics_respa_inner_system(root, dt_inner);
+        physics_respa_end_system(root, dt_outer);
+        rings_step_system(root, dt_outer);
+        trails_tick_system(root, dt_outer);
+    }
+}
+
+/* Hot path: the exact original per-system loop, including the per-outer-step
+ * encounter re-snapshot and collision resolution.  Runs serially. */
+static void integrate_system_hot(int s, double sys_dt)
+{
+    int root = physics_system_root(s);
+    int outer_steps, n_inner;
+    double dt_outer, dt_inner;
+
+    trails_begin_frame_snapshot_system(root);
+    system_step_schedule(s, sys_dt, &outer_steps, &dt_outer, &n_inner, &dt_inner);
+
+    for (int o = 0; o < outer_steps; o++) {
+        /* Re-snapshot at encounter onset for sub-frame rollback.  Scoped to
+         * this system's trails; collision_snapshot_positions stays global
+         * (bounded to MAX_BODIES) — safe because hot systems run serially. */
+        int local_encounter = collision_system_maybe_has_encounter(root, dt_outer);
+        if (local_encounter) {
+            trails_begin_frame_snapshot_system(root);
+            collision_snapshot_positions();
+        }
+        physics_respa_begin_system(root, dt_outer);
+        for (int i = 0; i < n_inner; i++)
+            physics_respa_inner_system(root, dt_inner);
+        physics_respa_end_system(root, dt_outer);
+        rings_step_system(root, dt_outer);
+        trails_tick_system(root, dt_outer);
+        if (local_encounter)
+            collision_step_system(root, dt_outer);
+    }
+}
+
 int main(int argc, char **argv) {
     /* ---- headless / screenshot CLI ----------------------------------------
      * --headless           run with SDL's offscreen (EGL surfaceless) driver,
@@ -1334,47 +1426,60 @@ int main(int argc, char **argv) {
                  * global: it is bounded to MAX_BODIES and collision_step's
                  * broad pass reads it after this loop. */
                 collision_snapshot_positions();
+
+                /* Parallelism is sound only when systems are gravitationally
+                 * isolated (the default); with coupling on, one system's slow
+                 * force reads another's positions while they are being written. */
+                int parallel_ok = (g_laws.gravity_isolation != 0.0);
+
+                /* Classify each active system hot (collision/close-approach
+                 * possible → serial) or cold (independent → parallel).  Both
+                 * predicates are read-only, so this pass is thread-safe and
+                 * cheap; it uses the full-frame dt (>= any sub-step) so a cold
+                 * verdict is conservative — no encounter can appear mid-frame. */
+                static unsigned char *s_hot = NULL;
+                static int s_hot_cap = 0;
+                if (n_active > s_hot_cap) {
+                    int cap = s_hot_cap ? s_hot_cap : 64;
+                    while (cap < n_active) cap *= 2;
+                    s_hot = realloc(s_hot, (size_t)cap);
+                    if (!s_hot) { fprintf(stderr, "[main] hot-flag alloc failed\n"); exit(1); }
+                    s_hot_cap = cap;
+                }
+                int n_cold = 0;
                 for (int a = 0; a < n_active; a++) {
                     int s = s_active_sys[a];
-                    int root = physics_system_root(s);
-                    trails_begin_frame_snapshot_system(root);
-                    double dt_outer_max = physics_system_outer_dt_limit(s);
-                    double dt_inner_max = physics_system_inner_dt_limit(s);
-                    double sys_dt = effective_sim_dt;
-
-                    int outer_steps = (int)(sys_dt / dt_outer_max) + 1;
-                    double dt_outer = sys_dt / outer_steps;
-
-                    /* Subdivide further if a close approach is detected */
-                    int ca_factor = collision_system_close_approach_subdivide(root, dt_outer);
-                    outer_steps *= ca_factor;
-                    dt_outer    /= ca_factor;
-
-                    int n_inner = (int)(dt_outer / dt_inner_max) + 1;
-                    double dt_inner = dt_outer / n_inner;
-
-                    for (int o = 0; o < outer_steps; o++) {
-                        /* Re-snapshot at encounter onset for sub-frame rollback.
-                         * Scoped to this system: only its bodies are stepping
-                         * right now, and re-snapshotting already-integrated
-                         * systems mid-frame would overwrite their rollback
-                         * state with post-step positions. */
-                        int local_encounter = collision_system_maybe_has_encounter(root, dt_outer);
-                        if (local_encounter) {
-                            trails_begin_frame_snapshot_system(root);
-                            collision_snapshot_positions();
-                        }
-                        physics_respa_begin_system(root, dt_outer);
-                        for (int i = 0; i < n_inner; i++) {
-                            physics_respa_inner_system(root, dt_inner);
-                        }
-                        physics_respa_end_system(root, dt_outer);
-                        rings_step_system(root, dt_outer);
-                        trails_tick_system(root, dt_outer);
-                        if (local_encounter) {
-                            collision_step_system(root, dt_outer);
-                        }
+                    int hot = !parallel_ok;
+                    if (parallel_ok) {
+                        int    root = physics_system_root(s);
+                        double dt_outer_max = physics_system_outer_dt_limit(s);
+                        int    osteps = (int)(effective_sim_dt / dt_outer_max) + 1;
+                        double first_outer = effective_sim_dt / osteps;
+                        if (collision_system_maybe_has_encounter(root, effective_sim_dt) ||
+                            collision_system_close_approach_subdivide(root, first_outer) > 1)
+                            hot = 1;
                     }
+                    s_hot[a] = (unsigned char)hot;
+                    n_cold += !hot;
+                }
+
+                /* Cold systems integrate concurrently (mirrors the warm-up loop).
+                 * Below the threshold the per-frame fork/join cost outweighs the
+                 * gain, so OpenMP's if-clause runs the loop serially in-thread. */
+                #define PARALLEL_MIN_COLD_SYSTEMS 8
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic) if(n_cold >= PARALLEL_MIN_COLD_SYSTEMS)
+#endif
+                for (int a = 0; a < n_active; a++) {
+                    if (s_hot[a]) continue;
+                    integrate_system_cold(s_active_sys[a], effective_sim_dt);
+                }
+
+                /* Hot systems (and the whole coupled-cluster case) run serially
+                 * with the original collision-rollback semantics preserved. */
+                for (int a = 0; a < n_active; a++) {
+                    if (!s_hot[a]) continue;
+                    integrate_system_hot(s_active_sys[a], effective_sim_dt);
                 }
                 physics_advance_time(effective_sim_dt);
                 supernova_step(effective_sim_dt);
