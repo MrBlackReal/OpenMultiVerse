@@ -28,6 +28,7 @@
 #define DEFAULT_WIN_H   720
 extern int g_win_w;
 extern int g_win_h;
+extern int g_hud_hidden;   /* 1 = suppress the 2D HUD overlay + body labels */
 #define WIN_W  g_win_w
 #define WIN_H  g_win_h
 /*

@@ -1,176 +1,83 @@
-![image](https://github.com/user-attachments/assets/2878c365-11df-4f4a-af8e-3a141d69ae85)
+<p align="center">
+  <img src="docs/img/black_hole.png" width="100%" alt="A raymarched supermassive black hole in OpenMultiVerse — accretion disk, event-horizon shadow, gravitational lensing, and stars on relativistic orbits"/>
+</p>
 
-# OpenMultiVerse - simulate universes with different laws of physics
+# OpenMultiVerse
 
-**OpenMultiVerse** is a fork of [ortanaV2/OpenVerse](https://github.com/ortanaV2/OpenVerse)
-that turns the single open-world universe simulator into a **multiverse**: many
-universes, each with its own physical laws, plus tools to build them from real
-astronomical data.
+**A real-time, scale-continuous universe simulator with configurable laws of physics.**
 
-The original goal stands — simulate as much of the universe as possible (multiple
-star systems, planets, moons, asteroid belts, rings) under real N-body gravity.
-OpenMultiVerse adds the ability to change the gravity itself.
+OpenMultiVerse simulates the universe from a planet's surface out past the Milky Way — under genuine N-body gravity, populated from real astronomical catalogs, with the laws of physics themselves left as parameters you can rewrite. Fly from Saturn's rings to the galactic disc without a loading screen or a "mode switch," then change the gravitational constant and watch the orbits unravel.
 
-Not a screensaver. Not a game. A sandbox for curiosity.
+It's written in C99 + OpenGL 3.3. It began as a fork of [ortanaV2/OpenVerse](https://github.com/ortanaV2/OpenVerse) and has grown into its own thing: a *scale-continuous* renderer (planet → system → galaxy → Local Group with no hard boundaries), a stellar lifecycle that ends in white dwarfs, neutron stars and black holes, quasars and blazars with relativistic jets, and a **multiverse** of tunable physical laws.
 
-### What's new vs. OpenVerse
-
-- **Data-driven physical laws.** Every universe has a `"laws"` block — gravitational
-  constant `G`, softening, and time scale are tunable per universe.
-- **Custom force laws.** Non-inverse-square gravity via a `force_exp` exponent
-  (inverse-cube and friends → precessing, plunging, escaping orbits).
-- **Exotic terms.** A cosmological repulsion term (`lambda`, a dark-energy analogue)
-  and post-Newtonian perihelion precession (`pn_factor`).
-- **Multiverse menu (Dear ImGui).** Press **U** to pick between universes and drag
-  live sliders for the active laws. Built on cimgui (optional `IMGUI=1` build).
-- **Real astronomical data import.** Build universes from the NASA Exoplanet
-  Archive, JPL Horizons state vectors, or Gaia/Hipparcos star catalogs — both via
-  the `catalogtool` CLI and in-app import buttons.
-- **Save / load.** Snapshot the live universe (laws + every body's exact state) to
-  a file and reload it precisely, from the same menu.
-
-See [Multiverse](#multiverse--different-laws-of-physics) and
-[Real astronomical data](#real-astronomical-data) below for details.
+> Not a screensaver. Not a game. A sandbox for curiosity.
 
 ---
 
-## Showcase
+## Gallery
 
 <table>
   <tr>
-    <td><img src="https://github.com/user-attachments/assets/68655bf4-ddfc-48e9-80a6-be727c7c4ed4" alt="Planets"/><br/><sub><b>Discover planets and other celestial bodies</b></sub></td>
-    <td><img src="https://github.com/user-attachments/assets/2d2e0cfc-ca05-46a5-9c1c-76d5b31fec02" alt="Solar system"/><br/><sub><b>Simulate entire solar systems</b></sub></td>
+    <td width="50%"><img src="docs/img/galaxy.png" alt="The Milky Way seen face-on from ~100,000 light-years out, with the Magellanic Clouds below"/><br/><sub><b>The Milky Way from outside</b> — real Gaia stars + a volumetric disc, with satellite galaxies</sub></td>
+    <td width="50%"><img src="docs/img/saturn.png" alt="Saturn, sunlit, with its open ring system"/><br/><sub><b>Saturn</b> — a sunlit banded gas giant and its 25,000-particle rings</sub></td>
   </tr>
   <tr>
-    <td><img src="https://github.com/user-attachments/assets/3c1df437-4e81-4a35-b3c6-45ea37121afd" alt="Collision"/><br/><sub><b>Collision of bodies using orbital mechanics</b></sub></td>
-    <td><img src="https://github.com/user-attachments/assets/7340ad70-9054-48a4-8943-88ab3a7d8392" alt="Build mode"/><br/><sub><b>Build your own systems using build mode</b></sub></td>
+    <td><img src="docs/img/jupiter.png" alt="Jupiter half-lit, showing a sharp day/night terminator over its cloud bands"/><br/><sub><b>Jupiter</b> — a sharp terminator across the cloud belts, Galilean moons orbiting</sub></td>
+    <td><img src="docs/img/earth.png" alt="Earth as a blue marble: oceans, clouds, green continents, a blue atmospheric limb and a night-side aurora"/><br/><sub><b>Earth</b> — oceans, clouds, atmospheric scattering, and a night-side aurora</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/img/quasar.png" alt="A quasar seen at a 3/4 angle: a dusty torus donut around a bright accretion disk, with a relativistic jet rising from it"/><br/><sub><b>Quasar</b> — a feeding black hole inside its dusty torus, jet blasting out along the axis</sub></td>
+    <td><img src="docs/img/star.png" alt="A sun-like star with a lens flare and its planets' orbit trails, the Milky Way band behind"/><br/><sub><b>A star and its system</b> — orbit trails and a lens flare against the Milky Way band</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/img/black_hole.png" alt="A supermassive black hole with its accretion disk lensed over the top and bottom"/><br/><sub><b>Black hole</b> — accretion disk warped by gravity into a halo over the event horizon</sub></td>
+    <td><img src="docs/img/bh_zoo.png" alt="A bare black hole gravitationally lensing the background star field into an Einstein ring"/><br/><sub><b>Gravitational lensing</b> — a bare horizon bending the star field behind it</sub></td>
   </tr>
 </table>
 
 ---
 
-## Installation
+## What makes it different
 
-> No build tools required — just download and run.
-
-> **Note:** the pre-built downloads below are upstream **OpenVerse** binaries and
-> do **not** include the OpenMultiVerse features (custom laws, multiverse menu,
-> real-data import, save/load). For those, [build from source](#building-from-source)
-> — the multiverse menu needs the `IMGUI=1` build.
-
-### Download Links
-[Download latest Windows release](https://github.com/ortanaV2/OpenVerse/releases/download/v1.0.3/verse-windows-x64-v1.0.3.zip)
-
-[Download latest Linux release](https://github.com/ortanaV2/OpenVerse/releases/download/v1.0.3/verse-linux-x64-v1.0.3.tar.gz)
-
-### Alternative Installations
-<details>
-<summary><strong>Step 1 — Go to the Releases page</strong></summary>
-
-Visit [github.com/ortanaV2/OpenVerse/releases](https://github.com/ortanaV2/OpenVerse/releases)
-
-</details>
-
-<details>
-<summary><strong>Step 2 — Select the most recent version</strong></summary>
-
-<img width="1031" height="636" alt="openverse_installation_step_1" src="https://github.com/user-attachments/assets/e5ff55d2-dc9c-4cf6-8804-9fc2ee798d51" />
-
-</details>
-
-<details>
-<summary><strong>Step 3 — Download the package for your system</strong></summary>
-
-Click the `.zip` for Windows or the `.tar.gz` for Linux under the **Assets** section.
-
-<img width="1082" height="233" alt="openverse_installation_step_2" src="https://github.com/user-attachments/assets/80cbce65-4cad-4855-9c93-0a7141e701b4" />
-
-</details>
-
-<details>
-<summary><strong>Step 4 — Unzip the downloaded archive</strong></summary>
-
-Extract the folder to any location on your machine.
-
-<img width="776" height="709" alt="openverse_installation_step_3" src="https://github.com/user-attachments/assets/c3f7b65d-6cf4-4b4c-85cc-8aa1adbe6d9e" />
-
-</details>
-
-<details>
-<summary><strong>Step 5 — Run the executable</strong></summary>
-
-- **Windows:** Double-click `verse.exe`
-- **Linux:** Open a terminal in the folder and run `./verse`
-
-<img width="797" height="158" alt="image" src="https://github.com/user-attachments/assets/62e1ebfb-949a-420c-b9e3-0928380c2c59" />
-
-</details>
+- **One continuous world.** No "planet view" vs. "galaxy view." A single renderer spans ~30 orders of magnitude in distance; hold <kbd>W</kbd> and zoom from a moon's surface out past the Milky Way.
+- **Real scale, real dynamics.** Every distance, mass, and orbital period is physically accurate, and every body moves under real N-body gravity — no baked animations. Disrupt the Solar System and watch it react.
+- **Configurable laws of physics.** Each universe carries a `"laws"` block — change `G`, the force-law exponent, add a cosmological repulsion or post-Newtonian precession — and the dynamics change with it.
+- **Built from real catalogs.** Import the NASA Exoplanet Archive, JPL Horizons state vectors, and Gaia/Hipparcos stars. The bundled "Known Universe" merges them into a single **~279,000-body** universe.
+- **A universe that evolves.** Stars age off the main sequence into giants, white dwarfs, neutron stars and black holes; massive stars go supernova; black holes accrete, light up as quasars, and tidally shred stars that wander too close.
+- **Live editing.** A Dear ImGui menu (<kbd>U</kbd>) to switch universes, drag the law sliders in real time, import real data, and snapshot/restore the exact state of a running universe.
 
 ---
 
-## Controls
+## How it works
 
-| Key / Input | Action |
-|---|---|
-| Left-click | Enter free-look (captures mouse) |
-| Escape | Open system menu / exit build mode / exit inspection mode |
-| W / S | Move forward / backward |
-| A / D | Strafe left / right |
-| Q / E | Move down / up |
-| Mouse | Look around |
-| Scroll | Adjust camera speed |
-| T | Toggle warp mode |
-| B | Toggle build mode |
-| Tab + Scroll | Cycle build presets (in build mode) |
-| I | Toggle inspection mode |
-| U | Toggle the multiverse menu (requires the ImGui build — see below) |
-| F11 / Alt+Enter | Toggle fullscreen |
-| `+` / `-` | Simulation speed up / down |
-| Space | Pause / resume |
-| R | Reset camera near the Sun |
+The interesting engineering problem is that space is *mostly empty and unimaginably large*, yet we want it to feel continuous and run in real time. Here's how OpenMultiVerse pulls that off.
 
-**Simulation speeds:** `0 → 0.1 → 0.25 → 0.5 → 1 → 2 → 5 → 10 → 30 → 60 → 100 → 365` days/s
+### One renderer, every scale
 
----
+There is no mode switch between "surface," "system," and "galaxy." A single **scale-continuous** renderer covers the whole range using a shared logarithmic depth transform and a continuous level-of-detail crossfade: a body fades smoothly from a **dot** → a lit **sphere** → a **glare/billboard** as you approach or recede, so a star is a pinprick from light-years away and a textured surface up close, with no pop. A background density field (the *CosmicField*) tells the renderer how crowded space is locally and scales the LOD accordingly. The Milky Way is a real home volume centered ~26,000 ly toward Sagittarius A\*, so flying "up" out of the disc reveals the galaxy from outside — and beyond it, the Local Group.
 
-## Vision
+### Everything is SI; the camera makes it renderable
 
-Space is incomprehensibly large. Most simulations either abstract that away or confine you to a single solar system. OpenMultiVerse doesn't.
+Simulation state is stored in **SI units** — metres, kilograms, seconds — because that's what the physics is written in. The catch: when the camera is light-years from the origin, single-precision floats can't represent positions without jitter. So all geometry is drawn **camera-relative**: the camera position is subtracted from every body *in double precision on the CPU*, and only the small relative offset is cast to float for the GPU (`vp_camrel = proj · view_rot`). The result is rock-steady framing whether you're skimming a ring or parked outside Andromeda.
 
-- **Real scale.** Every distance, mass, and orbital period is physically accurate. The emptiness between planets is real. Flying from Earth to Neptune takes time.
-- **Real dynamics.** Bodies move under genuine N-body gravity — no baked animations, no shortcuts. Disrupt the solar system and watch it react.
-- **Open world.** Fly anywhere. Approach an asteroid from 10 km. Pull back until the entire solar system fits on screen. Eventually, jump to another star.
-- **Sandbox.** Spawn scenarios, collide objects, break things. Curiosity should have no guardrails.
+### How it handles thousands of stars and planets
 
----
+The "Known Universe" preset loads **~279,000 bodies** — ~16,000 curated, fully-modeled star systems (the Solar System + real exoplanet hosts) plus ~263,000 Gaia field stars. Keeping that interactive at 60 fps *on a laptop with integrated graphics* (developed on a ThinkPad X1 Yoga Gen 5 — no discrete GPU) takes three ideas working together:
 
-## Current State
+- **Hierarchical RESPA integrator.** Forces are split by timescale: slow star↔planet interactions are integrated on a coarse *outer* timestep, while fast moon↔parent interactions get many small *inner* substeps. Each star system picks its own adaptive timestep from its tightest orbit, so a system with a close-in hot Jupiter doesn't force the whole universe to crawl. Before the first frame, ~2 years are pre-simulated ("warm-up") to settle every system onto its orbit — parallelized across systems with OpenMP.
+- **Gravitational isolation.** Interstellar gravity is negligible — the Sun's pull on Alpha Centauri's planets is nothing next to their own star's. So by default each star system gravitates **only within itself**. This turns one intractable *N²* problem over the curated ~16k bodies into thousands of tiny, independent problems (and, because they're independent, they integrate in parallel).
+- **A camera-driven active region.** Only systems within a few light-years of the camera are fully simulated each frame. Everything beyond that **freezes** and is drawn as a cheap **far-field point** — a single static buffer holding the whole Gaia field, culled on the GPU. Walk toward a frozen star and it seamlessly "wakes up" into a live, integrated system with procedural planets.
 
-| Feature | Status |
-|---|---|
-| N-body gravity — RESPA hierarchical integrator, adaptive per-system timestep | ✓ |
-| Full solar system — Sun, 8 planets, dwarf planets, large asteroids, and major moons | ✓ |
-| Procedural planet textures, axial tilt & rotation | ✓ |
-| Data-driven universe config (JSON) | ✓ |
-| Multiple star systems & nearby exoplanet systems | ✓ |
-| Ring systems — Saturn (Keplerian particles), Uranus & Neptune rings | ✓ |
-| Asteroid belts — Main Belt & Kuiper Belt with gravity-integrated particles | ✓ |
-| Planet collision & merge — animation, particle spray, persistent craters, spin transfer | ✓ |
-| Build mode — spawn and place bodies at runtime | ✓ |
-| Inspection mode — highlight bodies and orbit selected targets | ✓ |
-| Catalog-backed skybox — Yale Bright Star Catalog J2000 stars | ✓ |
-| Background soundtrack | ✓ |
-| Supernovae | ✓ |
-| Data-driven physical laws — per-universe G, softening, time scale | ✓ |
-| Custom force laws — non-inverse-square gravity (configurable exponent) | ✓ |
-| Exotic terms — cosmological repulsion (Λ) & post-Newtonian precession | ✓ |
-| Multiverse — multiple selectable universes, each with its own laws | ✓ |
-| ImGui universe picker + live law sliders (optional `IMGUI=1` build) | ✓ |
-| Galaxy-scale rendering — camera-driven active region + far-field points, ~16k bodies in real time | ✓ |
-| Real-data presets — full NASA Exoplanet / Gaia catalog as the "Known Universe" | ✓ |
-| Stellar lifecycle — main-sequence → giant → white dwarf / neutron star / black hole | ✓ |
-| Black holes — accretion disk + shadow + photon ring rendering | ✓ |
-| HDR bloom, enhanced atmospheres (scattering, day/night), volumetric nebulae | ✓ |
+The upshot: the cost of a frame tracks *what's near you*, not the size of the catalog. The full deep-dive lives in [ARCHITECTURE.md](ARCHITECTURE.md) §8 (physics) and §8.1 (galaxy-scale rendering).
+
+<p align="center">
+  <img src="docs/img/galaxy34.png" width="80%" alt="The Milky Way at a three-quarter angle — a volumetric disc with a bright golden core"/><br/>
+  <sub>The same ~279k-body catalog, seen from outside: the ~16k curated bodies near the camera are fully simulated, while the ~263k Gaia field stars are frozen far-field points composited into a volumetric galactic disc.</sub>
+</p>
+
+### The laws are data
+
+Every universe is a JSON file with an optional `"laws"` block (`src/laws.h`/`laws.c`): the gravitational constant `G`, a Plummer `softening` length, a `force_exp` exponent (2 = inverse-square; try 3), a cosmological `lambda` (dark-energy-like outward push), a `pn_factor` (post-Newtonian perihelion precession), the speed of light `c_light`, and `gravity_isolation`. Omit any field and it falls back to the Newtonian default, so existing universes keep working. Bodies, rings, and asteroid belts are data too — the built-in JSON parser even accepts `//` comments and trailing commas. (Bulk star fields are the one exception: they load from a compact binary catalog the JSON references — see [Real astronomical data](#real-astronomical-data).)
 
 ---
 
@@ -181,19 +88,21 @@ Omitted fields fall back to Newtonian defaults, so existing files keep working.
 
 ```jsonc
 "laws": {
-  "G": 6.674e-11,    // gravitational constant (m^3 kg^-1 s^-2)
-  "softening": 1e5,  // Plummer softening length (m)
-  "time_scale": 1.0, // multiplier on simulated time
-  "force_exp": 2.0,  // radial falloff exponent (2 = inverse-square, 3 = inverse-cube, ...)
-  "lambda": 0.0,     // cosmological term: outward push ∝ distance (dark-energy analogue)
-  "pn_factor": 0.0   // post-Newtonian perihelion precession (1 = physical, higher = exaggerated)
+  "G": 6.674e-11,          // gravitational constant (m^3 kg^-1 s^-2)
+  "softening": 1e5,        // Plummer softening length (m)
+  "time_scale": 1.0,       // multiplier on simulated time
+  "force_exp": 2.0,        // radial falloff exponent (2 = inverse-square, 3 = inverse-cube, ...)
+  "lambda": 0.0,           // cosmological term: outward push ∝ distance (dark-energy analogue)
+  "pn_factor": 0.0,        // post-Newtonian perihelion precession (1 = physical, higher = exaggerated)
+  "gravity_isolation": 1.0 // 1 = each system gravitates only within itself (default); 0 = fully coupled
 }
 ```
 
 Bundled example universes live in `assets/universes/`: **Strong Gravity**,
-**Inverse-Cube Forces**, **Expanding Cosmos**, and **Relativistic Precession**.
-Build with `IMGUI=1` (below) and press **U** in-app to pick a universe or drag the
-live law sliders and watch the dynamics change.
+**Inverse-Cube Forces**, **Expanding Cosmos**, **Relativistic Precession**, plus
+a **Black Hole** / **Quasar** / **Blazar** family and the galaxy-scale **Known
+Universe**. Build with `IMGUI=1` (below) and press <kbd>U</kbd> in-app to pick a
+universe or drag the live law sliders and watch the dynamics change.
 
 **Save / load.** The same menu can snapshot the running universe — current laws
 plus every body's exact position and velocity — to a JSON file, and load it back
@@ -206,8 +115,13 @@ capturing a collision setup or a tweaked law configuration to revisit later.
 
 Universes can be built from real catalogs. The converter (`catalogtool`) turns a
 catalog into a universe JSON the simulator loads like any other; the same code
-also powers the in-app **Import real astronomical data** buttons in the `U` menu
+also powers the in-app **Import real astronomical data** buttons in the <kbd>U</kbd> menu
 (ImGui build), which import a catalog and load it on the spot.
+
+<p align="center">
+  <img src="docs/img/trappist1.png" width="80%" alt="The TRAPPIST-1 system — a red dwarf circled by seven concentric planetary orbits"/><br/>
+  <sub>TRAPPIST-1, straight from the NASA Exoplanet Archive: a red dwarf with seven real, tightly-packed planets on Keplerian orbits.</sub>
+</p>
 
 ```bash
 make catalogtool
@@ -226,16 +140,92 @@ Small real samples live in `assets/catalogs/`, and the bundled presets
 **TRAPPIST-1 (real)**, **Stellar Neighborhood (real)**, **Solar System
 (Horizons)**, and **Real Stars (Gaia)** are generated from them. The
 **Known Universe** preset merges the Solar System with the full NASA Exoplanet +
-Gaia catalogs into a single ~16,000-body universe — generate or resize it with
+Gaia catalogs into a single **~279,000-body** universe (~16k curated star systems
++ ~263k Gaia field stars) — generate or resize it with
 `python3 tools/build_known_universe.py --max-systems N` (`N=0` = everything). See
 [ARCHITECTURE.md](ARCHITECTURE.md) §8.1 for how the renderer keeps that many
 bodies real-time.
+
+**Two storage formats.** A universe is a JSON file — human-editable, with `//`
+comments and trailing commas. But a bulk star field of hundreds of thousands of
+points would be a gigabyte of text, so a preset can instead point (via an
+optional top-level `"star_catalog"` field) at a compact **binary star catalog** —
+the *StarBin* format (`.bin`, ~40 bytes/star vs ~400 in JSON), which `catalogtool`
+writes and the simulator streams straight into memory at load. That's how the
+Known Universe stores its ~263,000 Gaia stars: the curated ~16k systems live in
+the JSON, the field stars in the binary catalog it references.
+
+---
+
+## Controls
+
+| Key / Input | Action |
+|---|---|
+| Left-click | Enter free-look (captures mouse) |
+| Escape | Open system menu / exit build mode / exit inspection mode |
+| W / S | Move forward / backward |
+| A / D | Strafe left / right |
+| Q / E | Move down / up |
+| Mouse | Look around |
+| Scroll | Adjust camera speed |
+| T | Toggle warp mode |
+| B | Toggle build mode |
+| Tab + Scroll | Cycle build presets (in build mode) |
+| I | Toggle inspection mode |
+| H | Hide / show the HUD overlay and body labels |
+| U | Toggle the multiverse menu (requires the ImGui build — see below) |
+| F11 / Alt+Enter | Toggle fullscreen |
+| `+` / `-` | Simulation speed up / down |
+| Space | Pause / resume |
+| R | Reset camera near the Sun |
+
+**Simulation speeds:** `0 → 0.1 → 0.25 → 0.5 → 1 → 2 → 5 → 10 → 30 → 60 → 100 → 365` days/s
+
+---
+
+## Feature status
+
+| Feature | Status |
+|---|---|
+| N-body gravity — RESPA hierarchical integrator, adaptive per-system timestep | ✓ |
+| Scale-continuous renderer — planet → system → galaxy → Local Group, no mode switch | ✓ |
+| Galaxy-scale performance — active region + far-field points, ~279k-body catalog real-time | ✓ |
+| Full Solar System — Sun, 8 planets, dwarf planets, large asteroids, and major moons | ✓ |
+| Procedural planet textures, atmospheres (scattering, day/night), axial tilt & rotation | ✓ |
+| Ring systems — Saturn (Keplerian particles), Uranus & Neptune | ✓ |
+| Asteroid belts — Main Belt & Kuiper Belt with gravity-integrated particles | ✓ |
+| Comets — coma + ion/dust tails at perihelion | ✓ |
+| Planet collision & merge — particle spray, persistent craters, spin transfer | ✓ |
+| Stellar lifecycle — main-sequence → giant → white dwarf / neutron star / black hole | ✓ |
+| Supernovae | ✓ |
+| Black holes — raymarched accretion disk, shadow, photon ring & gravitational lensing | ✓ |
+| Active galactic nuclei — quasars, blazars, relativistic jets, tidal disruption | ✓ |
+| Volumetric nebulae & the Milky Way disc; HDR bloom | ✓ |
+| Data-driven physical laws — per-universe G, softening, force law, Λ, post-Newtonian, isolation | ✓ |
+| Multiverse menu — universe picker + live law sliders (optional `IMGUI=1` build) | ✓ |
+| Real-data import — NASA Exoplanet / JPL Horizons / Gaia, in-app and via `catalogtool` | ✓ |
+| Build mode & inspection mode — spawn bodies, highlight and orbit targets | ✓ |
+| Save / load — snapshot & restore exact universe state | ✓ |
+
+---
+
+## Installation
+
+> **No prebuilt binaries are published yet.** OpenMultiVerse currently builds from
+> source (below) — it's a quick `make` on Linux, and the multiverse menu is an
+> optional `IMGUI=1` build. Packaged releases may come later.
 
 ---
 
 ## Building from Source
 
-*For contributors and developers. End users should use the [pre-built releases](#installation) above.*
+**Linux**
+```bash
+sudo apt install build-essential libsdl2-dev libsdl2-ttf-dev libsdl2-mixer-dev libglew-dev
+make
+./verse
+```
+(On Arch/CachyOS: `sudo pacman -S sdl2 sdl2_ttf sdl2_mixer glew`.)
 
 **Windows (MSYS2 / MinGW-w64)**
 ```bash
@@ -245,14 +235,6 @@ pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-make \
 mingw32-make
 ./verse.exe
 ```
-
-**Linux**
-```bash
-sudo apt install build-essential libsdl2-dev libsdl2-ttf-dev libsdl2-mixer-dev libglew-dev
-make
-./verse
-```
-(On Arch/CachyOS: `sudo pacman -S sdl2 sdl2_ttf sdl2_mixer glew`.)
 
 **Optional — the ImGui multiverse menu**
 
@@ -267,7 +249,16 @@ make IMGUI=1                               # links libstdc++; needs g++
 
 Without `IMGUI=1` the menu code compiles to inert stubs and the simulator builds
 exactly as before (no C++ toolchain or cimgui required). Universes can still be
-selected by editing the path the app loads.
+selected by editing the path the app loads. Toggling `IMGUI` on or off requires a
+`make clean` first.
+
+**Headless rendering.** The screenshots in this README were rendered offscreen on
+the GPU — no window needed — via `tools/shot.sh out.png --preset <universe> --cam
+x,y,z,yaw,pitch`. Useful shot flags: `--no-hud` (hide the overlay + labels),
+`--timescale 0` (freeze the sim so close-range framing is reproducible), `--fov`
+(narrow for telephoto framing), `--exposure` (fix exposure so bright star fields
+don't wash out the subject), and `--stellar-rate` (run stellar evolution to catch
+lifecycle events). In-app, press <kbd>H</kbd> to toggle the HUD.
 
 For a full technical reference of the codebase, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -275,7 +266,7 @@ For a full technical reference of the codebase, see [ARCHITECTURE.md](ARCHITECTU
 
 ## Contributing
 
-OpenMultiVerse is open source and early in development. The physics engine, rendering pipeline, and coordinate system are all designed to scale beyond a single solar system — and, increasingly, beyond a single set of physical laws. If you want to help push toward a truly open multiverse, contributions are welcome.
+OpenMultiVerse is open source and early in development. The physics engine, rendering pipeline, and coordinate system are all designed to scale beyond a single solar system — and beyond a single set of physical laws. If you want to help push toward a truly open multiverse, contributions are welcome.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on reporting bugs, requesting features, and submitting pull requests.
 

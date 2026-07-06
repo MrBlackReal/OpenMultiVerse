@@ -1005,6 +1005,10 @@ void ui_render(void) {
         return;
     }
 
+    /* Informational HUD (speed bar, readouts, FPS, labels) — suppressed when the
+     * HUD is hidden (H / --no-hud).  The pause menu (handled above) and benchmark
+     * overlay (below) are contextual and always drawn. */
+    if (!g_hud_hidden) {
     /* Bar background (dim white), then fill */
     draw_rect(BX, BY, BW, BH, 1.0f, 1.0f, 1.0f, 0.15f);
     draw_rect(BX, BY, BW * t, BH, 1.0f, 1.0f, 1.0f, 0.85f);
@@ -1040,6 +1044,7 @@ void ui_render(void) {
     draw_build_bar(W);
     if (!g_build_mode && g_inspect_mode)
         draw_bottom_mode_label(W, (float)WIN_H, "INSPECT", "click to inspect planet");
+    }
 
     /* Benchmark overlay — a centred title, progress bar, and live FPS readout
      * while the scripted flythrough runs (and the summary while it lingers). */
