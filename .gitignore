@@ -89,6 +89,6 @@ __pycache__/
 *.pyc
 
 CLAUDE.md
-docs/last_chat.txt
+docs/*.txt
 docs/PERF_HANDOFF.md
 assets/PS_2026.07.03_09.35.26.csv
