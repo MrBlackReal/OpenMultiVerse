@@ -134,6 +134,7 @@ static int s_speed_idx = 4;   /* start at 1.0 days/s */
 #define WARP_SPEED_MAX_AU  (g_settings.warp_speed_max_au)
 int s_warp = 0;
 int g_warp = 0;
+int g_hud_hidden = 0;   /* toggled by H / --no-hud; hides HUD overlay + labels */
 
 /* ── logging helpers ──────────────────────────────────────────────────────── */
 static void boot_log(const char *msg) {
@@ -794,6 +795,10 @@ static void handle_event(const SDL_Event *e, float dt, int *running) {
             if (g_inspect_orbit_mode) leave_inspect_keep_mouse();
             break;
         case SDLK_r: cam_reset(); break;
+        case SDLK_h:
+            /* Toggle the 2D HUD overlay + body labels (declutter / clean shots). */
+            if (!e->key.repeat) g_hud_hidden = !g_hud_hidden;
+            break;
         case SDLK_F11:
             if (!e->key.repeat) toggle_fullscreen();
             break;
@@ -1176,6 +1181,8 @@ int main(int argc, char **argv) {
     int         cam_set     = 0;
     double      cam_pos[3]  = { 0.0, 0.0, 0.0 };
     float       cam_yaw = 0.0f, cam_pitch = 0.0f;
+    float       cli_fov = -1.0f, cli_exposure = -1.0f;   /* <0 = leave default */
+    int         cli_ts_set = 0;    double cli_ts = 0.0;   /* --timescale override */
 
     for (int a = 1; a < argc; a++) {
         if      (!strcmp(argv[a], "--headless")) headless = 1;
@@ -1195,6 +1202,18 @@ int main(int argc, char **argv) {
         /* Scripted cinematic flythrough of the Milky Way and its neighbour
          * galaxies, timing each leg and printing an FPS report on completion. */
         else if (!strcmp(argv[a], "--benchmark")) run_bench = 1;
+        /* Hide the 2D HUD overlay + body labels (clean cinematic screenshots);
+         * same effect as pressing H in-app. */
+        else if (!strcmp(argv[a], "--no-hud")) g_hud_hidden = 1;
+        /* Cinematic framing knobs for shots: narrow the field of view for
+         * telephoto compression, and fix the exposure (disabling auto-exposure)
+         * so bright star fields don't wash out the subject. */
+        else if (!strcmp(argv[a], "--fov")      && a + 1 < argc) cli_fov = (float)atof(argv[++a]);
+        else if (!strcmp(argv[a], "--exposure") && a + 1 < argc) cli_exposure = (float)atof(argv[++a]);
+        /* Override the universe's time_scale — pass 0 to freeze the sim so a body
+         * stays exactly where it was queried, keeping close-range shot framing
+         * reproducible (warmup still runs, so orbits are settled first). */
+        else if (!strcmp(argv[a], "--timescale") && a + 1 < argc) { cli_ts = atof(argv[++a]); cli_ts_set = 1; }
     }
     if (shot_frames < 1) shot_frames = 1;
     if (headless) {
@@ -1205,6 +1224,11 @@ int main(int argc, char **argv) {
     /* Global settings first — every later macro (FOV, NUM_STARS, …) reads
      * g_settings, so it must be populated before anything else runs. */
     settings_load();
+
+    /* CLI overrides applied after settings_load so they win over settings.json. */
+    if (cli_fov > 0.0f)      g_settings.fov = cli_fov;
+    if (cli_exposure > 0.0f) { g_settings.tonemap_exposure = cli_exposure;
+                               g_settings.auto_exposure = 0; }
 
     if (!app_init()) return 1;
 
@@ -1224,6 +1248,10 @@ int main(int argc, char **argv) {
     boot_log("Initializing loading overlay");
     loading_init(s_win);
     init_runtime_world();
+
+    /* Freeze/scale the sim after warm-up (so orbits are settled but then held
+     * still for reproducible close-range shot framing). */
+    if (cli_ts_set) g_laws.time_scale = cli_ts;
 
     /* Headless camera override (after the world load, which resets the camera). */
     if (cam_set) {

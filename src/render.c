@@ -3518,7 +3518,8 @@ void render_frame(const float view[16], const float proj[16],
     }
 
     /* ------------------------------------------------------------------ 7. Labels */
-    labels_render(view_rot, proj, vp_camrel, info, dt);
+    if (!g_hud_hidden)
+        labels_render(view_rot, proj, vp_camrel, info, dt);
 
     /* ------------------------------------------------------------------ 7.5. Screen flash
      *
