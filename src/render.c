@@ -1917,9 +1917,10 @@ void render_frame(const float view[16], const float proj[16],
     render_scratch_ensure(g_nbodies > 0 ? g_nbodies : 1);
     BodyRenderInfo *info = s_rs_info;
     float *body_px = s_rs_body_px;   /* projected radius in pixels; used for fade thresholds */
-    memset(body_px, 0, (size_t)g_nbodies * sizeof(float));
-    /* Invalidate the per-frame body_lights cache before the sphere pass fills it. */
-    memset(s_rs_light_valid, 0, (size_t)g_nbodies * sizeof(char));
+    /* body_px and the body_lights cache flag are cleared sparsely over the
+     * dynamic set once it is built (below) — they are indexed only by s_dyn
+     * members, so a full g_nbodies memset was zeroing ~10^5-10^6 unused entries
+     * every frame at galaxy scale. */
     s_rs_nocc = 0;   /* rebuilt below: sphere-rendered non-star occluders */
 
     /* Dynamic body list for this frame: every body that needs full per-frame CPU
@@ -1960,6 +1961,12 @@ void render_frame(const float view[16], const float proj[16],
             if (b >= g_field_star_begin && b < g_field_star_end)
                 s_dyn[n_dyn++] = b;
         }
+    }
+
+    /* Sparse clear (see above): only the dynamic set is ever read. */
+    for (int di = 0; di < n_dyn; di++) {
+        body_px[s_dyn[di]]          = 0.0f;
+        s_rs_light_valid[s_dyn[di]] = 0;
     }
 
     for (int di = 0; di < n_dyn; di++) {
@@ -2164,38 +2171,44 @@ void render_frame(const float view[16], const float proj[16],
         glUniform1f(s_sp_star_heat, collision_body_star_heat(i));
         glUniform1f(s_sp_starspots, b->is_star ? (float)g_settings.starspots : 0.0f);
 
-        /* Upload per-body collision impact spots (craters/ejecta) for the shader */
+        /* Upload per-body collision impact spots (craters/ejecta) for the shader.
+         * Almost every body has none, so skip the array zero-init + 7 uniform
+         * uploads in that case — the shader bounds its loop by u_impact_count. */
         {
             CollisionSpot spots[COLLISION_MAX_SPOTS];
-            float dirs[COLLISION_MAX_SPOTS * 3] = {0};
-            float tangents[COLLISION_MAX_SPOTS * 3] = {0};
-            float radii[COLLISION_MAX_SPOTS] = {0};
-            float heats[COLLISION_MAX_SPOTS] = {0};
-            float progress[COLLISION_MAX_SPOTS] = {0};
-            float seeds[COLLISION_MAX_SPOTS] = {0};
-            int kinds[COLLISION_MAX_SPOTS] = {0};
             int nspots = collision_spots_for_body(i, spots);
-            for (int k = 0; k < nspots; k++) {
-                dirs[k*3+0] = spots[k].dir[0];
-                dirs[k*3+1] = spots[k].dir[1];
-                dirs[k*3+2] = spots[k].dir[2];
-                tangents[k*3+0] = spots[k].tangent1[0];
-                tangents[k*3+1] = spots[k].tangent1[1];
-                tangents[k*3+2] = spots[k].tangent1[2];
-                radii[k] = spots[k].angular_radius;
-                heats[k] = spots[k].heat;
-                progress[k] = spots[k].progress;
-                seeds[k] = spots[k].seed;
-                kinds[k] = spots[k].kind;
+            if (nspots > 0) {
+                float dirs[COLLISION_MAX_SPOTS * 3] = {0};
+                float tangents[COLLISION_MAX_SPOTS * 3] = {0};
+                float radii[COLLISION_MAX_SPOTS] = {0};
+                float heats[COLLISION_MAX_SPOTS] = {0};
+                float progress[COLLISION_MAX_SPOTS] = {0};
+                float seeds[COLLISION_MAX_SPOTS] = {0};
+                int kinds[COLLISION_MAX_SPOTS] = {0};
+                for (int k = 0; k < nspots; k++) {
+                    dirs[k*3+0] = spots[k].dir[0];
+                    dirs[k*3+1] = spots[k].dir[1];
+                    dirs[k*3+2] = spots[k].dir[2];
+                    tangents[k*3+0] = spots[k].tangent1[0];
+                    tangents[k*3+1] = spots[k].tangent1[1];
+                    tangents[k*3+2] = spots[k].tangent1[2];
+                    radii[k] = spots[k].angular_radius;
+                    heats[k] = spots[k].heat;
+                    progress[k] = spots[k].progress;
+                    seeds[k] = spots[k].seed;
+                    kinds[k] = spots[k].kind;
+                }
+                glUniform1i(s_sp_impact_count, nspots);
+                glUniform3fv(s_sp_impact_dir, nspots, dirs);
+                glUniform3fv(s_sp_impact_t1, nspots, tangents);
+                glUniform1fv(s_sp_impact_rad, nspots, radii);
+                glUniform1fv(s_sp_impact_heat, nspots, heats);
+                glUniform1fv(s_sp_impact_prog, nspots, progress);
+                glUniform1fv(s_sp_impact_seed, nspots, seeds);
+                glUniform1iv(s_sp_impact_kind, nspots, kinds);
+            } else {
+                glUniform1i(s_sp_impact_count, 0);
             }
-            glUniform1i(s_sp_impact_count, nspots);
-            glUniform3fv(s_sp_impact_dir, nspots, dirs);
-            glUniform3fv(s_sp_impact_t1, nspots, tangents);
-            glUniform1fv(s_sp_impact_rad, nspots, radii);
-            glUniform1fv(s_sp_impact_heat, nspots, heats);
-            glUniform1fv(s_sp_impact_prog, nspots, progress);
-            glUniform1fv(s_sp_impact_seed, nspots, seeds);
-            glUniform1iv(s_sp_impact_kind, nspots, kinds);
         }
 
         glUniform1i(s_sp_use_fullscreen, use_fullscreen);
@@ -2819,9 +2832,14 @@ void render_frame(const float view[16], const float proj[16],
     float *dot_overlap_alpha = s_rs_dot_overlap_alpha;
     int   *dot_candidate = s_rs_dot_candidate;
     int   *dot_vis = s_rs_dot_vis;
-    memset(dot_overlap_alpha, 0, (size_t)g_nbodies * sizeof(float));
-    memset(dot_candidate, 0, (size_t)g_nbodies * sizeof(int));
-    memset(dot_vis, 0, (size_t)g_nbodies * sizeof(int));
+    /* These are indexed only by dot_order members (a subset of s_dyn); clearing
+     * just those avoids three full-g_nbodies memsets per frame at galaxy scale. */
+    for (int oi = 0; oi < dot_total; oi++) {
+        int i = dot_order[oi];
+        dot_overlap_alpha[i] = 0.0f;
+        dot_candidate[i]     = 0;
+        dot_vis[i]           = 0;
+    }
 
     {
         double cx2 = g_cam.pos[0];

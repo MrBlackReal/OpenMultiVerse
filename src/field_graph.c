@@ -157,9 +157,12 @@ void field_graph_rebuild(void)
 
 void field_graph_tick(double dt)
 {
+    /* Accrue staleness only — the rebuild is now lazy, triggered by
+     * field_graph_body_edges when the Relations panel (its sole per-frame
+     * consumer) is actually open.  Previously this rebuilt the whole ~16k-node
+     * graph 4x/sec (and on every body-set change) even when nothing displayed
+     * it. */
     s_since_rebuild += dt;
-    if (g_nbodies != s_last_nbodies || s_since_rebuild >= FG_REBUILD_SEC)
-        field_graph_rebuild();
 }
 
 /* ── queries ──────────────────────────────────────────────────────────────── */
@@ -172,6 +175,10 @@ void field_graph_stats(FieldGraphStats *out)
 int field_graph_body_edges(int body, FieldGraphEdge *out, int max)
 {
     if (body < 0 || max <= 0) return 0;
+    /* Lazy rebuild: refresh the graph on demand (panel open) if the body set
+     * changed or the staleness timer elapsed. */
+    if (g_nbodies != s_last_nbodies || s_since_rebuild >= FG_REBUILD_SEC)
+        field_graph_rebuild();
     int n = 0;
     for (int e = 0; e < s_edge_count && n < max; e++)
         if (s_edges[e].from == body || s_edges[e].to == body)
