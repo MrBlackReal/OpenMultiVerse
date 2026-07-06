@@ -18,6 +18,7 @@
  *     and appends the live planet position as the final vertex.
  */
 #include "trails.h"
+#include "universe.h"   /* g_field_star_begin/end */
 #include "body.h"
 #include "camera.h"
 #include "gl_utils.h"
@@ -243,6 +244,11 @@ void trails_render(const float vp[16])
     glDepthMask(GL_FALSE);
 
     for (int i = 0; i < g_nbodies && i < s_n; i++) {
+        /* Field stars are stars (no trail) — skip the whole range in O(1). */
+        if (i >= g_field_star_begin && i < g_field_star_end) {
+            i = g_field_star_end - 1;
+            continue;
+        }
         Body *b = &g_bodies[i];
         if (b->is_star || b->trail_count < 2 || !b->trail) continue;
         if (!b->alive && b->trail_fade <= 0.0) continue;

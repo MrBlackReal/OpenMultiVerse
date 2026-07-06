@@ -49,9 +49,24 @@ int    physics_system_root(int idx);
 
 /* Fill `out` with up to `max` body indices from systems within `radius_m` of
  * `cam_m` (metres), nearest systems first; returns the count written.  The
- * camera-following active set used by labels.c. */
+ * camera-following active set used by labels.c and render.c's near-field query.
+ * Backed by the movement-gated near-system cache, so calling it every frame is
+ * cheap even with a galaxy-scale system count. */
 int    physics_active_bodies(const double cam_m[3], double radius_m,
                              int *out, int max);
+
+/* (Re)build the near-system candidate cache to cover `radius_m` around `cam_m`.
+ * Optional to call directly — physics_active_bodies/_systems call it — but a
+ * once-per-frame call at the widest radius any consumer needs guarantees a
+ * single scan per frame. The O(system_count) scan runs only on camera movement
+ * past a threshold or a body-set change. */
+void   physics_update_active_cache(const double cam_m[3], double radius_m);
+
+/* Return (via *out, internal storage) the SLOT indices of systems within
+ * `radius_m` of `cam_m`, nearest first; returns the count. Cache-backed
+ * replacement for the per-frame O(system_count) active-system scan in main.c. */
+int    physics_active_systems(const double cam_m[3], double radius_m,
+                              const int **out);
 double physics_system_outer_dt_limit(int idx);
 double physics_system_inner_dt_limit(int idx);
 void   physics_advance_time(double dt);

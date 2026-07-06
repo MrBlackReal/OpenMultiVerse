@@ -54,6 +54,20 @@ int universe_save(const char *path);
  * already hold settled state, so main.c skips the warm-up pre-simulation. */
 extern int g_universe_is_snapshot;
 
+/* Contiguous index range of "field stars" — bulk stars appended from a compact
+ * binary star catalog (see load_star_catalog / the "star_catalog" preset field).
+ * [g_field_star_begin, g_field_star_end) is that range; begin == end means the
+ * universe has no field catalog (every preset without one). Field stars are
+ * frozen scenery rendered by a static GPU path; only the few currently near the
+ * camera are promoted back into the per-frame dynamic path. Build-mode additions
+ * append past g_field_star_end and are therefore never mistaken for field stars. */
+extern int g_field_star_begin;
+extern int g_field_star_end;
+
+/* Bumped by universe_load() on every (re)load so cached, universe-scoped GPU
+ * resources (e.g. the static field-star VBO in render.c) know to rebuild. */
+extern unsigned g_universe_generation;
+
 /* Add a fully specified runtime body. Returns the new body index, or -1. */
 int universe_add_body(const BodyCreateSpec *spec);
 

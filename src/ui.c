@@ -44,6 +44,7 @@
 #include "body.h"
 #include "cosmic_field.h"
 #include "radiance_field.h"
+#include "benchmark.h"
 #include "gl_utils.h"
 #include "ui_theme.h"
 #include <math.h>
@@ -123,6 +124,8 @@ static TextCache s_tc_sim  = {0};
 static TextCache s_tc_fps  = {0};
 static TextCache s_tc_nearest = {0};
 static TextCache s_tc_field   = {0};
+static TextCache s_tc_bench_stage = {0};  /* benchmark: current leg name  */
+static TextCache s_tc_bench_line  = {0};  /* benchmark: live fps readout  */
 static TextCache s_tc_build_title = {0};
 static TextCache s_tc_build_hint  = {0};
 static TextCache s_tc_build_items[8];
@@ -1037,6 +1040,35 @@ void ui_render(void) {
     draw_build_bar(W);
     if (!g_build_mode && g_inspect_mode)
         draw_bottom_mode_label(W, (float)WIN_H, "INSPECT", "click to inspect planet");
+
+    /* Benchmark overlay — a centred title, progress bar, and live FPS readout
+     * while the scripted flythrough runs (and the summary while it lingers). */
+    {
+        char stage[128], line[96];
+        float prog = 0.0f;
+        if (benchmark_hud(stage, sizeof(stage), line, sizeof(line), &prog)) {
+            SDL_Color accent = {255, 235, 180, 235};
+            const float TITLE_H = TH * 1.6f;
+            const float PBW = W * 0.42f;
+            const float PBX = (W - PBW) * 0.5f;
+            const float PBY = 44.0f;
+
+            update_text(&s_tc_bench_stage, stage, accent);
+            if (line[0]) update_text(&s_tc_bench_line, line, white);
+
+            if (s_tc_bench_stage.tex) {
+                float tw = TITLE_H * (float)s_tc_bench_stage.w / (float)s_tc_bench_stage.h;
+                draw_tex(&s_tc_bench_stage, (W - tw) * 0.5f, 12.0f, TITLE_H);
+            }
+            /* progress bar */
+            draw_rect(PBX, PBY, PBW, 5.0f, 1.0f, 1.0f, 1.0f, 0.18f);
+            draw_rect(PBX, PBY, PBW * prog, 5.0f, 1.0f, 0.92f, 0.70f, 0.95f);
+            if (line[0] && s_tc_bench_line.tex) {
+                float tw = TH * (float)s_tc_bench_line.w / (float)s_tc_bench_line.h;
+                draw_tex(&s_tc_bench_line, (W - tw) * 0.5f, PBY + 10.0f, TH);
+            }
+        }
+    }
 
     /* Restore 3D state */
     glBindVertexArray(0);

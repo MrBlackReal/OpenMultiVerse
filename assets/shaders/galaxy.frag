@@ -97,9 +97,20 @@ void galaxy_sample(vec3 p, float rr, vec3 seedv,
     dens = 0.0;
     dust = 0.0;
 
+    /* Lossless early-out: every noise term below is multiplied by a cheap
+     * analytic envelope (exp falloffs). Compute the envelope first and, when it
+     * cannot possibly clear the caller's contribution threshold, skip the FBM
+     * entirely. EMIS_MIN matches main()'s `dens > 0.0015` gate exactly, so a
+     * skipped emission sample is one the caller would have discarded anyway —
+     * bit-for-bit identical output; DUST_MIN is a conservative absorption floor
+     * (dust is a thin midplane sheet, negligible where this bound is tiny). */
+    const float EMIS_MIN = 0.0015;
+    const float DUST_MIN = 0.0004;
+
     if (u_type == 1) {                               /* ELLIPTICAL */
         /* Steep bright core, long faint envelope; old, smooth, warm. */
         float e = exp(-pow(rr / 0.42, 0.62) * 3.2);
+        if (e * 1.5 < EMIS_MIN) return;              /* n<=1 -> dens<=e*1.5 */
         float n = fbm2(p * 3.0 + seedv);
         dens = e * (0.85 + 0.15 * n) * 1.5;
         col  = u_color * mix(vec3(0.95, 0.88, 0.74), vec3(1.0, 0.98, 0.9),
@@ -119,17 +130,22 @@ void galaxy_sample(vec3 p, float rr, vec3 seedv,
         /* In-plane coords for the stellar bar. */
         float x1 = dot(pr, t1), x2 = dot(pr, t2);
 
-        /* Ragged outline: large-scale noise warps the envelope radius so
-         * the cloud reads as a torn lump from outside, not a smooth ball. */
-        float lump = fbm2(p * 2.1 + seedv * 1.7);
-        float env  = exp(-pow(r / (0.42 + 0.30 * lump), 2.2)
-                         - pow(h / 0.30, 2.0));
-
         /* Off-centre elongated stellar bar (the LMC's defining feature) —
          * old warm population, slightly displaced from the cloud centre. */
         float bar = 1.5 * exp(-pow((x1 - 0.07) / 0.34, 2.0)
                               - pow( x2         / 0.115, 2.0)
                               - pow( h          / 0.13,  2.0));
+
+        /* Envelope upper bound (lump<=1 gives the widest, slowest falloff):
+         * emission <= env*(0.05+1.9+2.6)+bar, dust <= env*0.9. */
+        float env_ub = exp(-pow(r / 0.72, 2.2) - pow(h / 0.30, 2.0));
+        if (env_ub * 4.55 + bar < EMIS_MIN && env_ub * 0.9 < DUST_MIN) return;
+
+        /* Ragged outline: large-scale noise warps the envelope radius so
+         * the cloud reads as a torn lump from outside, not a smooth ball. */
+        float lump = fbm2(p * 2.1 + seedv * 1.7);
+        float env  = exp(-pow(r / (0.42 + 0.30 * lump), 2.2)
+                         - pow(h / 0.30, 2.0));
 
         /* Patchy young population: low base fill, strong clumps, and rare
          * bright pink HII complexes (30 Doradus-class at the top end). */
@@ -165,6 +181,20 @@ void galaxy_sample(vec3 p, float rr, vec3 seedv,
                 * smoothstep(1.0, 0.85, rr);
     float bulge = 2.4 * exp(-pow(rr / 0.14, 2.0));
 
+    /* Dust-lane vertical/radial envelopes (analytic; reused by the full path
+     * below so this costs nothing extra when not skipped). Upper-bound the
+     * dust with lane<=1, dn<=1 for the early-out test. */
+    float dV1 = exp(-abs(h + 0.028) / 0.030) * exp(-r / 0.40)
+              * smoothstep(0.06, 0.18, r);
+    float dV2 = exp(-abs(h + 0.008) / 0.016) * exp(-r / 0.45)
+              * smoothstep(0.04, 0.12, r);
+    float dust_ub = dV1 * 2.2 + dV2 * 1.1;
+
+    /* Lossless skip: disc*9.8 upper-bounds cloud(<=1.4)*(0.38+2.8*arm+3.8*knots)
+     * with arm,knots<=1, so disc*9.8+bulge upper-bounds emission. When neither
+     * emission nor dust can register, skip all four FBM evaluations. */
+    if (disc * 9.8 + bulge < EMIS_MIN && dust_ub < DUST_MIN) return;
+
     /* Star-forming knots along the arms (noise in the co-rotating frame so
      * clumps ride the shear instead of the arms sweeping through them). */
     float cr = cos(rot), sr = sin(rot);
@@ -181,19 +211,14 @@ void galaxy_sample(vec3 p, float rr, vec3 seedv,
     dens = disc * cloud * (0.38 + 2.8 * arm + 3.8 * knots) + bulge;
 
     /* Dust lanes: absorption on the arms' inner edges, pinned to the
-     * midplane, absent from the bulge core. */
+     * midplane, absent from the bulge core. dV1/dV2 (computed above) are the
+     * lane-independent vertical/radial envelopes, reused here so a non-skipped
+     * sample does identical work to before. Fold in the arm-phase lane and the
+     * noise modulation dn.  Great Rift (dV2) is independent of arm phase. */
     float lane = pow(0.5 + 0.5 * cos(armw + 1.1), 3.0);
     float dn   = 0.55 + 0.45 * fbm2(prot * 6.0 - seedv);
-    /* The lane rides slightly below the midplane, so edge-on it silhouettes
-     * against the bright disc/bulge behind instead of coinciding with them. */
-    dust = lane * exp(-abs(h + 0.028) / 0.030) * exp(-r / 0.40)
-         * smoothstep(0.06, 0.18, r) * dn * 2.2;
-
-    /* Great Rift: a ragged equatorial dust sheet independent of the arm
-     * phase, so the band seen from inside is split lengthwise by a dark
-     * lane (and an edge-on disc keeps its stripe between arm crossings). */
-    dust += exp(-abs(h + 0.008) / 0.016) * exp(-r / 0.45)
-          * smoothstep(0.04, 0.12, r) * dn * 1.1;
+    dust = lane * dV1 * dn * 2.2
+         +        dV2 * dn * 1.1;
 
     /* Dust extinguishes the starlight embedded in it too, not just what is
      * behind — this is what carves the classic dark stripe across an

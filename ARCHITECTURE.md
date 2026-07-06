@@ -757,7 +757,9 @@ into ordinary universe JSON the existing loader understands — so imported data
 gets laws/rings/asteroids/menu for free. Deliberately free of SDL/OpenGL: it
 backs both the offline `tools/catalogtool.c` CLI and the in-app "Import real
 data" buttons (which convert to a temp file, then load it). `catalog_convert()`
-returns the body count written.
+returns the body count written. The `gaia-bin` type instead emits the compact
+binary **StarBin** star catalog (see §7 "Star catalog") for bulk fields too large
+for JSON; the record/header layout is shared via `catalog.h`.
 
 ### `lifecycle.c` / `lifecycle.h`
 
@@ -1031,6 +1033,31 @@ files keep working). Parsed and round-tripped (save/load) by `universe.c`.
 App-level tunables (FOV, starfield count, warm-up radius, fades, …) are **not**
 here — they are global, cross-universe, and live in `settings.json` via
 `g_settings` (see `settings.c` in §6).
+
+### Star catalog (compact binary star field)
+
+An optional top-level `"star_catalog"` string points at a **StarBin** file — a
+compact binary star catalog. A bulk field of hundreds of thousands of stars is
+far too large to ship as JSON (~400 bytes/star of text); the StarBin format is a
+fixed 48-byte record (`StarBinRecord` in `catalog.h`) behind a small header
+(magic `'OMVS'`, version, count, `record_size`). At the end of `universe_load()`,
+`load_star_catalog()` streams those records straight into `g_bodies[]` as real,
+navigable stars — cheap now that stars carry no trail and no GL buffer (§ trails).
+
+```jsonc
+"star_catalog": "assets/catalogs/gaia_stars.bin"
+```
+
+- **Generate** with `catalogtool gaia-bin <gaia.csv> assets/catalogs/gaia_stars.bin`
+  (same Gaia science as the JSON `gaia` importer, packed to records). The `.bin`
+  lives in the gitignored `assets/catalogs/` and is regenerated locally.
+- **Missing file is not an error** — the preset loads its JSON bodies and logs a
+  skip, so a fresh checkout works without the field until it is regenerated.
+- Catalog stars carry final positions/velocities (no CoM/bulk post-processing —
+  they are lone bodies) and are **positionally de-duplicated** (0.1 ly) against
+  the stars already loaded from JSON, so an exoplanet host or inline nearby star
+  is never drawn twice. Little-endian, x86 target; the magic check rejects a
+  mismatched/foreign file. `known_universe.json` uses this for its Gaia field.
 
 ### Body Types
 

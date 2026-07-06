@@ -19,6 +19,8 @@
  */
 #include "body.h"
 #include "camera.h"
+#include "universe.h"   /* g_field_star_begin/end */
+#include "physics.h"    /* physics_active_bodies (near field stars) */
 #include <math.h>
 
 Body *g_bodies     = NULL;
@@ -189,18 +191,50 @@ void moon_to_state(
  */
 CamProximity g_cam_prox = { -1, 1e300, -1, 1e300 };
 
+/* Fold one body into the running nearest-star / nearest-body result. */
+static inline void prox_consider(int i, int *star, double *star_d2,
+                                 int *body, double *body_d2)
+{
+    if (!g_bodies[i].alive) return;
+    double dx = g_cam.pos[0] - g_bodies[i].pos[0] * RS;
+    double dy = g_cam.pos[1] - g_bodies[i].pos[1] * RS;
+    double dz = g_cam.pos[2] - g_bodies[i].pos[2] * RS;
+    double d2 = dx*dx + dy*dy + dz*dz;
+    if (d2 < *body_d2) { *body_d2 = d2; *body = i; }
+    if (g_bodies[i].is_star && d2 < *star_d2) { *star_d2 = d2; *star = i; }
+}
+
+/* Field stars within this radius are candidates for "nearest" — so the HUD
+ * readout and adaptive-warp governor still react to an approached field star. */
+#define CAM_PROX_NEAR_LY 20.0
+#define CAM_PROX_NEAR_MAX 4096
+
 void body_update_cam_proximity(void)
 {
     int    star = -1, body = -1;
     double star_d2 = 1e300, body_d2 = 1e300;
+    /* Non-field bodies (curated systems + build-mode additions): skip the bulk
+     * field-star range in O(1) — scanning ~262k frozen stars every frame was a
+     * top per-frame cost. */
     for (int i = 0; i < g_nbodies; i++) {
-        if (!g_bodies[i].alive) continue;
-        double dx = g_cam.pos[0] - g_bodies[i].pos[0] * RS;
-        double dy = g_cam.pos[1] - g_bodies[i].pos[1] * RS;
-        double dz = g_cam.pos[2] - g_bodies[i].pos[2] * RS;
-        double d2 = dx*dx + dy*dy + dz*dz;
-        if (d2 < body_d2) { body_d2 = d2; body = i; }
-        if (g_bodies[i].is_star && d2 < star_d2) { star_d2 = d2; star = i; }
+        if (i >= g_field_star_begin && i < g_field_star_end) {
+            i = g_field_star_end - 1;
+            continue;
+        }
+        prox_consider(i, &star, &star_d2, &body, &body_d2);
+    }
+    /* Field stars near the camera (cache-backed): so a field star you approach
+     * can be reported as the nearest star out in deep field. */
+    if (g_field_star_end > g_field_star_begin) {
+        double cam_m[3] = { g_cam.pos[0] * AU, g_cam.pos[1] * AU, g_cam.pos[2] * AU };
+        static int s_nf[CAM_PROX_NEAR_MAX];
+        int nn = physics_active_bodies(cam_m, CAM_PROX_NEAR_LY * LY,
+                                       s_nf, CAM_PROX_NEAR_MAX);
+        for (int j = 0; j < nn; j++) {
+            int i = s_nf[j];
+            if (i >= g_field_star_begin && i < g_field_star_end)
+                prox_consider(i, &star, &star_d2, &body, &body_d2);
+        }
     }
     g_cam_prox.star         = star;
     g_cam_prox.star_dist_au = star >= 0 ? sqrt(star_d2) : 1e300;

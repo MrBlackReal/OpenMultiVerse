@@ -14,6 +14,7 @@
 #include "body.h"
 #include "camera.h"
 #include "nebula.h"
+#include "universe.h"   /* g_field_star_begin/end, g_universe_generation */
 
 #include <math.h>
 #include <stdint.h>
@@ -25,7 +26,13 @@
 #define COSMIC_CELL_LY      1.0                    /* cell edge, light-years    */
 #define COSMIC_CELL_M       (COSMIC_CELL_LY * LY)  /* cell edge, metres         */
 #define COSMIC_HUD_RADIUS_LY 3.0                   /* default camera-sample R   */
-#define COSMIC_REBUILD_SEC  0.25                   /* throttle between rebuilds */
+/* Throttle between DYNAMIC rebuilds.  The frozen field-star partition is hashed
+ * once per universe load (see field_partition_*), so a rebuild only re-hashes
+ * the ~16k curated + promoted bodies — not the ~10^5-10^6 static field stars.
+ * A dynamic rebuild still fires immediately on any body-set change (g_nbodies),
+ * which is now cheap; this timer only bounds slow positional drift of the
+ * dynamic set. */
+#define COSMIC_REBUILD_SEC  3.0
 #define COSMIC_MIN_BODIES   2                      /* discrete-signal threshold */
 #define COSMIC_FILL_EPS     0.05                   /* continuous-signal thresh. */
 
@@ -49,6 +56,8 @@ typedef struct {
     int      fill;   /* scatter cursor during build (== start + written)      */
 } Cell;
 
+/* Dynamic partition: the ~16k curated + runtime-promoted bodies that actually
+ * move.  Re-hashed on the timer / on any body-set change. */
 static Cell  *s_table   = NULL;   /* open-addressed hash, power-of-two size    */
 static int    s_table_cap = 0;    /* slot count (power of two)                 */
 static int   *s_cell_body = NULL; /* CSR values: alive body indices by cell    */
@@ -56,6 +65,19 @@ static int    s_cell_body_cap = 0;
 static int    s_built_nbodies = 0;/* g_nbodies at last rebuild (change → dirty)*/
 static int    s_built = 0;        /* 1 once a build has populated the table    */
 static double s_rebuild_accum = 0.0;
+
+/* Frozen field-star partition: the [g_field_star_begin, g_field_star_end)
+ * range never moves, so it is hashed ONCE per universe load and kept out of the
+ * periodic / on-change dynamic rebuild.  This split is what removes the last
+ * O(field_count) (~10^5-10^6) cost from every rebuild — a single body add/remove
+ * (supernova, promotion) now re-hashes only the dynamic ~16k, not the galaxy. */
+static Cell    *s_ftable   = NULL;
+static int      s_ftable_cap = 0;
+static int     *s_fcell_body = NULL;
+static int      s_fcell_body_cap = 0;
+static int      s_fbuilt = 0;
+static unsigned s_fbuilt_gen = (unsigned)-1;   /* universe gen it was built for */
+static int      s_fbuilt_begin = 0, s_fbuilt_end = 0;
 
 /* splitmix64 finaliser — good dispersion for the packed integer cell key. */
 static inline uint64_t hash64(uint64_t x)
@@ -94,11 +116,11 @@ static int next_pow2(int n)
 
 /* Find the slot holding `key`, or the first empty slot if absent (open
  * addressing, linear probe).  Returns a slot index; caller checks its key. */
-static int table_slot(uint64_t key)
+static int table_slot(const Cell *table, int cap, uint64_t key)
 {
-    uint32_t mask = (uint32_t)s_table_cap - 1u;
+    uint32_t mask = (uint32_t)cap - 1u;
     uint32_t i = (uint32_t)hash64(key) & mask;
-    while (s_table[i].key != KEY_EMPTY && s_table[i].key != key)
+    while (table[i].key != KEY_EMPTY && table[i].key != key)
         i = (i + 1u) & mask;
     return (int)i;
 }
@@ -109,6 +131,10 @@ void cosmic_field_init(void)
     s_cell_body = NULL;     s_cell_body_cap = 0;
     s_built_nbodies = 0;    s_built = 0;
     s_rebuild_accum = 0.0;
+    s_ftable = NULL;        s_ftable_cap = 0;
+    s_fcell_body = NULL;    s_fcell_body_cap = 0;
+    s_fbuilt = 0;           s_fbuilt_gen = (unsigned)-1;
+    s_fbuilt_begin = 0;     s_fbuilt_end = 0;
 }
 
 void cosmic_field_shutdown(void)
@@ -116,81 +142,142 @@ void cosmic_field_shutdown(void)
     free(s_table);      s_table = NULL;      s_table_cap = 0;
     free(s_cell_body);  s_cell_body = NULL;  s_cell_body_cap = 0;
     s_built = 0;        s_built_nbodies = 0;
+    free(s_ftable);     s_ftable = NULL;     s_ftable_cap = 0;
+    free(s_fcell_body); s_fcell_body = NULL; s_fcell_body_cap = 0;
+    s_fbuilt = 0;       s_fbuilt_gen = (unsigned)-1;
+    s_fbuilt_begin = s_fbuilt_end = 0;
 }
 
-void cosmic_field_rebuild(void)
-{
-    s_built = 0;
-    s_built_nbodies = g_nbodies;
-    s_rebuild_accum = 0.0;
+/* A half-open body-index range [lo, hi) to include in a partition build. */
+typedef struct { int lo, hi; } IdxRange;
 
-    /* Count alive bodies to size the structures. */
+/* Build an open-addressed cell hash + CSR body pool over the alive bodies whose
+ * index falls in one of `ranges`.  The table and pool grow as needed and
+ * persist across calls.  Returns 1 if the partition holds >=1 body, 0 if empty. */
+static int hash_build(Cell **ptable, int *ptable_cap, int **ppool, int *ppool_cap,
+                      const IdxRange *ranges, int nranges)
+{
     int alive = 0;
-    for (int i = 0; i < g_nbodies; i++)
-        if (g_bodies[i].alive) alive++;
-    if (alive == 0) return;   /* nothing to index; queries return empty       */
+    for (int r = 0; r < nranges; r++)
+        for (int i = ranges[r].lo; i < ranges[r].hi; i++)
+            if (g_bodies[i].alive) alive++;
+    if (alive == 0) return 0;   /* nothing to index; queries skip this table    */
 
     /* Table sized for load factor <= 0.5 against the worst case (every body in
      * its own cell). */
     int want = next_pow2(2 * alive + 1);
-    if (want > s_table_cap) {
-        Cell *t = realloc(s_table, (size_t)want * sizeof(Cell));
-        if (!t) { fprintf(stderr, "[cosmic_field] table alloc failed\n"); return; }
-        s_table = t; s_table_cap = want;
+    if (want > *ptable_cap) {
+        Cell *t = realloc(*ptable, (size_t)want * sizeof(Cell));
+        if (!t) { fprintf(stderr, "[cosmic_field] table alloc failed\n"); return 0; }
+        *ptable = t; *ptable_cap = want;
     }
-    for (int i = 0; i < s_table_cap; i++) { s_table[i].key = KEY_EMPTY; }
+    Cell *table = *ptable;
+    int   cap   = *ptable_cap;
+    for (int i = 0; i < cap; i++) table[i].key = KEY_EMPTY;
 
-    if (alive > s_cell_body_cap) {
-        int cap = s_cell_body_cap ? s_cell_body_cap : 1;
-        while (cap < alive) cap <<= 1;
-        int *cb = realloc(s_cell_body, (size_t)cap * sizeof(int));
-        if (!cb) { fprintf(stderr, "[cosmic_field] cell pool alloc failed\n"); return; }
-        s_cell_body = cb; s_cell_body_cap = cap;
+    if (alive > *ppool_cap) {
+        int c = *ppool_cap ? *ppool_cap : 1;
+        while (c < alive) c <<= 1;
+        int *cb = realloc(*ppool, (size_t)c * sizeof(int));
+        if (!cb) { fprintf(stderr, "[cosmic_field] cell pool alloc failed\n"); return 0; }
+        *ppool = cb; *ppool_cap = c;
     }
+    int *pool = *ppool;
 
     /* Pass 1 — count bodies per cell (find-or-insert). */
-    for (int i = 0; i < g_nbodies; i++) {
-        if (!g_bodies[i].alive) continue;
-        uint64_t key = pack_cell(cell_coord(g_bodies[i].pos[0]),
-                                 cell_coord(g_bodies[i].pos[1]),
-                                 cell_coord(g_bodies[i].pos[2]));
-        int s = table_slot(key);
-        if (s_table[s].key == KEY_EMPTY) {
-            s_table[s].key = key;
-            s_table[s].count = 0;
+    for (int r = 0; r < nranges; r++) {
+        for (int i = ranges[r].lo; i < ranges[r].hi; i++) {
+            if (!g_bodies[i].alive) continue;
+            uint64_t key = pack_cell(cell_coord(g_bodies[i].pos[0]),
+                                     cell_coord(g_bodies[i].pos[1]),
+                                     cell_coord(g_bodies[i].pos[2]));
+            int s = table_slot(table, cap, key);
+            if (table[s].key == KEY_EMPTY) { table[s].key = key; table[s].count = 0; }
+            table[s].count++;
         }
-        s_table[s].count++;
     }
 
     /* Prefix-sum per-cell offsets, and seed each cell's scatter cursor. */
     int cursor = 0;
-    for (int i = 0; i < s_table_cap; i++) {
-        if (s_table[i].key == KEY_EMPTY) continue;
-        s_table[i].start = cursor;
-        s_table[i].fill  = cursor;
-        cursor += s_table[i].count;
+    for (int i = 0; i < cap; i++) {
+        if (table[i].key == KEY_EMPTY) continue;
+        table[i].start = cursor;
+        table[i].fill  = cursor;
+        cursor += table[i].count;
     }
 
     /* Pass 2 — scatter body indices into the CSR pool. */
-    for (int i = 0; i < g_nbodies; i++) {
-        if (!g_bodies[i].alive) continue;
-        uint64_t key = pack_cell(cell_coord(g_bodies[i].pos[0]),
-                                 cell_coord(g_bodies[i].pos[1]),
-                                 cell_coord(g_bodies[i].pos[2]));
-        int s = table_slot(key);
-        s_cell_body[s_table[s].fill++] = i;
+    for (int r = 0; r < nranges; r++) {
+        for (int i = ranges[r].lo; i < ranges[r].hi; i++) {
+            if (!g_bodies[i].alive) continue;
+            uint64_t key = pack_cell(cell_coord(g_bodies[i].pos[0]),
+                                     cell_coord(g_bodies[i].pos[1]),
+                                     cell_coord(g_bodies[i].pos[2]));
+            int s = table_slot(table, cap, key);
+            pool[table[s].fill++] = i;
+        }
     }
+    return 1;
+}
 
-    s_built = 1;
+/* Clamp the field-star range into [0, g_nbodies]. */
+static void field_range(int *fb, int *fe)
+{
+    int b = g_field_star_begin, e = g_field_star_end;
+    if (b < 0) b = 0;
+    if (e < b) e = b;
+    if (e > g_nbodies) e = g_nbodies;
+    if (b > g_nbodies) b = g_nbodies;
+    *fb = b; *fe = e;
+}
+
+/* Rebuild only the dynamic partition (everything outside the field range). */
+static void dynamic_rebuild(void)
+{
+    s_built_nbodies = g_nbodies;
+    s_rebuild_accum = 0.0;
+    int fb, fe; field_range(&fb, &fe);
+    IdxRange ranges[2] = { { 0, fb }, { fe, g_nbodies } };
+    s_built = hash_build(&s_table, &s_table_cap,
+                         &s_cell_body, &s_cell_body_cap, ranges, 2);
+}
+
+/* Rebuild the frozen field-star partition (once per universe load). */
+static void field_partition_rebuild(void)
+{
+    int fb, fe; field_range(&fb, &fe);
+    IdxRange r = { fb, fe };
+    s_fbuilt = hash_build(&s_ftable, &s_ftable_cap,
+                          &s_fcell_body, &s_fcell_body_cap, &r, 1);
+    s_fbuilt_gen   = g_universe_generation;
+    s_fbuilt_begin = g_field_star_begin;
+    s_fbuilt_end   = g_field_star_end;
+}
+
+/* Rebuild the field partition only if the universe (or its field range) changed. */
+static void field_partition_ensure(void)
+{
+    if (s_fbuilt_gen != g_universe_generation ||
+        s_fbuilt_begin != g_field_star_begin ||
+        s_fbuilt_end   != g_field_star_end)
+        field_partition_rebuild();
+}
+
+/* Public full rebuild: refresh both partitions (boot / headless / explicit). */
+void cosmic_field_rebuild(void)
+{
+    field_partition_rebuild();
+    dynamic_rebuild();
 }
 
 void cosmic_field_tick(double dt)
 {
     if (dt < 0.0) dt = 0.0;
+    field_partition_ensure();          /* cheap unless the universe reloaded    */
     s_rebuild_accum += dt;
     if (!s_built || g_nbodies != s_built_nbodies ||
         s_rebuild_accum >= COSMIC_REBUILD_SEC)
-        cosmic_field_rebuild();
+        dynamic_rebuild();
 }
 
 /* Accumulate one body's contribution (position relative to the sample centre,
@@ -211,6 +298,19 @@ static inline void accum_body(int b, const double centre_m[3], double r2_ly,
     *sumsq += d2;
 }
 
+/* Accumulate every body in `table`'s cell `key` (if occupied) into the sums. */
+static inline void accum_cell(const Cell *table, int cap, const int *pool,
+                              uint64_t key, const double centre_m[3], double r2_ly,
+                              double *N, double *mass_sum,
+                              double sum[3], double *sumsq)
+{
+    int s = table_slot(table, cap, key);
+    if (table[s].key != key) return;            /* empty cell → free           */
+    int start = table[s].start, cnt = table[s].count;
+    for (int k = 0; k < cnt; k++)
+        accum_body(pool[start + k], centre_m, r2_ly, N, mass_sum, sum, sumsq);
+}
+
 int cosmic_field_sample(const double pos_m[3], double radius_m, CosmicSample *out)
 {
     if (!out) return 0;
@@ -224,7 +324,7 @@ int cosmic_field_sample(const double pos_m[3], double radius_m, CosmicSample *ou
     double N = 0.0, mass_sum = 0.0, sumsq = 0.0;
     double sum[3] = { 0.0, 0.0, 0.0 };
 
-    if (s_built) {
+    if (s_built || s_fbuilt) {
         int cmin[3], cmax[3];
         for (int k = 0; k < 3; k++) {
             cmin[k] = cell_coord(pos_m[k] - radius_m);
@@ -238,7 +338,7 @@ int cosmic_field_sample(const double pos_m[3], double radius_m, CosmicSample *ou
 
         if (box_cells > (double)CELL_BOX_CAP) {
             /* Degenerate huge query — linear scan is cheaper than walking a
-             * mostly-empty cell box. */
+             * mostly-empty cell box.  Covers both partitions in one pass. */
             for (int b = 0; b < g_nbodies; b++)
                 accum_body(b, pos_m, r2_ly, &N, &mass_sum, sum, &sumsq);
         } else {
@@ -246,12 +346,12 @@ int cosmic_field_sample(const double pos_m[3], double radius_m, CosmicSample *ou
             for (int cy = cmin[1]; cy <= cmax[1]; cy++)
             for (int cx = cmin[0]; cx <= cmax[0]; cx++) {
                 uint64_t key = pack_cell(cx, cy, cz);
-                int s = table_slot(key);
-                if (s_table[s].key != key) continue;   /* empty cell → free    */
-                int start = s_table[s].start, cnt = s_table[s].count;
-                for (int k = 0; k < cnt; k++)
-                    accum_body(s_cell_body[start + k], pos_m, r2_ly,
-                               &N, &mass_sum, sum, &sumsq);
+                if (s_built)
+                    accum_cell(s_table, s_table_cap, s_cell_body, key,
+                               pos_m, r2_ly, &N, &mass_sum, sum, &sumsq);
+                if (s_fbuilt)
+                    accum_cell(s_ftable, s_ftable_cap, s_fcell_body, key,
+                               pos_m, r2_ly, &N, &mass_sum, sum, &sumsq);
             }
         }
     }

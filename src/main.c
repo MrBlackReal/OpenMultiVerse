@@ -40,6 +40,7 @@
 #include "starfield.h"
 #include "nebula.h"
 #include "galaxy.h"
+#include "benchmark.h"
 #include "comet.h"
 #include "trails.h"
 #include "labels.h"
@@ -251,14 +252,6 @@ static void camera_world_m(double out[3]) {
     out[0] = g_cam.pos[0] * AU;
     out[1] = g_cam.pos[1] * AU;
     out[2] = g_cam.pos[2] * AU;
-}
-
-/* Squared distance (m²) from `root`'s star to the camera. */
-static double system_cam_dist2(int root, const double cam_m[3]) {
-    double dx = g_bodies[root].pos[0] - cam_m[0];
-    double dy = g_bodies[root].pos[1] - cam_m[1];
-    double dz = g_bodies[root].pos[2] - cam_m[2];
-    return dx*dx + dy*dy + dz*dz;
 }
 
 /* Radius (light-years) of the live simulation region around the camera: only
@@ -590,6 +583,7 @@ static void app_quit(void) {
     if (settings_dirty())     /* persist only if something changed this session */
         settings_save();
     audio_shutdown();
+    benchmark_shutdown();
     menu_shutdown();
     loading_shutdown();
     ui_shutdown();
@@ -1086,6 +1080,7 @@ int main(int argc, char **argv) {
     const char *shot_path   = NULL;
     int         shot_frames = 6;
     int         headless    = 0;
+    int         run_bench   = 0;
     int         cam_set     = 0;
     double      cam_pos[3]  = { 0.0, 0.0, 0.0 };
     float       cam_yaw = 0.0f, cam_pitch = 0.0f;
@@ -1105,6 +1100,9 @@ int main(int argc, char **argv) {
          * (aging, supernovae, accretion fading) are testable headless. */
         else if (!strcmp(argv[a], "--stellar-rate") && a + 1 < argc)
             g_stellar_years_per_sec = atof(argv[++a]);
+        /* Scripted cinematic flythrough of the Milky Way and its neighbour
+         * galaxies, timing each leg and printing an FPS report on completion. */
+        else if (!strcmp(argv[a], "--benchmark")) run_bench = 1;
     }
     if (shot_frames < 1) shot_frames = 1;
     if (headless) {
@@ -1142,6 +1140,13 @@ int main(int argc, char **argv) {
         g_cam.pos[2] = cam_pos[2];
         g_cam.yaw    = cam_yaw;
         g_cam.pitch  = cam_pitch;
+    }
+
+    /* Benchmark: build the flythrough tour and begin.  Uncap the frame rate so
+     * the run actually measures throughput rather than the vsync interval. */
+    if (run_bench) {
+        set_vsync(0);
+        benchmark_start();
     }
 
     /* Headless: print a grep-able cosmic-field sample at the (possibly
@@ -1226,6 +1231,7 @@ int main(int argc, char **argv) {
     while (running) {
         Uint64 now = SDL_GetPerformanceCounter();
         float  dt  = (float)((double)(now - prev) / (double)freq);
+        float  dt_raw = dt;        /* true frame time, before the sim clamp   */
         if (dt > 0.1f) dt = 0.1f;  /* clamp: don't spiral if a frame takes > 100 ms */
         prev = now;
 
@@ -1252,8 +1258,17 @@ int main(int argc, char **argv) {
             }
         }
 
-        if (!cam_fly_active() && !s_pause_menu_open && !g_inspect_orbit_mode)
+        /* Benchmark flythrough owns the camera while it runs; it scripts the
+         * pose directly, so free-look, fly-to and the pause menu step aside. */
+        if (benchmark_active()) {
+            /* Feed the *unclamped* frame time so stages running below 10 fps
+             * are measured honestly (the sim's 100 ms clamp would otherwise
+             * floor every heavy frame at exactly 10 fps). */
+            benchmark_update(dt_raw);
+            if (!benchmark_active()) running = 0;   /* tour + summary done */
+        } else if (!cam_fly_active() && !s_pause_menu_open && !g_inspect_orbit_mode) {
             camera_move(dt);
+        }
 
         /* Star→system promotion (§0.1 final step): make the nearest
          * procedural galaxy stars real bodies before physics runs, so a
@@ -1273,13 +1288,14 @@ int main(int argc, char **argv) {
                 double effective_sim_dt = sim_dt;
 
                 double cam_m[3]; camera_world_m(cam_m);
-                const double active_r2 =
-                    (ACTIVE_RADIUS_LY * LY) * (ACTIVE_RADIUS_LY * LY);
 
                 /* Collect the ACTIVE (in-radius) systems once — a root star
                  * cannot cross the multi-ly active boundary within one frame,
                  * so the timestep-cap loop and the integration loop below both
-                 * reuse this list instead of re-testing every system twice. */
+                 * reuse this list instead of re-testing every system twice.
+                 * Backed by the movement-gated near-system cache, so the
+                 * O(system_count) scan runs only when the camera moves enough or
+                 * the body set changes — not every frame (galaxy-scale critical). */
                 static int *s_active_sys = NULL;
                 static int  s_active_sys_cap = 0;
                 if (sys_n > s_active_sys_cap) {
@@ -1289,10 +1305,11 @@ int main(int argc, char **argv) {
                     if (!s_active_sys) { fprintf(stderr, "[main] active-sys alloc failed\n"); exit(1); }
                     s_active_sys_cap = cap;
                 }
-                int n_active = 0;
-                for (int s = 0; s < sys_n; s++)
-                    if (system_cam_dist2(physics_system_root(s), cam_m) <= active_r2)
-                        s_active_sys[n_active++] = s;
+                const int *act_slots = NULL;
+                int n_active = physics_active_systems(cam_m, ACTIVE_RADIUS_LY * LY,
+                                                      &act_slots);
+                for (int a = 0; a < n_active; a++)
+                    s_active_sys[a] = act_slots[a];
 
                 /* Staleness-driven timestep refresh, active systems only.
                  * Frozen systems' orbits cannot drift, so the full O(N)

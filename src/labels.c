@@ -53,6 +53,7 @@
  */
 #include "labels.h"
 #include "body.h"
+#include "universe.h"   /* g_field_star_begin/end */
 #include "camera.h"
 #include "gl_utils.h"
 #include "math3d.h"
@@ -223,6 +224,15 @@ static int nearest_pinned(const double cam_m[3], int k_sys, int k_pl, int *out)
     int    ns = 0, np = 0;
 
     for (int b = 0; b < g_nbodies; b++) {
+        /* Skip the bulk field-star range (frozen catalog scenery).  Those are
+         * never "pinned nearest" labels — they would just flood the pins with
+         * catalogue ids; a field star you approach is still labelled via the
+         * active feed (physics_active_bodies) below.  Jumping the whole range
+         * keeps this an O(non-field) scan, not O(hundreds of thousands). */
+        if (b >= g_field_star_begin && b < g_field_star_end) {
+            b = g_field_star_end - 1;
+            continue;
+        }
         const Body *bd = &g_bodies[b];
         if (!bd->alive) continue;
 

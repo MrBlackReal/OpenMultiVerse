@@ -140,6 +140,22 @@ static double *s_act_d2              = NULL;   /* [s_cap]   scratch: active quer
 static int     s_nsystems = 0;
 static int     s_cap = 0;
 
+/* Movement-gated near-system candidate cache.  The active-region test (main.c
+ * integration cap, physics_active_bodies, render's near-field query) is
+ * O(s_nsystems) — hundreds of thousands of systems with a Gaia field.  A root
+ * star cannot cross the multi-ly active boundary in a fraction of a frame, so
+ * the set of systems near the camera changes slowly.  The full scan runs only
+ * when the camera moves past NEAR_CACHE_MOVE_LY or the system set changes;
+ * between rebuilds every consumer filters this small candidate list by exact
+ * current distance.  The cache deliberately covers a wider radius than any
+ * single query so it stays valid across several frames of camera drift. */
+#define NEAR_CACHE_MOVE_LY 0.25
+static int    *s_near_slots  = NULL;    /* candidate system slots            */
+static int     s_near_count  = 0, s_near_cap = 0;
+static double  s_near_cam[3] = {0.0, 0.0, 0.0};
+static double  s_near_radius = -1.0;    /* metres of coverage around s_near_cam */
+static int     s_near_valid  = 0;
+
 /* k-th member body index of slot (CSR access). */
 static inline int sys_member(int slot, int k)
 {
@@ -199,9 +215,13 @@ static int in_system(int i, int root)
 static int ensure_system_slot(int root)
 {
     if (root < 0 || root >= s_cap) return -1;
+    /* s_root_to_slot[] is the authoritative root->slot inverse map, sized to
+     * cover every body index and reset each rebuild, so a >= 0 entry is the
+     * slot and a < 0 entry means no slot exists yet.  (A linear scan of
+     * s_system_roots[] here would be redundant — it could never find a root the
+     * inverse map says is absent — and made the per-star pre-create loop
+     * O(systems^2): ~10 s at galaxy scale with hundreds of thousands of stars.) */
     if (s_root_to_slot[root] >= 0) return s_root_to_slot[root];
-    for (int i = 0; i < s_nsystems; i++)
-        if (s_system_roots[i] == root) return i;
     if (s_nsystems >= s_cap) return -1;
     s_system_roots[s_nsystems] = root;
     s_system_outer_dt[s_nsystems] = OUTER_DT_DEFAULT;
@@ -515,6 +535,7 @@ void physics_refresh_timestep_model(void)
     s_timestep_dirty     = 0;
     s_timestep_throttle  = 0.0;
     s_sim_since_refresh  = 0.0;
+    s_near_valid         = 0;   /* slots changed — near-system cache is stale */
 }
 
 /* Flag the timestep model stale so the next frame rebuilds it immediately.
@@ -597,15 +618,113 @@ int physics_system_root(int idx)
  * body indices.  Relies on the CSR member pool built by
  * physics_refresh_timestep_model(); returns 0 before the first build.
  */
+/*
+ * physics_update_active_cache — (re)build the near-system candidate list so it
+ * covers at least `radius_m` around cam_m.  Cheap to call every frame: the
+ * O(s_nsystems) scan runs only when the camera has moved past NEAR_CACHE_MOVE_LY
+ * since the last build, the requested radius grew beyond the cached coverage, or
+ * the system set changed (s_near_valid cleared by physics_refresh_timestep_model).
+ */
+void physics_update_active_cache(const double cam_m[3], double radius_m)
+{
+    if (s_nsystems <= 0) { s_near_count = 0; s_near_valid = 0; return; }
+
+    const double move = NEAR_CACHE_MOVE_LY * LY;
+    double dx = cam_m[0] - s_near_cam[0];
+    double dy = cam_m[1] - s_near_cam[1];
+    double dz = cam_m[2] - s_near_cam[2];
+    double moved2 = dx*dx + dy*dy + dz*dz;
+    /* The cache must cover the query radius plus the movement slack, so a system
+     * that drifts inside `radius_m` before the next rebuild is already listed. */
+    double need = radius_m + move;
+    if (s_near_valid && moved2 <= move*move && need <= s_near_radius)
+        return;
+
+    if (s_nsystems > s_near_cap) {
+        int cap = s_near_cap ? s_near_cap : 256;
+        while (cap < s_nsystems) cap *= 2;
+        s_near_slots = realloc(s_near_slots, (size_t)cap * sizeof(int));
+        if (!s_near_slots) { fprintf(stderr, "[physics] near-cache alloc failed\n"); exit(1); }
+        s_near_cap = cap;
+    }
+
+    /* Cover an extra movement step beyond `need` so the cache survives a few
+     * frames of camera drift before the next full scan. */
+    double cover  = need + move;
+    double cover2 = cover * cover;
+    s_near_count = 0;
+    for (int s = 0; s < s_nsystems; s++) {
+        int root = s_system_roots[s];
+        if (root < 0 || root >= g_nbodies || !g_bodies[root].alive) continue;
+        double rx = g_bodies[root].pos[0] - cam_m[0];
+        double ry = g_bodies[root].pos[1] - cam_m[1];
+        double rz = g_bodies[root].pos[2] - cam_m[2];
+        if (rx*rx + ry*ry + rz*rz <= cover2)
+            s_near_slots[s_near_count++] = s;
+    }
+    s_near_cam[0] = cam_m[0]; s_near_cam[1] = cam_m[1]; s_near_cam[2] = cam_m[2];
+    s_near_radius = cover;
+    s_near_valid  = 1;
+}
+
+/*
+ * physics_active_systems — fill an internal list with the SLOT indices of the
+ * systems whose root is within `radius_m` of cam_m (nearest first), from the
+ * near-system cache.  *out points to internal storage valid until the next
+ * physics_update_active_cache / physics_active_* / timestep rebuild.  Returns the
+ * count.  Replaces the per-frame O(s_nsystems) scan main.c did to pick the
+ * systems to integrate.
+ */
+int physics_active_systems(const double cam_m[3], double radius_m, const int **out)
+{
+    if (out) *out = s_act_slots;
+    if (!out || s_nsystems <= 0) return 0;
+
+    physics_update_active_cache(cam_m, radius_m);
+    const double r2 = radius_m * radius_m;
+
+    int na = 0;
+    for (int c = 0; c < s_near_count; c++) {
+        int s = s_near_slots[c];
+        int root = s_system_roots[s];
+        if (root < 0 || root >= g_nbodies || !g_bodies[root].alive) continue;
+        double dx = g_bodies[root].pos[0] - cam_m[0];
+        double dy = g_bodies[root].pos[1] - cam_m[1];
+        double dz = g_bodies[root].pos[2] - cam_m[2];
+        double d2 = dx*dx + dy*dy + dz*dz;
+        if (d2 > r2) continue;
+        s_act_slots[na] = s;
+        s_act_d2[na]    = d2;
+        na++;
+    }
+
+    /* Insertion sort ascending by distance (na is normally tiny). */
+    for (int i = 1; i < na; i++) {
+        int    ts = s_act_slots[i];
+        double td = s_act_d2[i];
+        int k = i;
+        while (k > 0 && s_act_d2[k-1] > td) {
+            s_act_slots[k] = s_act_slots[k-1];
+            s_act_d2[k]    = s_act_d2[k-1];
+            k--;
+        }
+        s_act_slots[k] = ts;
+        s_act_d2[k]    = td;
+    }
+    return na;
+}
+
 int physics_active_bodies(const double cam_m[3], double radius_m, int *out, int max)
 {
     if (!out || max <= 0 || s_nsystems <= 0) return 0;
 
+    physics_update_active_cache(cam_m, radius_m);
     const double r2 = radius_m * radius_m;
 
-    /* Gather in-radius systems with their squared camera distance. */
+    /* Gather in-radius systems (from the near cache) with their squared distance. */
     int na = 0;
-    for (int s = 0; s < s_nsystems; s++) {
+    for (int c = 0; c < s_near_count; c++) {
+        int s = s_near_slots[c];
         int root = s_system_roots[s];
         if (root < 0 || root >= g_nbodies || !g_bodies[root].alive) continue;
         double dx = g_bodies[root].pos[0] - cam_m[0];
@@ -741,8 +860,14 @@ static void add_cosmological_acc(int root) {
         ref[1] = g_bodies[root].pos[1];
         ref[2] = g_bodies[root].pos[2];
     }
-    for (int i = 0; i < g_nbodies; i++) {
-        if (!g_bodies[i].alive || !in_system(i, root)) continue;
+    /* Iterate the system's CSR member list when a slot exists (the per-frame
+     * path); fall back to the all-bodies scan only on the legacy root<0 warmup
+     * path.  Avoids an O(active_systems x g_nbodies) scan per step. */
+    int slot = (root >= 0 && root < s_cap) ? s_root_to_slot[root] : -1;
+    int count = slot >= 0 ? s_system_member_count[slot] : g_nbodies;
+    for (int mi = 0; mi < count; mi++) {
+        int i = slot >= 0 ? sys_member(slot, mi) : mi;
+        if (!g_bodies[i].alive || (slot < 0 && !in_system(i, root))) continue;
         g_bodies[i].acc[0] += g_laws.lambda * (g_bodies[i].pos[0] - ref[0]);
         g_bodies[i].acc[1] += g_laws.lambda * (g_bodies[i].pos[1] - ref[1]);
         g_bodies[i].acc[2] += g_laws.lambda * (g_bodies[i].pos[2] - ref[2]);
@@ -765,8 +890,13 @@ static void add_cosmological_acc(int root) {
 static void add_relativistic_acc(int root) {
     if (g_laws.pn_factor == 0.0) return;
     const double c2 = g_laws.c_light * g_laws.c_light;
-    for (int i = 0; i < g_nbodies; i++) {
-        if (!g_bodies[i].alive || !in_system(i, root)) continue;
+    /* Iterate CSR members on the per-frame path; all-bodies only for root<0
+     * warmup.  Avoids the O(active_systems x g_nbodies) scan per step. */
+    int slot = (root >= 0 && root < s_cap) ? s_root_to_slot[root] : -1;
+    int count = slot >= 0 ? s_system_member_count[slot] : g_nbodies;
+    for (int mi = 0; mi < count; mi++) {
+        int i = slot >= 0 ? sys_member(slot, mi) : mi;
+        if (!g_bodies[i].alive || (slot < 0 && !in_system(i, root))) continue;
         int p = g_bodies[i].parent;
         if (p < 0 || !g_bodies[p].alive) continue;   /* stars have no primary */
 
@@ -856,8 +986,8 @@ static void compute_acc_slow_system(int root) {
                 dz = g_bodies[j].pos[2] - g_bodies[i].pos[2];
                 r2 = dx*dx + dy*dy + dz*dz + SOFTENING*SOFTENING;
                 if (g_laws.force_exp == 2.0 &&
-                    G_CONST * g_bodies[j].mass / r2 < GRAV_EPSILON &&
-                    G_CONST * g_bodies[i].mass / r2 < GRAV_EPSILON) continue;
+                    G_CONST * g_bodies[j].mass < GRAV_EPSILON * r2 &&
+                    G_CONST * g_bodies[i].mass < GRAV_EPSILON * r2) continue;
                 r  = sqrt(r2);
                 f  = laws_pair_factor(r2, r);   /* f = G / r³; acceleration = f × M × r̂ */
 
@@ -891,6 +1021,7 @@ static void compute_acc_slow_system(int root) {
     for (int mi = 0; mi < member_count; mi++) {
         i = sys_member(slot, mi);
         if (!g_bodies[i].alive) continue;
+        int i_is_sat = is_satellite(i);   /* invariant across the inner j loop */
         for (int jk = 0; jk < j_count; jk++) {
             int same_system;
             double dx, dy, dz, r2, r, f;
@@ -902,18 +1033,18 @@ static void compute_acc_slow_system(int root) {
                           (j >= 0 && j < g_nbodies && s_body_system_slot[j] == slot);
             if (same_system && j < i) continue;
 
-            if (is_satellite(i) && is_satellite(j)) continue;
+            if (i_is_sat && is_satellite(j)) continue;
             if (same_system &&
                 ((is_satellite(j) && is_ancestor_of(i, j)) ||
-                 (is_satellite(i) && is_ancestor_of(j, i)))) continue;
+                 (i_is_sat && is_ancestor_of(j, i)))) continue;
 
             dx = g_bodies[j].pos[0] - g_bodies[i].pos[0];
             dy = g_bodies[j].pos[1] - g_bodies[i].pos[1];
             dz = g_bodies[j].pos[2] - g_bodies[i].pos[2];
             r2 = dx*dx + dy*dy + dz*dz + SOFTENING*SOFTENING;
             if (g_laws.force_exp == 2.0 &&
-                G_CONST * g_bodies[j].mass / r2 < GRAV_EPSILON &&
-                G_CONST * g_bodies[i].mass / r2 < GRAV_EPSILON) continue;
+                G_CONST * g_bodies[j].mass < GRAV_EPSILON * r2 &&
+                G_CONST * g_bodies[i].mass < GRAV_EPSILON * r2) continue;
             r  = sqrt(r2);
             f  = laws_pair_factor(r2, r);
 
@@ -963,7 +1094,7 @@ static void compute_acc_fast_system(int root) {
                 double dz = g_bodies[p].pos[2] - g_bodies[i].pos[2];
                 double r2 = dx*dx + dy*dy + dz*dz + SOFTENING*SOFTENING;
                 if (g_laws.force_exp == 2.0 &&
-                    G_CONST * g_bodies[p].mass / r2 < GRAV_EPSILON) continue;
+                    G_CONST * g_bodies[p].mass < GRAV_EPSILON * r2) continue;
                 double r  = sqrt(r2);
                 double f  = laws_pair_factor(r2, r);
 
@@ -998,7 +1129,7 @@ static void compute_acc_fast_system(int root) {
             double dz = g_bodies[p].pos[2] - g_bodies[i].pos[2];
             double r2 = dx*dx + dy*dy + dz*dz + SOFTENING*SOFTENING;
             if (g_laws.force_exp == 2.0 &&
-                G_CONST * g_bodies[p].mass / r2 < GRAV_EPSILON) continue;
+                G_CONST * g_bodies[p].mass < GRAV_EPSILON * r2) continue;
             double r  = sqrt(r2);
             double f  = laws_pair_factor(r2, r);
 

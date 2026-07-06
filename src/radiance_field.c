@@ -29,6 +29,8 @@
  */
 #include "radiance_field.h"
 #include "body.h"
+#include "universe.h"   /* g_field_star_begin/end */
+#include "physics.h"    /* physics_active_bodies (near field stars) */
 #include "camera.h"
 #include "nebula.h"
 #include "galaxy.h"
@@ -281,6 +283,32 @@ void radiance_field_shutdown(void)
     s_count = s_cap = s_body_lum_cap = 0;
 }
 
+/* Field stars within this radius of the camera are added as emitters, so an
+ * approached field star still lights the scene / shows as the dominant source in
+ * deep field.  Generous (irradiance is 1/r², but out in the field the nearest
+ * stars are the only light); stellar density is low, so this stays a small set. */
+#define RADIANCE_FIELD_NEAR_LY 20.0
+#define RADIANCE_NEAR_MAX      4096
+
+/* Push one star (body index i) as a radiance emitter, if it is a live star with
+ * positive luminosity.  Shared by the non-field and near-field passes. */
+static void add_star_emitter(int i)
+{
+    const Body *b = &g_bodies[i];
+    if (!b->alive || !b->is_star) return;   /* is_black_hole ⇒ is_star */
+    double lum = b->is_black_hole ? bh_luminosity(b) : star_luminosity(b);
+    if (lum <= 0.0) return;
+    Emitter *e = emitters_push();
+    e->body  = i;
+    e->lum   = lum;
+    e->pos[0] = e->pos[1] = e->pos[2] = 0.0;   /* read live */
+    e->rmin2 = b->radius * b->radius;
+    radiance_field_body_color(i, e->col);
+    e->label  = NULL;
+    e->nebula = -1;
+    s_body_lum[i] = lum;
+}
+
 void radiance_field_rebuild(void)
 {
     s_count = 0;
@@ -293,20 +321,28 @@ void radiance_field_rebuild(void)
     if (s_body_lum)
         memset(s_body_lum, 0, (size_t)s_body_lum_cap * sizeof(double));
 
+    /* Emitter list = every non-field star, plus the field stars currently near
+     * the camera.  The bulk Gaia field (frozen, distant) contributes negligible
+     * irradiance, but including all of it would blow the emitter count to
+     * hundreds of thousands and make every radiance_field_sample / _top (called
+     * per body and per comet, each frame) O(that) — the dominant per-frame cost
+     * at galaxy scale.  A field star you approach still becomes an emitter (and
+     * can be the dominant light in deep field), refreshed on each rebuild. */
     for (int i = 0; i < g_nbodies; i++) {
-        const Body *b = &g_bodies[i];
-        if (!b->alive || !b->is_star) continue;   /* is_black_hole ⇒ is_star */
-        double lum = b->is_black_hole ? bh_luminosity(b) : star_luminosity(b);
-        if (lum <= 0.0) continue;
-        Emitter *e = emitters_push();
-        e->body  = i;
-        e->lum   = lum;
-        e->pos[0] = e->pos[1] = e->pos[2] = 0.0;   /* read live */
-        e->rmin2 = b->radius * b->radius;
-        radiance_field_body_color(i, e->col);
-        e->label  = NULL;
-        e->nebula = -1;
-        s_body_lum[i] = lum;
+        if (i >= g_field_star_begin && i < g_field_star_end) {
+            i = g_field_star_end - 1;   /* O(1) skip of the whole field range */
+            continue;
+        }
+        add_star_emitter(i);
+    }
+    if (g_field_star_end > g_field_star_begin) {
+        double cam_m[3] = { g_cam.pos[0] * AU, g_cam.pos[1] * AU, g_cam.pos[2] * AU };
+        static int s_nf[RADIANCE_NEAR_MAX];
+        int nn = physics_active_bodies(cam_m, RADIANCE_FIELD_NEAR_LY * LY,
+                                       s_nf, RADIANCE_NEAR_MAX);
+        for (int j = 0; j < nn; j++)
+            if (s_nf[j] >= g_field_star_begin && s_nf[j] < g_field_star_end)
+                add_star_emitter(s_nf[j]);
     }
 
     /* Nebulae as faint area emitters (skipped when nebulae are disabled in

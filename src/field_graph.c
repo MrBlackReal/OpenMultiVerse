@@ -4,6 +4,7 @@
  */
 #include "field_graph.h"
 #include "body.h"
+#include "universe.h"   /* g_field_star_begin/end */
 #include "physics.h"     /* g_sim_time                       */
 #include "lifecycle.h"   /* lifecycle_phase_name for prints  */
 #include "accretion.h"   /* accretion_flows (Roche streams)  */
@@ -88,6 +89,14 @@ void field_graph_rebuild(void)
     s_stats.events_logged = events_logged;
 
     for (int i = 0; i < g_nbodies; i++) {
+        /* Skip the bulk field-star range: 262k frozen catalogue points have no
+         * meaningful relations (they are lone stars), so making them graph nodes
+         * — each running a radiance query — was a top per-frame cost.  The
+         * Relations view concerns the curated systems near the camera. */
+        if (i >= g_field_star_begin && i < g_field_star_end) {
+            i = g_field_star_end - 1;
+            continue;
+        }
         const Body *b = &g_bodies[i];
         if (!b->alive) continue;
 

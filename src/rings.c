@@ -60,6 +60,7 @@
 #include "rings.h"
 #include "common.h"
 #include "body.h"
+#include "universe.h"   /* g_field_star_begin/end */
 #include "camera.h"
 #include "collision.h"
 #include "physics.h"
@@ -1930,6 +1931,15 @@ void rings_step_system(int root, double dt)
         }
 
         for (int i = 0; i < g_nbodies; i++) {
+            /* Skip the bulk field-star range: field stars are stars, never ring
+             * perturbers (which must be star-parented planets), so scanning them
+             * is pure waste — and at galaxy scale this loop, run per active
+             * system per outer step per disc, was the single hottest function in
+             * the frame (a full 262k-body scan each time). */
+            if (i >= g_field_star_begin && i < g_field_star_end) {
+                i = g_field_star_end - 1;
+                continue;
+            }
             if (i == parent_idx) continue;
             if (!body_is_ring_perturber_planet(i)) continue;
             if (body_root_star(i) != root) continue;

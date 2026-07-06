@@ -605,11 +605,25 @@ static void eq_vel_to_gl(double ra_deg, double dec_deg,
  *   pmra, pmdec (mas/yr), radial_velocity (km/s), teff [or st_teff]
  * Emits one positioned star per row (pos_ly + proper-motion velocity_km_s).
  */
-static int convert_gaia(const char *in_path, const char *out_path, int max_items)
-{
-    FILE *in = fopen(in_path, "rb");
-    if (!in) { fprintf(stderr, "[catalog] cannot open '%s'\n", in_path); return -1; }
+/* ---- shared Gaia row science (used by both the JSON and binary emitters) -- */
 
+typedef struct {
+    int name, ra, dec, plx, dpc, pmra, pmde, rv, te;
+} GaiaCols;
+
+typedef struct {
+    char   name[96];
+    double pos[3];   /* light-years, ecliptic->GL frame */
+    double vel[3];   /* km/s, GL frame                  */
+    double smass;    /* stellar mass, solar masses      */
+    double rgb[3];   /* display colour, 0..1            */
+} StarValues;
+
+/* Read past blank/comment lines to the CSV header, fill the column indices.
+ * Returns the header string (caller frees) or NULL if absent / missing the
+ * required ra, dec and parallax|dist_pc columns. */
+static char *gaia_read_header(FILE *in, GaiaCols *c)
+{
     char *header = NULL;
     for (;;) {
         char *ln = read_line(in);
@@ -618,26 +632,75 @@ static int convert_gaia(const char *in_path, const char *out_path, int max_items
         if (t[0] == '\0' || t[0] == '#') { free(ln); continue; }
         header = ln; break;
     }
-    if (!header) { fprintf(stderr, "[catalog] no header in '%s'\n", in_path); fclose(in); return -1; }
+    if (!header) return NULL;
 
     char *hdr[CATALOG_MAX_COLS];
     int nh = split_csv(header, hdr, CATALOG_MAX_COLS);
     for (int i = 0; i < nh; i++) { hdr[i] = trim(hdr[i]); lower(hdr[i]); }
 
-    int ci_name = col_index(hdr, nh, "name");
-    if (ci_name < 0) ci_name = col_index(hdr, nh, "source_id");
-    int ci_ra   = col_index(hdr, nh, "ra");
-    int ci_dec  = col_index(hdr, nh, "dec");
-    int ci_plx  = col_index(hdr, nh, "parallax");
-    int ci_dpc  = col_index(hdr, nh, "dist_pc");
-    int ci_pmra = col_index(hdr, nh, "pmra");
-    int ci_pmde = col_index(hdr, nh, "pmdec");
-    int ci_rv   = col_index(hdr, nh, "radial_velocity");
-    int ci_te   = col_index(hdr, nh, "teff");
-    if (ci_te < 0) ci_te = col_index(hdr, nh, "st_teff");
-    if (ci_ra < 0 || ci_dec < 0 || (ci_plx < 0 && ci_dpc < 0)) {
-        fprintf(stderr, "[catalog] '%s' needs ra, dec and parallax/dist_pc\n", in_path);
-        free(header); fclose(in); return -1;
+    c->name = col_index(hdr, nh, "name");
+    if (c->name < 0) c->name = col_index(hdr, nh, "source_id");
+    c->ra   = col_index(hdr, nh, "ra");
+    c->dec  = col_index(hdr, nh, "dec");
+    c->plx  = col_index(hdr, nh, "parallax");
+    c->dpc  = col_index(hdr, nh, "dist_pc");
+    c->pmra = col_index(hdr, nh, "pmra");
+    c->pmde = col_index(hdr, nh, "pmdec");
+    c->rv   = col_index(hdr, nh, "radial_velocity");
+    c->te   = col_index(hdr, nh, "teff");
+    if (c->te < 0) c->te = col_index(hdr, nh, "st_teff");
+    if (c->ra < 0 || c->dec < 0 || (c->plx < 0 && c->dpc < 0)) {
+        free(header);
+        return NULL;
+    }
+    return header;
+}
+
+/* Compute one star's values from a split CSV row.  `ordinal` (1-based) is used
+ * only for the "Star_N" name fallback.  Returns 1 if the row yields a placeable
+ * star, 0 to skip it (no position). */
+static int gaia_parse_row(char **f, int nf, const GaiaCols *c, int ordinal,
+                          StarValues *sv)
+{
+    double ra = field_num(f,nf,c->ra), dec = field_num(f,nf,c->dec);
+    double dist_pc = field_num(f,nf,c->dpc);
+    if (isnan(dist_pc)) {
+        double plx = field_num(f,nf,c->plx);
+        if (isnan(plx) || plx <= 0.0) return 0;
+        dist_pc = 1000.0 / plx;   /* mas -> pc */
+    }
+    if (isnan(ra) || isnan(dec) || dist_pc <= 0.0) return 0;
+
+    eq_to_ecliptic_ly(ra, dec, dist_pc * PC_TO_LY, sv->pos);
+
+    double teff = field_num(f,nf,c->te);
+    sv->smass = mass_from_teff(teff);
+    teff_color(teff, sv->rgb);
+
+    /* proper motion (mas/yr) -> transverse velocity (km/s): 4.74047 km/s
+     * per (arcsec/yr * pc). */
+    double pmra = field_num(f,nf,c->pmra), pmde = field_num(f,nf,c->pmde);
+    double rv   = field_num(f,nf,c->rv);
+    double v_alpha = isnan(pmra) ? 0.0 : 4.74047 * (pmra/1000.0) * dist_pc;
+    double v_delta = isnan(pmde) ? 0.0 : 4.74047 * (pmde/1000.0) * dist_pc;
+    double v_r     = isnan(rv)   ? 0.0 : rv;
+    eq_vel_to_gl(ra, dec, v_r, v_alpha, v_delta, sv->vel);
+
+    snprintf(sv->name, sizeof(sv->name), "%s", field(f,nf,c->name));
+    if (!sv->name[0]) snprintf(sv->name, sizeof(sv->name), "Star_%d", ordinal);
+    return 1;
+}
+
+static int convert_gaia(const char *in_path, const char *out_path, int max_items)
+{
+    FILE *in = fopen(in_path, "rb");
+    if (!in) { fprintf(stderr, "[catalog] cannot open '%s'\n", in_path); return -1; }
+
+    GaiaCols c;
+    char *header = gaia_read_header(in, &c);
+    if (!header) {
+        fprintf(stderr, "[catalog] '%s': missing header or ra/dec/parallax\n", in_path);
+        fclose(in); return -1;
     }
 
     FILE *o = fopen(out_path, "wb");
@@ -656,45 +719,19 @@ static int convert_gaia(const char *in_path, const char *out_path, int max_items
 
         char *f[CATALOG_MAX_COLS];
         int nf = split_csv(ln, f, CATALOG_MAX_COLS);
-        double ra = field_num(f,nf,ci_ra), dec = field_num(f,nf,ci_dec);
-        double dist_pc = field_num(f,nf,ci_dpc);
-        if (isnan(dist_pc)) {
-            double plx = field_num(f,nf,ci_plx);
-            if (isnan(plx) || plx <= 0.0) { free(ln); continue; }
-            dist_pc = 1000.0 / plx;   /* mas -> pc */
-        }
-        if (isnan(ra) || isnan(dec) || dist_pc <= 0.0) { free(ln); continue; }
-
-        double pos[3];
-        eq_to_ecliptic_ly(ra, dec, dist_pc * PC_TO_LY, pos);
-
-        double teff = field_num(f,nf,ci_te);
-        double smass = mass_from_teff(teff);
-        double rgb[3]; teff_color(teff, rgb);
-
-        /* proper motion (mas/yr) -> transverse velocity (km/s): 4.74047 km/s
-         * per (arcsec/yr * pc). */
-        double pmra = field_num(f,nf,ci_pmra), pmde = field_num(f,nf,ci_pmde);
-        double rv   = field_num(f,nf,ci_rv);
-        double v_alpha = isnan(pmra) ? 0.0 : 4.74047 * (pmra/1000.0) * dist_pc;
-        double v_delta = isnan(pmde) ? 0.0 : 4.74047 * (pmde/1000.0) * dist_pc;
-        double v_r     = isnan(rv)   ? 0.0 : rv;
-        double vel[3]; eq_vel_to_gl(ra, dec, v_r, v_alpha, v_delta, vel);
-
-        char nm[96];
-        snprintf(nm, sizeof(nm), "%s", field(f,nf,ci_name));
-        if (!nm[0]) snprintf(nm, sizeof(nm), "Star_%d", count + 1);
+        StarValues sv;
+        if (!gaia_parse_row(f, nf, &c, count + 1, &sv)) { free(ln); continue; }
 
         if (!first) fprintf(o, ",\n");
         first = 0;
         fprintf(o, "    { \"name\": ");
-        put_json_str(o, nm);
+        put_json_str(o, sv.name);
         fprintf(o, ", \"type\": \"star\",\n");
-        fprintf(o, "      \"pos_ly\": [%.6f, %.6f, %.6f],\n", pos[0], pos[1], pos[2]);
-        fprintf(o, "      \"velocity_km_s\": [%.5f, %.5f, %.5f],\n", vel[0], vel[1], vel[2]);
+        fprintf(o, "      \"pos_ly\": [%.6f, %.6f, %.6f],\n", sv.pos[0], sv.pos[1], sv.pos[2]);
+        fprintf(o, "      \"velocity_km_s\": [%.5f, %.5f, %.5f],\n", sv.vel[0], sv.vel[1], sv.vel[2]);
         fprintf(o, "      \"mass\": %.6e, \"radius_km\": %.3f,\n",
-                smass * MSUN_KG, pow(smass, 0.8) * RSUN_KM);
-        fprintf(o, "      \"color\": [%.3f, %.3f, %.3f],\n", rgb[0], rgb[1], rgb[2]);
+                sv.smass * MSUN_KG, pow(sv.smass, 0.8) * RSUN_KM);
+        fprintf(o, "      \"color\": [%.3f, %.3f, %.3f],\n", sv.rgb[0], sv.rgb[1], sv.rgb[2]);
         fprintf(o, "      \"obliquity_deg\": 0.0, \"rotation_period_days\": 25.0 }");
         count++;
         free(ln);
@@ -706,6 +743,82 @@ static int convert_gaia(const char *in_path, const char *out_path, int max_items
     return count;
 }
 
+static uint8_t clamp_u8(double v)
+{
+    long x = lround(v * 255.0);
+    if (x < 0)   x = 0;
+    if (x > 255) x = 255;
+    return (uint8_t)x;
+}
+
+/* Same science as convert_gaia, but packs the compact StarBin format (catalog.h)
+ * instead of JSON — for bulk star fields far too large to ship as text. */
+static int convert_gaia_bin(const char *in_path, const char *out_path, int max_items)
+{
+    FILE *in = fopen(in_path, "rb");
+    if (!in) { fprintf(stderr, "[catalog] cannot open '%s'\n", in_path); return -1; }
+
+    GaiaCols c;
+    char *header = gaia_read_header(in, &c);
+    if (!header) {
+        fprintf(stderr, "[catalog] '%s': missing header or ra/dec/parallax\n", in_path);
+        fclose(in); return -1;
+    }
+
+    FILE *o = fopen(out_path, "wb");
+    if (!o) { fprintf(stderr, "[catalog] cannot write '%s'\n", out_path); free(header); fclose(in); return -1; }
+
+    /* Write a placeholder header; the record count is patched in at the end. */
+    StarBinHeader h = { STARBIN_MAGIC, STARBIN_VERSION, 0, (uint32_t)sizeof(StarBinRecord) };
+    if (fwrite(&h, sizeof h, 1, o) != 1) {
+        fprintf(stderr, "[catalog] write error on '%s'\n", out_path);
+        fclose(o); free(header); fclose(in); return -1;
+    }
+
+    uint32_t count = 0;
+    int write_err = 0;
+    for (;;) {
+        char *ln = read_line(in);
+        if (!ln) break;
+        char *t = trim(ln);
+        if (t[0] == '\0' || t[0] == '#') { free(ln); continue; }
+        if (max_items > 0 && (int)count >= max_items) { free(ln); break; }
+
+        char *f[CATALOG_MAX_COLS];
+        int nf = split_csv(ln, f, CATALOG_MAX_COLS);
+        StarValues sv;
+        if (!gaia_parse_row(f, nf, &c, (int)count + 1, &sv)) { free(ln); continue; }
+
+        StarBinRecord r;
+        memset(&r, 0, sizeof r);
+        r.source_id  = strtoull(sv.name, NULL, 10);   /* Gaia source_id; 0 if non-numeric */
+        r.pos_ly[0]  = (float)sv.pos[0]; r.pos_ly[1]  = (float)sv.pos[1]; r.pos_ly[2]  = (float)sv.pos[2];
+        r.vel_kms[0] = (float)sv.vel[0]; r.vel_kms[1] = (float)sv.vel[1]; r.vel_kms[2] = (float)sv.vel[2];
+        r.mass_kg    = (float)(sv.smass * MSUN_KG);
+        r.radius_km  = (float)(pow(sv.smass, 0.8) * RSUN_KM);
+        r.color[0]   = clamp_u8(sv.rgb[0]);
+        r.color[1]   = clamp_u8(sv.rgb[1]);
+        r.color[2]   = clamp_u8(sv.rgb[2]);
+        if (fwrite(&r, sizeof r, 1, o) != 1) { write_err = 1; free(ln); break; }
+        count++;
+        free(ln);
+    }
+
+    /* Patch the final record count into the header. */
+    h.count = count;
+    if (fseek(o, 0, SEEK_SET) != 0 || fwrite(&h, sizeof h, 1, o) != 1)
+        write_err = 1;
+
+    fclose(o); fclose(in); free(header);
+    if (write_err) {
+        fprintf(stderr, "[catalog] gaia-bin: write error on '%s'\n", out_path);
+        return -1;
+    }
+    fprintf(stdout, "[catalog] gaia-bin: wrote %u stars -> %s (%zu bytes)\n",
+            count, out_path, sizeof(StarBinHeader) + (size_t)count * sizeof(StarBinRecord));
+    return (int)count;
+}
+
 /* ------------------------------------------------------------------ API */
 
 int catalog_type_from_name(const char *name)
@@ -714,6 +827,7 @@ int catalog_type_from_name(const char *name)
     if (!strcmp(name, "exoplanets")) return CATALOG_EXOPLANETS;
     if (!strcmp(name, "horizons"))   return CATALOG_HORIZONS;
     if (!strcmp(name, "gaia"))       return CATALOG_GAIA;
+    if (!strcmp(name, "gaia-bin"))   return CATALOG_GAIA_BIN;
     return -1;
 }
 
@@ -724,6 +838,7 @@ int catalog_convert(CatalogType type, const char *in_path,
         case CATALOG_EXOPLANETS: return convert_exoplanets(in_path, out_path, max_items);
         case CATALOG_HORIZONS:   return convert_horizons(in_path, out_path, max_items);
         case CATALOG_GAIA:       return convert_gaia(in_path, out_path, max_items);
+        case CATALOG_GAIA_BIN:   return convert_gaia_bin(in_path, out_path, max_items);
     }
     fprintf(stderr, "[catalog] unknown catalog type\n");
     return -1;

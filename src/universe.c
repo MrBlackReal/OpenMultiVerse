@@ -52,6 +52,7 @@
 #include "json.h"
 #include "common.h"
 #include "loading.h"
+#include "catalog.h"
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
@@ -426,6 +427,9 @@ static void read_atmosphere(const JsonNode *bn, Body *bo)
 static int root_star_of(int i) { return body_root_star(i); }
 
 int g_universe_is_snapshot = 0;
+int g_field_star_begin = 0;
+int g_field_star_end   = 0;
+unsigned g_universe_generation = 0;
 
 /* Path of the source universe JSON most recently passed to universe_load().
  * universe_save() re-reads it to carry the procedural "rings"/"asteroid_belts"
@@ -714,6 +718,173 @@ int universe_validate(const char *path)
     return ok ? 0 : -1;
 }
 
+/* FNV-1a hash of an integer spatial-grid cell. */
+static unsigned cell_hash(int cx, int cy, int cz)
+{
+    unsigned h = 2166136261u;
+    h = (h ^ (unsigned)cx) * 16777619u;
+    h = (h ^ (unsigned)cy) * 16777619u;
+    h = (h ^ (unsigned)cz) * 16777619u;
+    return h;
+}
+
+/*
+ * load_star_catalog — append stars from a compact StarBin file (catalog.h) into
+ * g_bodies[].  Referenced by a preset via the optional top-level "star_catalog"
+ * JSON path.  Stars are cheap now (no trail, no GL buffer), so a bulk field of
+ * hundreds of thousands loads straight in as real, navigable bodies.
+ *
+ * A missing file is not an error: the catalog is regenerated locally
+ * (catalogtool gaia-bin) and gitignored, so a fresh checkout simply loads the
+ * preset's JSON bodies without the extra field.
+ *
+ * Each catalogue star is skipped if it falls within DEDUP_LY of a star already
+ * loaded from the JSON (an exoplanet host or an inline nearby star), so the two
+ * sources never draw the same star twice.  The test uses a spatial hash of the
+ * existing stars (built once) — O(catalog) rather than O(catalog x existing).
+ */
+static void load_star_catalog(const char *path)
+{
+    if (!path || !path[0]) return;
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stdout, "[universe] star_catalog '%s' not found — skipping "
+                        "(regenerate with: catalogtool gaia-bin)\n", path);
+        return;
+    }
+
+    StarBinHeader h;
+    if (fread(&h, sizeof h, 1, f) != 1 || h.magic != STARBIN_MAGIC) {
+        fprintf(stderr, "[universe] star_catalog '%s': not a StarBin file\n", path);
+        fclose(f); return;
+    }
+    if (h.version != STARBIN_VERSION || h.record_size != sizeof(StarBinRecord)) {
+        fprintf(stderr, "[universe] star_catalog '%s': incompatible (v%u rec%u; "
+                        "expected v%u rec%zu)\n", path, h.version, h.record_size,
+                STARBIN_VERSION, sizeof(StarBinRecord));
+        fclose(f); return;
+    }
+    if (h.count == 0) { fclose(f); return; }
+
+    /* --- spatial hash of existing star positions (in ly, DEDUP_LY cells) --- */
+    const double DEDUP_LY = 0.1;
+    int n_ex = 0;
+    for (int i = 0; i < g_nbodies; i++)
+        if (g_bodies[i].alive && g_bodies[i].is_star) n_ex++;
+
+    double (*ex)[3] = NULL;
+    int *gcx = NULL, *gcy = NULL, *gcz = NULL, *ghead = NULL, *gnext = NULL;
+    unsigned gmask = 0;
+    if (n_ex > 0) {
+        int cap = 1;
+        while (cap < n_ex * 2) cap <<= 1;
+        ex    = (double(*)[3])malloc((size_t)n_ex * sizeof *ex);
+        gnext = (int *)malloc((size_t)n_ex * sizeof(int));
+        gcx   = (int *)malloc((size_t)cap * sizeof(int));
+        gcy   = (int *)malloc((size_t)cap * sizeof(int));
+        gcz   = (int *)malloc((size_t)cap * sizeof(int));
+        ghead = (int *)malloc((size_t)cap * sizeof(int));
+        if (!ex || !gnext || !gcx || !gcy || !gcz || !ghead) {
+            free(ex); free(gnext); free(gcx); free(gcy); free(gcz); free(ghead);
+            ex = NULL; n_ex = 0;                 /* fall back to no dedup */
+        } else {
+            for (int i = 0; i < cap; i++) ghead[i] = -1;
+            gmask = (unsigned)cap - 1;
+            int k = 0;
+            for (int i = 0; i < g_nbodies; i++) {
+                if (!(g_bodies[i].alive && g_bodies[i].is_star)) continue;
+                double px = g_bodies[i].pos[0] / LY;
+                double py = g_bodies[i].pos[1] / LY;
+                double pz = g_bodies[i].pos[2] / LY;
+                ex[k][0] = px; ex[k][1] = py; ex[k][2] = pz;
+                int cx = (int)floor(px / DEDUP_LY);
+                int cy = (int)floor(py / DEDUP_LY);
+                int cz = (int)floor(pz / DEDUP_LY);
+                unsigned slot = cell_hash(cx, cy, cz) & gmask;
+                while (ghead[slot] != -1 &&
+                       !(gcx[slot] == cx && gcy[slot] == cy && gcz[slot] == cz))
+                    slot = (slot + 1) & gmask;
+                if (ghead[slot] == -1) { gcx[slot] = cx; gcy[slot] = cy; gcz[slot] = cz; gnext[k] = -1; }
+                else                   { gnext[k] = ghead[slot]; }
+                ghead[slot] = k;
+                k++;
+            }
+        }
+    }
+
+    /* --- stream records into g_bodies (chunked read) --- */
+    ensure_capacity(g_nbodies + (int)h.count);        /* upper bound before dedup */
+    const size_t CHUNK = 8192;
+    StarBinRecord *buf = (StarBinRecord *)malloc(CHUNK * sizeof *buf);
+    unsigned added = 0, skipped = 0;
+    double r2 = DEDUP_LY * DEDUP_LY;
+    if (buf) {
+        uint32_t remaining = h.count;
+        while (remaining > 0) {
+            size_t want = remaining < CHUNK ? remaining : CHUNK;
+            size_t got = fread(buf, sizeof *buf, want, f);
+            if (got == 0) break;
+            for (size_t j = 0; j < got; j++) {
+                StarBinRecord *r = &buf[j];
+                double px = r->pos_ly[0], py = r->pos_ly[1], pz = r->pos_ly[2];
+
+                if (ex) {
+                    int cx = (int)floor(px / DEDUP_LY);
+                    int cy = (int)floor(py / DEDUP_LY);
+                    int cz = (int)floor(pz / DEDUP_LY);
+                    int dup = 0;
+                    for (int dz = -1; dz <= 1 && !dup; dz++)
+                    for (int dy = -1; dy <= 1 && !dup; dy++)
+                    for (int dx = -1; dx <= 1 && !dup; dx++) {
+                        int qx = cx + dx, qy = cy + dy, qz = cz + dz;
+                        unsigned slot = cell_hash(qx, qy, qz) & gmask;
+                        while (ghead[slot] != -1) {
+                            if (gcx[slot] == qx && gcy[slot] == qy && gcz[slot] == qz) {
+                                for (int e = ghead[slot]; e != -1; e = gnext[e]) {
+                                    double ax = ex[e][0]-px, ay = ex[e][1]-py, az = ex[e][2]-pz;
+                                    if (ax*ax + ay*ay + az*az < r2) { dup = 1; break; }
+                                }
+                                break;
+                            }
+                            slot = (slot + 1) & gmask;
+                        }
+                    }
+                    if (dup) { skipped++; continue; }
+                }
+
+                ensure_capacity(g_nbodies + 1);
+                Body *bo = &g_bodies[g_nbodies];
+                body_defaults(bo);
+                snprintf(bo->name, sizeof bo->name, "%llu", (unsigned long long)r->source_id);
+                bo->mass   = r->mass_kg;
+                bo->radius = (double)r->radius_km * 1000.0;
+                bo->pos[0] = px * LY; bo->pos[1] = py * LY; bo->pos[2] = pz * LY;
+                bo->vel[0] = (double)r->vel_kms[0] * 1000.0;
+                bo->vel[1] = (double)r->vel_kms[1] * 1000.0;
+                bo->vel[2] = (double)r->vel_kms[2] * 1000.0;
+                bo->col[0] = r->color[0] / 255.0f;
+                bo->col[1] = r->color[1] / 255.0f;
+                bo->col[2] = r->color[2] / 255.0f;
+                bo->is_star = 1;
+                bo->obliquity = 0.0;
+                bo->rotation_rate = 2.0 * PI / (25.0 * DAY);   /* convert_gaia default */
+                accretion_init_body(bo);
+                alloc_trail(bo);                               /* NULL for stars */
+                g_nbodies++;
+                added++;
+            }
+            remaining -= (uint32_t)got;
+        }
+        free(buf);
+    }
+
+    free(ex); free(gnext); free(gcx); free(gcy); free(gcz); free(ghead);
+    fclose(f);
+    fprintf(stdout, "[universe] star_catalog '%s': +%u stars (%u skipped as duplicates)\n",
+            path, added, skipped);
+}
+
 void universe_load(const char *path)
 {
     int i, s;
@@ -768,6 +939,14 @@ void universe_load(const char *path)
 
     g_nbodies = 0;
     g_universe_is_snapshot = 0;
+
+    /* Empty field-star range by default (snapshots and catalog-less presets have
+     * no field stars — everything is a dynamic body); the main path sets the
+     * real range around load_star_catalog() below.  Bump the generation now so
+     * every (re)load invalidates universe-scoped GPU caches. */
+    g_field_star_begin = 0;
+    g_field_star_end   = 0;
+    g_universe_generation++;
 
     /* Snapshot universes (saved live state) take a direct placement path that
      * skips Keplerian derivation and all post-processing. */
@@ -1113,27 +1292,25 @@ void universe_load(const char *path)
     /* Linear O(n) system post-processing.  The previous form nested a full-body
      * scan inside the per-star loop (O(n_stars × n_bodies)) and dominated load
      * time at galaxy scale.  Precompute each body's root star once, then do the
-     * centre-of-mass correction, bulk proper-motion, and membership counts in
-     * single passes.  (NB: `root` is already the parsed-JSON node in this
-     * function, so the per-body root-star array is `root_star`.) */
+     * centre-of-mass correction and bulk proper-motion in single passes.
+     * (NB: `root` is already the parsed-JSON node in this function, so the
+     * per-body root-star array is `root_star`.) */
     int *root_star = (int *)malloc((size_t)g_nbodies * sizeof(int));
-    int *sys_count = (int *)calloc((size_t)g_nbodies, sizeof(int));
-    if (!root_star || !sys_count) {
+    if (!root_star) {
         fprintf(stderr, "[universe] post-process alloc failed\n");
         exit(1);
     }
     for (i = 0; i < g_nbodies; i++)
         root_star[i] = root_star_of(i);
 
-    /* CoM correction + membership count in a single ascending pass.  Subtracting
-     * each member's momentum contribution directly from its root star, in global
-     * index order, reproduces the previous per-star loop's exact floating-point
-     * operation sequence (each star still receives its own terms in ascending i
-     * order), so the result is bit-identical — just O(n) instead of O(n²). */
+    /* CoM correction in a single ascending pass.  Subtracting each member's
+     * momentum contribution directly from its root star, in global index order,
+     * reproduces the previous per-star loop's exact floating-point operation
+     * sequence (each star still receives its own terms in ascending i order), so
+     * the result is bit-identical — just O(n) instead of O(n²). */
     for (i = 0; i < g_nbodies; i++) {
         int r = root_star[i];
         if (r < 0) continue;
-        sys_count[r]++;
         if (i == r || !g_bodies[r].is_star || g_bodies[r].mass <= 0.0) continue;
         g_bodies[r].vel[0] -= g_bodies[i].mass * g_bodies[i].vel[0] / g_bodies[r].mass;
         g_bodies[r].vel[1] -= g_bodies[i].mass * g_bodies[i].vel[1] / g_bodies[r].mass;
@@ -1158,26 +1335,25 @@ void universe_load(const char *path)
         }
     }
 
-    /* Log only multi-body systems: at galaxy scale most stars are lone points,
-     * so a line each would spam the boot log and stall on stdout.  The
-     * interesting systems (a star with planets/moons) still print. */
-    for (s = 0; s < g_nbodies; s++) {
-        if (!g_bodies[s].is_star || sys_count[s] <= 1) continue;
-        fprintf(stdout,
-                "[universe] '%s' at (%.3g, %.3g, %.3g) ly  -  %d bodies\n",
-                g_bodies[s].name,
-                g_bodies[s].pos[0] / LY,
-                g_bodies[s].pos[1] / LY,
-                g_bodies[s].pos[2] / LY,
-                sys_count[s]);
-    }
-
     free(root_star);
-    free(sys_count);
 
-    fprintf(stdout, "[universe] total: %d bodies across %d star%s\n",
+    fprintf(stdout, "[universe] loaded %d bodies across %d star%s from JSON\n",
             g_nbodies, n_stars, n_stars == 1 ? "" : "s");
     fflush(stdout);
+
+    /* Append a bulk star field from a compact binary catalog, if the preset
+     * references one.  Done after post-processing (so the bv[]/root_star[]
+     * arrays, sized to the JSON body count, are never indexed with catalog
+     * stars) and before dedupe so the new names are made unique too.  Catalog
+     * stars carry final positions/velocities and are lone bodies, so they need
+     * no CoM or bulk-velocity post-processing.
+     *
+     * The appended stars form the contiguous "field star" range
+     * [g_field_star_begin, g_field_star_end): frozen scenery drawn by the static
+     * GPU path (render.c), promoted into the dynamic path only when near. */
+    g_field_star_begin = g_nbodies;
+    load_star_catalog(json_str(json_get(root, "star_catalog"), ""));
+    g_field_star_end = g_nbodies;
 
     /* Parent links are already resolved; make names unique so the downstream
      * name-keyed subsystems (rings, asteroid belts, build-mode rebind, labels)

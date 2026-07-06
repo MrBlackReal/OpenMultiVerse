@@ -9,6 +9,7 @@
  */
 #include "inspect.h"
 #include "body.h"
+#include "universe.h"   /* g_field_star_begin/end */
 #include "camera.h"
 #include "physics.h"
 #include "math3d.h"
@@ -306,6 +307,14 @@ void inspect_pick_center(const float vp_camrel[16], const BodyRenderInfo *info)
 
     for (int i = 0; i < g_nbodies; i++) {
         float rx, ry, rz, sx, sy, sy_top, dx, dy, screen_d, body_px, tol, score;
+        /* Skip the bulk field-star range (frozen catalog scenery): their info[]
+         * is not computed each frame (stale), so they are not center-pickable in
+         * inspect mode.  They still render as dots/spheres and get labels when
+         * approached.  Jumping the range keeps picking an O(non-field) scan. */
+        if (i >= g_field_star_begin && i < g_field_star_end) {
+            i = g_field_star_end - 1;
+            continue;
+        }
         if (!g_bodies[i].alive) continue;
         if (info[i].dcam > INSPECT_MAX_PICK_AU) continue;
 

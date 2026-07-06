@@ -79,6 +79,9 @@ assets/*.mov
 
 # Full catalog downloads (regenerate via tools/build_known_universe.py / catalogtool)
 assets/catalogs/*_full.csv
+# Compact binary star catalogs referenced by a preset's "star_catalog" field
+# (regenerate via: catalogtool gaia-bin <gaia.csv> assets/catalogs/<name>.bin)
+assets/catalogs/*.bin
 tools/_known_tmp/
 
 # Python bytecode cache

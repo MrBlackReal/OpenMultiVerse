@@ -75,6 +75,7 @@
 #include "math3d.h"
 #include "supernova.h"
 #include "physics.h"   /* g_sim_time — aurora substorm clock */
+#include "universe.h"  /* g_field_star_begin/end, g_universe_generation */
 #include "ui_theme.h"
 #include "settings.h"
 #include "post.h"
@@ -217,6 +218,20 @@ static GLuint s_dot_vbo     = 0;           /* dynamic: updated each frame */
 static GLint  s_dot_vp      = -1;
 static GLint  s_dot_time    = -1;
 static GLint  s_dot_twinkle = -1;
+
+/* Static field-star dots (the bulk Gaia catalog field).  Frozen scenery: the
+ * VBO holds absolute positions + baked absolute magnitude, uploaded once per
+ * universe load and drawn every frame by star_field.vert with GPU-side
+ * camera-relative transform + sizing (see the shader).  Zero per-star CPU. */
+static GLuint   s_field_shader     = 0;
+static GLuint   s_field_vao        = 0;
+static GLuint   s_field_vbo        = 0;
+static GLint    s_field_vp         = -1, s_field_cam     = -1;
+static GLint    s_field_near       = -1, s_field_horizon = -1;
+static GLint    s_field_time       = -1, s_field_twinkle = -1;
+static int      s_field_count      = 0;      /* stars in the VBO                 */
+static int      s_field_vbo_cap    = 0;      /* stars the VBO can hold           */
+static unsigned s_field_generation = 0;      /* g_universe_generation it was built for */
 
 /* Impact ejecta particles — additive GL_POINTS from collision system */
 static GLuint s_impact_particle_shader = 0;
@@ -1343,6 +1358,36 @@ void render_init(void) {
     s_dot_time    = glGetUniformLocation(s_dot_shader, "u_time");
     s_dot_twinkle = glGetUniformLocation(s_dot_shader, "u_twinkle");
 
+    /* --- Static field-star shader: star_field.vert does the camera-relative
+     * transform + sizing on the GPU so the bulk Gaia field costs no per-frame
+     * CPU.  Reuses color.frag (round sprite + log depth), same as the dots. --- */
+    s_field_shader = gl_shader_load("assets/shaders/star_field.vert",
+                                    "assets/shaders/color.frag");
+    if (s_field_shader) {
+        s_field_vp      = glGetUniformLocation(s_field_shader, "u_vp");
+        s_field_cam     = glGetUniformLocation(s_field_shader, "u_cam");
+        s_field_near    = glGetUniformLocation(s_field_shader, "u_near_dist");
+        s_field_horizon = glGetUniformLocation(s_field_shader, "u_horizon");
+        s_field_time    = glGetUniformLocation(s_field_shader, "u_time");
+        s_field_twinkle = glGetUniformLocation(s_field_shader, "u_twinkle");
+        s_field_vao = gl_vao_create();
+        /* Sized on first build (field_stars_ensure); layout = (x,y,z, r,g,b,a,
+         * absmag) × N, GL_STATIC_DRAW (never rebuilt except on universe reload). */
+        s_field_vbo = gl_vbo_create(1 * 8 * sizeof(float), NULL, GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8*sizeof(float), (void*)0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 8*sizeof(float),
+                              (void*)(3*sizeof(float)));
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, 8*sizeof(float),
+                              (void*)(7*sizeof(float)));
+        glBindVertexArray(0);
+    } else {
+        fprintf(stderr, "[Render] star_field shader failed (field stars will be "
+                        "drawn by the dynamic path)\n");
+    }
+
     /* --- Impact particle shader --- */
     s_impact_particle_shader = gl_shader_load("assets/shaders/impact_particle.vert",
                                               "assets/shaders/impact_particle.frag");
@@ -1731,6 +1776,62 @@ static void render_scratch_ensure(int n)
     s_rs_cap = c;
 }
 
+/*
+ * field_stars_ensure — (re)build the static field-star VBO when the universe
+ * changed.  Fills it from the field-star range [g_field_star_begin,
+ * g_field_star_end) with absolute position (AU), colour, and baked absolute
+ * magnitude.  Runs once per universe load (guarded by g_universe_generation),
+ * never per frame — the field is frozen scenery.
+ */
+static void field_stars_ensure(void)
+{
+    if (!s_field_shader) return;
+    if (s_field_generation == g_universe_generation) return;   /* already current */
+    s_field_generation = g_universe_generation;
+    s_field_count = 0;
+
+    int begin = g_field_star_begin, end = g_field_star_end;
+    int n = (end > begin) ? end - begin : 0;
+    if (n <= 0) return;
+
+    float *buf = (float *)malloc((size_t)n * 8 * sizeof(float));
+    if (!buf) return;
+
+    const double R_SUN_M = 6.957e8, M_SUN = 4.83;   /* matches star_dot_apparent_mag */
+    int w = 0;
+    for (int i = begin; i < end; i++) {
+        Body *b = &g_bodies[i];
+        if (!b->alive || !b->is_star) continue;
+        double Lr = (double)b->radius / R_SUN_M;
+        double L  = Lr * Lr;
+        if (!(L > 1e-6)) L = 1e-6;
+        float absmag = (float)(M_SUN - 2.5 * log10(L));   /* distance-independent */
+        buf[w*8+0] = (float)(b->pos[0] * RS);
+        buf[w*8+1] = (float)(b->pos[1] * RS);
+        buf[w*8+2] = (float)(b->pos[2] * RS);
+        buf[w*8+3] = b->col[0];
+        buf[w*8+4] = b->col[1];
+        buf[w*8+5] = b->col[2];
+        buf[w*8+6] = 1.0f;
+        buf[w*8+7] = absmag;
+        w++;
+    }
+    s_field_count = w;
+
+    glBindVertexArray(s_field_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, s_field_vbo);
+    if (w > s_field_vbo_cap) {
+        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)w * 8 * sizeof(float),
+                     NULL, GL_STATIC_DRAW);
+        s_field_vbo_cap = w;
+    }
+    if (w > 0)
+        glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)w * 8 * sizeof(float), buf);
+    glBindVertexArray(0);
+    free(buf);
+    fprintf(stdout, "[Render] field-star VBO: %d stars (GPU static)\n", w);
+}
+
 void render_frame(const float view[16], const float proj[16],
                   const float view_rot[16], float dt) {
     float aspect = (float)WIN_W / (float)WIN_H;
@@ -1821,7 +1922,48 @@ void render_frame(const float view[16], const float proj[16],
     memset(s_rs_light_valid, 0, (size_t)g_nbodies * sizeof(char));
     s_rs_nocc = 0;   /* rebuilt below: sphere-rendered non-star occluders */
 
-    for (int i = 0; i < g_nbodies; i++) {
+    /* Dynamic body list for this frame: every body that needs full per-frame CPU
+     * treatment (info[], spheres, near dots, glare, labels, picking).  This is
+     * all NON-field bodies — the ~JSON stars/planets/moons and build-mode
+     * additions — PLUS the few field stars currently within NEAR_DOT_DIST, which
+     * are promoted back so they resolve into spheres/labels/picks on approach.
+     * The bulk field (frozen, far) is drawn only by the static VBO, so these
+     * per-frame loops iterate ~thousands instead of the full ~hundreds of
+     * thousands. */
+    static int *s_dyn = NULL;      static int s_dyn_cap = 0;
+    static int *s_nearf = NULL;    static int s_nearf_cap = 0;
+    int dyn_room = g_nbodies + 1;
+    if (dyn_room > s_dyn_cap) {
+        int cap = s_dyn_cap ? s_dyn_cap : 1024;
+        while (cap < dyn_room) cap *= 2;
+        s_dyn = realloc(s_dyn, (size_t)cap * sizeof(int));
+        if (!s_dyn) { fprintf(stderr, "[render] dyn alloc failed\n"); exit(1); }
+        s_dyn_cap = cap;
+    }
+    int n_dyn = 0;
+    for (int i = 0; i < g_field_star_begin && i < g_nbodies; i++) s_dyn[n_dyn++] = i;
+    for (int i = g_field_star_end; i < g_nbodies; i++)            s_dyn[n_dyn++] = i;
+    if (g_field_star_end > g_field_star_begin) {
+        /* Field stars within NEAR_DOT_DIST → promote to the dynamic set. Reuses
+         * the movement-gated near-system cache, so this is not a full scan. */
+        const int NEARF_MAX = 16384;
+        if (s_nearf_cap < NEARF_MAX) {
+            s_nearf = realloc(s_nearf, (size_t)NEARF_MAX * sizeof(int));
+            if (!s_nearf) { fprintf(stderr, "[render] nearf alloc failed\n"); exit(1); }
+            s_nearf_cap = NEARF_MAX;
+        }
+        double cam_m[3] = { g_cam.pos[0] * AU, g_cam.pos[1] * AU, g_cam.pos[2] * AU };
+        double near_r_m = (double)g_settings.near_dot_dist_ly * LY;
+        int nn = physics_active_bodies(cam_m, near_r_m, s_nearf, s_nearf_cap);
+        for (int j = 0; j < nn; j++) {
+            int b = s_nearf[j];
+            if (b >= g_field_star_begin && b < g_field_star_end)
+                s_dyn[n_dyn++] = b;
+        }
+    }
+
+    for (int di = 0; di < n_dyn; di++) {
+        int i = s_dyn[di];
         Body *b = &g_bodies[i];
         if (!b->alive) {
             memset(&info[i], 0, sizeof(info[i]));
@@ -1986,6 +2128,14 @@ void render_frame(const float view[16], const float proj[16],
             float ecl[6 * 4];
             int   necl = 0;
             for (int j = 0; j < g_nbodies && necl < 6; j++) {
+                /* Skip the frozen field-star range wholesale — like every other
+                 * hot per-body loop (trails/labels/rings/inspect).  A field star
+                 * is never a plausible eclipse occluder, and scanning ~10^5-10^6
+                 * of them per sphere is the dominant cost of this pass. */
+                if (j >= g_field_star_begin && j < g_field_star_end) {
+                    j = g_field_star_end - 1;
+                    continue;
+                }
                 if (j == i || !g_bodies[j].alive) continue;
                 if (g_bodies[j].is_star) continue;
                 if (j != b->parent && g_bodies[j].parent != i &&
@@ -2133,7 +2283,8 @@ void render_frame(const float view[16], const float proj[16],
         glEnable(GL_DEPTH_TEST);
         glBindVertexArray(s_sphere_vao);
 
-        for (int i = 0; i < g_nbodies; i++) {
+        for (int di = 0; di < n_dyn; di++) {
+            int i = s_dyn[di];
             if (!g_bodies[i].alive) continue;
             /* Continuous LOD: the glow fades in with the sphere (same blend)
              * instead of snapping on the instant the body resolves. */
@@ -2628,7 +2779,8 @@ void render_frame(const float view[16], const float proj[16],
     int *dot_order = s_rs_dot_order;
     int dot_ns = 0, dot_np = 0, dot_nm = 0;
     int *dot_stars = s_rs_dot_stars, *dot_planets = s_rs_dot_planets, *dot_moons = s_rs_dot_moons;
-    for (int i = 0; i < g_nbodies; i++) {
+    for (int di = 0; di < n_dyn; di++) {
+        int i = s_dyn[di];
         if (!g_bodies[i].alive) continue;
         if (g_bodies[i].is_black_hole) continue;       /* drawn by the BH pass */
         if (info[i].dcam >= NEAR_DOT_DIST) continue;   /* far → cheap pass below */
@@ -2802,7 +2954,8 @@ void render_frame(const float view[16], const float proj[16],
         double cy = g_cam.pos[1];
         double cz = g_cam.pos[2];
 
-        for (int i = 0; i < g_nbodies; i++) {
+        for (int di = 0; di < n_dyn; di++) {
+            int i = s_dyn[di];
             Body *b = &g_bodies[i];
             if (!b->alive || !info[i].show) continue;     /* spheres drawn elsewhere */
             if (b->is_black_hole) continue;               /* drawn by the BH pass */
@@ -2866,6 +3019,35 @@ void render_frame(const float view[16], const float proj[16],
         glBindVertexArray(0);
     }
 
+    /* ---- Static field-star dots (bulk Gaia field): one draw call, GPU-side
+     * camera-relative transform + sizing (star_field.vert), zero per-star CPU.
+     * Same blend/depth state as the dynamic dots, and the shader culls stars
+     * nearer than NEAR_DOT_DIST — the exact threshold the dynamic near path uses
+     * to take over — so the handoff is seamless with no double-draw. */
+    field_stars_ensure();
+    if (s_field_shader && s_field_count > 0) {
+        float near_dist = (float)((double)g_settings.near_dot_dist_ly * LY * RS);
+        glUseProgram(s_field_shader);
+        glUniformMatrix4fv(s_field_vp, 1, GL_FALSE, vp_camrel);
+        glUniform3f(s_field_cam, (float)g_cam.pos[0], (float)g_cam.pos[1],
+                    (float)g_cam.pos[2]);
+        glUniform1f(s_field_near,    near_dist);
+        glUniform1f(s_field_horizon, (float)g_settings.farfield_horizon_au);
+        glUniform1f(s_field_time,    (float)SDL_GetTicks() * 0.001f);
+        glUniform1f(s_field_twinkle, (float)g_settings.star_twinkle);
+        glBindVertexArray(s_field_vao);
+        glEnable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glEnable(GL_PROGRAM_POINT_SIZE);
+        glDrawArrays(GL_POINTS, 0, s_field_count);
+        glDisable(GL_PROGRAM_POINT_SIZE);
+        glDisable(GL_BLEND);
+        glDepthMask(GL_TRUE);
+        glBindVertexArray(0);
+    }
+
     /* ------------------------------------------------------------------ 4. Rings + Asteroid belts */
     rings_render(vp_camrel);
     asteroids_render(vp_camrel);
@@ -2895,7 +3077,8 @@ void render_frame(const float view[16], const float proj[16],
         glDepthFunc(GL_LEQUAL);
         glBindVertexArray(s_sphere_vao);
 
-        for (int i = 0; i < g_nbodies; i++) {
+        for (int di = 0; di < n_dyn; di++) {
+            int i = s_dyn[di];
             if (!g_bodies[i].alive) continue;
             if (!g_bodies[i].is_star) continue;
             if (g_bodies[i].is_black_hole) continue;   /* no corona; BH pass below */
@@ -2974,7 +3157,8 @@ void render_frame(const float view[16], const float proj[16],
     static double *s_bh_rs     = NULL, *s_bh_astar = NULL, *s_bh_isco = NULL;
     static int     s_bh_cap    = 0;
     int n_bh = 0;
-    for (int i = 0; i < g_nbodies; i++) {
+    for (int di = 0; di < n_dyn; di++) {
+        int i = s_dyn[di];
         if (!g_bodies[i].alive || !g_bodies[i].is_black_hole) continue;
         {
             float rx = (float)(g_bodies[i].pos[0] * RS - g_cam.pos[0]);
