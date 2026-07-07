@@ -23,8 +23,10 @@
 #include "physics.h"
 #include <math.h>
 #include <string.h>
+#include <strings.h>
 #include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #ifdef USE_IMGUI
 
@@ -233,9 +235,59 @@ static void teleport_to_galaxy(int i)
     cam_fly_to(target, yaw, pitch);
 }
 
-/* Render the "Navigate" tab: a name search over every live body with a
- * click-to-teleport result list, plus a catalogue-nebula list that flies the
- * camera to the chosen nebula. */
+/* ── Navigate: human-friendly mass/radius formatting ───────────────────────
+ * Bodies range from moons to supermassive holes, so pick the unit that keeps
+ * the number readable rather than forcing a single scale (cf. the Inspect tab,
+ * which always uses Msun/Rsun). */
+#define M_JUP_KG    1.898e27
+#define M_EARTH_KG  5.972e24
+#define R_SUN_M     6.9634e8
+#define R_JUP_M     7.1492e7
+#define R_EARTH_M   6.371e6
+
+static void nav_fmt_mass(double kg, char *out, size_t n)
+{
+    if (kg <= 0.0)                       snprintf(out, n, "—");
+    else if (kg >= 0.05 * SOLAR_MASS_KG) snprintf(out, n, "%.3g Msun",   kg / SOLAR_MASS_KG);
+    else if (kg >= 0.05 * M_JUP_KG)      snprintf(out, n, "%.3g Mjup",   kg / M_JUP_KG);
+    else                                 snprintf(out, n, "%.3g Mearth", kg / M_EARTH_KG);
+}
+
+static void nav_fmt_radius(double m, char *out, size_t n)
+{
+    if (m <= 0.0)                  snprintf(out, n, "—");
+    else if (m >= 0.1 * R_SUN_M)   snprintf(out, n, "%.3g Rsun",   m / R_SUN_M);
+    else if (m >= 0.1 * R_JUP_M)   snprintf(out, n, "%.3g Rjup",   m / R_JUP_M);
+    else if (m >= 0.1 * R_EARTH_M) snprintf(out, n, "%.3g Rearth", m / R_EARTH_M);
+    else                           snprintf(out, n, "%.3g km",     m / 1000.0);
+}
+
+/* Sort key/direction for the Navigate result list. File-static so nav_cmp() can
+ * read them (qsort's comparator carries no context in C99). */
+enum { NAV_SORT_NAME = 0, NAV_SORT_MASS, NAV_SORT_RADIUS };
+static int s_nav_sort  = NAV_SORT_NAME;
+static int s_nav_desc  = 0;
+
+static int nav_cmp(const void *pa, const void *pb)
+{
+    int ia = *(const int *)pa, ib = *(const int *)pb;
+    const Body *a = &g_bodies[ia], *b = &g_bodies[ib];
+    int r;
+    switch (s_nav_sort) {
+        case NAV_SORT_MASS:
+            r = (a->mass > b->mass) - (a->mass < b->mass);   break;
+        case NAV_SORT_RADIUS:
+            r = (a->radius > b->radius) - (a->radius < b->radius); break;
+        default:
+            r = strcasecmp(a->name, b->name);                break;
+    }
+    if (r == 0) r = ia - ib;              /* stable tiebreak by slot index */
+    return s_nav_desc ? -r : r;
+}
+
+/* Render the "Navigate" tab: a filterable, sortable list over every live body
+ * with a click-to-teleport result table, plus catalogue nebula/galaxy lists
+ * that fly the camera to the chosen object. */
 static void menu_render_navigate(void)
 {
     static char s_query[64] = "";
@@ -265,42 +317,101 @@ static void menu_render_navigate(void)
     }
     igSpacing();
     igPushItemWidth(-1.0f);
-    igInputTextWithHint("##search", "type a name (e.g. Proxima, Jupiter, Kepler)",
+    igInputTextWithHint("##search", "filter by name (blank = list everything)",
                         s_query, sizeof(s_query), 0, NULL, NULL);
     igPopItemWidth();
+
+    /* Type filter — combineable checkboxes. */
+    static bool s_show_stars   = true;
+    static bool s_show_planets = true;
+    static bool s_show_holes   = true;
+    igCheckbox("Stars", &s_show_stars);            igSameLine(0.0f, 16.0f);
+    igCheckbox("Planets/moons", &s_show_planets);  igSameLine(0.0f, 16.0f);
+    igCheckbox("Black holes", &s_show_holes);
+
+    /* Sort key + direction — combines with the filter above. */
+    igPushItemWidth(180.0f);
+    igCombo_Str("Sort by", &s_nav_sort, "Name\0Mass\0Radius\0", -1);
+    igPopItemWidth();
+    igSameLine(0.0f, 16.0f);
+    bool desc = s_nav_desc != 0;
+    if (igCheckbox("Descending", &desc)) s_nav_desc = desc;
     igSpacing();
 
-    if (!s_query[0]) {
-        igTextDisabled("Start typing to see matches.");
+    /* Collect the alive bodies passing the type filter + name query, then sort
+     * the index list by the chosen key (buffer grows as the universe does). */
+    static int *s_idx = NULL;
+    static int  s_idx_cap = 0;
+    if (s_idx_cap < g_nbodies) {
+        int cap = g_nbodies > 0 ? g_nbodies : 1;
+        int *p = (int *)realloc(s_idx, (size_t)cap * sizeof(int));
+        if (p) { s_idx = p; s_idx_cap = cap; }
+    }
+
+    int nmatch = 0;
+    for (int i = 0; i < g_nbodies && nmatch < s_idx_cap; i++) {
+        const Body *b = &g_bodies[i];
+        if (!b->alive) continue;
+        int is_hole   = b->is_black_hole;
+        int is_star   = b->is_star && !is_hole;
+        int is_planet = !b->is_star;
+        if (is_hole   && !s_show_holes)   continue;
+        if (is_star   && !s_show_stars)   continue;
+        if (is_planet && !s_show_planets) continue;
+        if (s_query[0] && !name_matches(b->name, s_query)) continue;
+        s_idx[nmatch++] = i;
+    }
+
+    if (nmatch > 1)
+        qsort(s_idx, (size_t)nmatch, sizeof(int), nav_cmp);
+
+    const int MAX_RESULTS = 512;
+    int shown = nmatch < MAX_RESULTS ? nmatch : MAX_RESULTS;
+    int capped = nmatch > MAX_RESULTS;
+
+    if (nmatch == 0) {
+        igTextDisabled("No matches.");
         return;
     }
 
-    igBeginChild_Str("##results", (ImVec2_c){ 0.0f, 0.0f }, ImGuiChildFlags_Borders, 0);
-    const int MAX_RESULTS = 256;
-    int shown = 0, capped = 0;
+    ImGuiTableFlags tflags = ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
+                             ImGuiTableFlags_BordersInnerV;
+    if (igBeginTable("##navresults", 3, tflags, (ImVec2_c){ 0.0f, 0.0f }, 0.0f)) {
+        igTableSetupColumn("Name",   ImGuiTableColumnFlags_WidthStretch, 0.0f, 0);
+        igTableSetupColumn("Mass",   ImGuiTableColumnFlags_WidthFixed,  110.0f, 0);
+        igTableSetupColumn("Radius", ImGuiTableColumnFlags_WidthFixed,  110.0f, 0);
+        igTableHeadersRow();
 
-    for (int i = 0; i < g_nbodies; i++) {
-        if (!g_bodies[i].alive) continue;
-        if (!name_matches(g_bodies[i].name, s_query)) continue;
-        if (shown >= MAX_RESULTS) { capped = 1; break; }
+        for (int r = 0; r < shown; r++) {
+            int i = s_idx[r];
+            const Body *b = &g_bodies[i];
+            char mass_s[32], rad_s[32], label[80];
+            nav_fmt_mass(b->mass, mass_s, sizeof(mass_s));
+            nav_fmt_radius(b->radius, rad_s, sizeof(rad_s));
 
-        /* "##tp%d" keeps each Selectable's ID unique (names can repeat, e.g.
-         * many planets named "b"); only the text before "##" is shown. */
-        char label[80];
-        snprintf(label, sizeof(label), "%s %s##tp%d", (g_bodies[i].is_star ? "*" : " "), g_bodies[i].name, i);
+            /* "##tp%d" keeps each Selectable's ID unique (names can repeat, e.g.
+             * many planets named "b"); the glyph flags the body kind. */
+            const char *glyph = b->is_black_hole ? "o" : b->is_star ? "*" : " ";
+            snprintf(label, sizeof(label), "%s %s##tp%d", glyph, b->name, i);
 
-        if (igSelectable_Bool(label, false, 0, (ImVec2_c){ 0.0f, 0.0f }))
-            teleport_to_body(i);
-
-        shown++;
+            igTableNextRow(0, 0.0f);
+            igTableSetColumnIndex(0);
+            if (igSelectable_Bool(label, false, ImGuiSelectableFlags_SpanAllColumns,
+                                  (ImVec2_c){ 0.0f, 0.0f }))
+                teleport_to_body(i);
+            igTableSetColumnIndex(1);
+            igText("%s", mass_s);
+            igTableSetColumnIndex(2);
+            igText("%s", rad_s);
+        }
+        igEndTable();
     }
 
-    if (shown == 0)
-        igTextDisabled("No matches.");
-    else if (capped)
-        igTextDisabled("... more matches; refine the search.");
-
-    igEndChild();
+    if (capped)
+        igTextDisabled("Showing first %d of %d — refine the name filter.",
+                       MAX_RESULTS, nmatch);
+    else
+        igTextDisabled("%d object%s.", nmatch, nmatch == 1 ? "" : "s");
 }
 
 /* Render the "Inspect" tab: details of the currently inspected body, plus
