@@ -1,0 +1,46 @@
+# OpenMultiVerse — curated real black holes.
+#
+# There is no clean bulk catalog feed for black holes (unlike exoplanets or Gaia
+# stars), so this is hand-maintained from the literature. catalogtool's
+# "blackholes" importer converts it to positioned black_hole/quasar bodies; the
+# known-universe build folds it in automatically.
+#
+# Columns:
+#   name        display name
+#   kind        stellar | smbh | quasar  (sets disk/torus/activity defaults)
+#   ra_deg,dec_deg   equatorial J2000, decimal degrees
+#   dist_pc     distance in parsecs      (galactic objects; leave blank if dist_mly used)
+#   dist_mly    distance in mega-light-years (extragalactic; leave dist_pc blank)
+#   mass_msun   mass in solar masses
+#   spin        dimensionless Kerr a* (0..~0.998; 0/blank = unknown/non-spinning)
+#   activity    AGN/accretion Eddington ratio (blank = default by kind)
+#
+# Distances/masses are rounded consensus values; positions are for
+# visualization, not astrometry.
+name,kind,ra_deg,dec_deg,dist_pc,dist_mly,mass_msun,spin,activity
+# --- Galactic stellar-mass black holes (X-ray binaries) ---
+Cygnus X-1,stellar,299.590,35.202,2220,,21.2,0.95,0.10
+A0620-00,stellar,95.685,-0.346,1060,,6.6,0.12,
+V404 Cygni,stellar,306.016,33.867,2390,,9.0,0.92,0.05
+GRO J1655-40,stellar,253.500,-39.846,3200,,5.4,0.70,0.05
+GRS 1915+105,stellar,288.798,10.946,8600,,12.4,0.98,0.30
+XTE J1118+480,stellar,169.545,48.037,1700,,7.5,0.00,
+LMC X-1,stellar,84.912,-69.743,,0.163,10.9,0.92,0.15
+LMC X-3,stellar,84.736,-64.084,,0.163,6.98,0.25,0.10
+# --- Gaia astrometric (dormant) black holes ---
+Gaia BH1,stellar,262.171,-0.581,480,,9.6,0.00,
+Gaia BH2,stellar,207.570,-59.239,1160,,8.9,0.00,
+Gaia BH3,stellar,294.827,14.932,590,,32.7,0.00,
+# --- Milky Way supermassive black hole ---
+Sagittarius A*,smbh,266.417,-29.008,8178,,4.15e6,0.50,0.0001
+# --- Extragalactic supermassive black holes ---
+M87*,smbh,187.706,12.391,,53.5,6.5e9,0.90,0.10
+M31* (Andromeda),smbh,10.685,41.269,,2.5,1.4e8,0.00,
+Centaurus A,smbh,201.365,-43.019,,12.0,5.5e7,0.00,0.05
+NGC 1277,smbh,49.965,41.574,,238.0,1.7e10,0.00,
+# --- Quasars / bright AGN ---
+Messier 77,quasar,40.670,-0.013,,47.0,1.5e7,,1.0
+NGC 1275 (3C 84),quasar,49.951,41.512,,237.0,8.0e8,,1.0
+Markarian 231,quasar,194.059,56.874,,581.0,1.7e8,,1.0
+3C 273,quasar,187.278,2.052,,2440.0,8.9e8,,1.0
+TON 618,quasar,187.104,31.717,,10400.0,4.07e10,,1.0

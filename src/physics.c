@@ -1165,9 +1165,21 @@ void physics_respa_begin(double dt_outer) {
 }
 
 void physics_respa_begin_system(int root, double dt_outer) {
+    physics_respa_begin_system_ex(root, dt_outer, 1 /* recompute slow */);
+}
+
+/*
+ * Carry-over variant: assumes acc[] (the slow force) is already valid at the
+ * current positions and skips recomputing it.  Valid only when the preceding
+ * physics_respa_end_system() left acc[] set at these exact positions/masses and
+ * nothing has moved the bodies since — i.e. on outer steps after the first in
+ * the cold (parallel) loop, where rings/trails between steps move no bodies and
+ * no collision runs.  Removes ~half of the dominant O(Nᵢ²) slow-force cost.
+ */
+void physics_respa_begin_system_ex(int root, double dt_outer, int recompute_slow) {
     int i;
     int slot = (root >= 0 && root < s_cap) ? s_root_to_slot[root] : -1;
-    compute_acc_slow_system(root);
+    if (recompute_slow) compute_acc_slow_system(root);
     if (root < 0 || slot < 0) {
         for (i = 0; i < g_nbodies; i++) {
             if (!g_bodies[i].alive || !in_system(i, root)) continue;
@@ -1446,11 +1458,14 @@ static void sample_body_pos(Body *b, const double pos[3]) {
         b->trail_count++;
         b->trail_total_len += seg_len;
     } else {
-        /* Buffer full: evict oldest, subtract its successor's seg_len from total */
+        /* Buffer full: the just-overwritten slot was the old oldest sample, so
+         * the segment that left the retained polyline is the one ENDING at the
+         * new oldest sample (trail_head, after the advance above) — not its
+         * successor.  (The length-pruning branch below uses next_oldest because
+         * there oldest_idx is the still-present sample being dropped.) */
         int oldest_idx = b->trail_head;
-        int next_oldest_idx = (oldest_idx + 1) & TRAIL_MASK;
         if (b->trail_seg_len)
-            b->trail_total_len += seg_len - b->trail_seg_len[next_oldest_idx];
+            b->trail_total_len += seg_len - b->trail_seg_len[oldest_idx];
         else
             b->trail_total_len += seg_len;
     }

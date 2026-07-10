@@ -73,6 +73,11 @@
  * init_runtime_world() reads this so a reset reloads the chosen multiverse. */
 static char s_universe_path[512] = "assets/universe.json";
 
+/* When set (via --export-body-catalog), init_runtime_world() writes the loaded
+ * universe's bulk bodies to this BodyBin path and exits before warm-up/GL — the
+ * offline half of the manifest+binary build. */
+static char s_export_bodybin_path[512] = "";
+
 /* ── window / context ─────────────────────────────────────────────────────── */
 static SDL_Window   *s_win = NULL;
 static SDL_GLContext s_ctx = NULL;
@@ -366,6 +371,16 @@ static void init_runtime_world(void) {
     loading_begin();
     loading_phase("Loading universe");
     universe_load(s_universe_path);   /* drives its own determinate progress */
+
+    /* Offline export: dump the freshly-loaded (pre-warm-up) bulk bodies to a
+     * BodyBin and quit. Runs here — after Keplerian→state/CoM derivation but
+     * before warm-up and the GL passes — so the binary reloads identically to a
+     * fresh JSON load (warm-up then re-runs on reload, same as before). */
+    if (s_export_bodybin_path[0]) {
+        int n = universe_export_body_catalog(s_export_bodybin_path);
+        exit(n >= 0 ? 0 : 1);
+    }
+
     boot_log("Resetting camera");
     cam_reset();
     loading_phase("Generating starfield");
@@ -1126,7 +1141,10 @@ static void integrate_system_cold(int s, double sys_dt)
     system_step_schedule(s, sys_dt, &outer_steps, &dt_outer, &n_inner, &dt_inner);
 
     for (int o = 0; o < outer_steps; o++) {
-        physics_respa_begin_system(root, dt_outer);
+        /* After the first outer step the previous end() left acc[] valid at
+         * these exact positions (nothing between moves the bodies on the cold
+         * path), so skip the redundant slow-force recompute. */
+        physics_respa_begin_system_ex(root, dt_outer, o == 0);
         for (int i = 0; i < n_inner; i++)
             physics_respa_inner_system(root, dt_inner);
         physics_respa_end_system(root, dt_outer);
@@ -1166,6 +1184,43 @@ static void integrate_system_hot(int s, double sys_dt)
     }
 }
 
+/* Print the full CLI reference (for --help / unknown options). */
+static void print_usage(const char *prog)
+{
+    printf(
+"OpenMultiVerse — real-time scale-continuous N-body universe simulator.\n"
+"\n"
+"Usage: %s [options]\n"
+"  With no options, opens a window and loads assets/universe.json.\n"
+"\n"
+"Universe:\n"
+"  --preset PATH           Load this universe JSON instead of the default.\n"
+"\n"
+"Headless / screenshots:\n"
+"  --headless              Run offscreen (EGL surfaceless) with no window.\n"
+"  --shot PATH             Render --frames frames, write PATH (a PPM), then quit.\n"
+"  --frames N              Frames to simulate before the --shot (default 1).\n"
+"  --no-hud                Hide the 2D HUD + body labels (clean shots; = key H).\n"
+"  --cam X,Y,Z,YAW,PITCH   Place the camera: position in AU, yaw/pitch in degrees.\n"
+"  --fov DEG               Field of view in degrees (telephoto compression).\n"
+"  --exposure V            Fix exposure V (disables auto-exposure).\n"
+"  --timescale V           Override the universe time_scale (0 freezes the sim).\n"
+"  --stellar-rate YRS      Years of stellar evolution per real second (aging,\n"
+"                          supernovae, accretion) — testable headless.\n"
+"\n"
+"Benchmark / tools:\n"
+"  --benchmark             Scripted galaxy flythrough; prints an FPS report.\n"
+"  --export-body-catalog PATH\n"
+"                          Load --preset, write its bulk (non-curated) bodies to a\n"
+"                          BodyBin at PATH, and exit (offline manifest+binary build).\n"
+"\n"
+"  -h, --help              Show this help and exit.\n"
+"\n"
+"Data tooling lives in tools/ (fetch_catalogs.py, build_known_universe.py) and\n"
+"catalogtool; see ARCHITECTURE.md and CLAUDE.md for the full reference.\n",
+        prog);
+}
+
 int main(int argc, char **argv) {
     /* ---- headless / screenshot CLI ----------------------------------------
      * --headless           run with SDL's offscreen (EGL surfaceless) driver,
@@ -1185,11 +1240,21 @@ int main(int argc, char **argv) {
     int         cli_ts_set = 0;    double cli_ts = 0.0;   /* --timescale override */
 
     for (int a = 1; a < argc; a++) {
-        if      (!strcmp(argv[a], "--headless")) headless = 1;
+        if      (!strcmp(argv[a], "--help") || !strcmp(argv[a], "-h")) {
+            print_usage(argv[0]);
+            return 0;
+        }
+        else if (!strcmp(argv[a], "--headless")) headless = 1;
         else if (!strcmp(argv[a], "--shot")    && a + 1 < argc) shot_path   = argv[++a];
         else if (!strcmp(argv[a], "--frames")  && a + 1 < argc) shot_frames = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--preset")  && a + 1 < argc)
             snprintf(s_universe_path, sizeof s_universe_path, "%s", argv[++a]);
+        /* --export-body-catalog PATH  load --preset, write its bulk bodies to a
+         * BodyBin at PATH, and exit (offline manifest+binary build step). */
+        else if (!strcmp(argv[a], "--export-body-catalog") && a + 1 < argc) {
+            snprintf(s_export_bodybin_path, sizeof s_export_bodybin_path, "%s", argv[++a]);
+            headless = 1;   /* offscreen: export exits before any GL pass */
+        }
         else if (!strcmp(argv[a], "--cam")     && a + 1 < argc)
             cam_set = (sscanf(argv[++a], "%lf,%lf,%lf,%f,%f",
                               &cam_pos[0], &cam_pos[1], &cam_pos[2],
@@ -1214,6 +1279,11 @@ int main(int argc, char **argv) {
          * stays exactly where it was queried, keeping close-range shot framing
          * reproducible (warmup still runs, so orbits are settled first). */
         else if (!strcmp(argv[a], "--timescale") && a + 1 < argc) { cli_ts = atof(argv[++a]); cli_ts_set = 1; }
+        else {
+            fprintf(stderr, "%s: unrecognized option '%s'\n", argv[0], argv[a]);
+            print_usage(argv[0]);
+            return 2;
+        }
     }
     if (shot_frames < 1) shot_frames = 1;
     if (headless) {

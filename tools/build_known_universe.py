@@ -2,21 +2,35 @@
 """
 build_known_universe.py — merge everything we have real data for into one
 universe JSON: the full Solar System (at the origin) plus every catalogued
-exoplanet host system and nearby star, each at its true position in light-years.
+exoplanet host system and nearby star, each at its true position in light-years,
+plus curated real black holes (galactic stellar-mass holes, Sgr A*, and famous
+extragalactic SMBHs/quasars).
 
-It shells out to ./catalogtool to convert each CSV catalog, then concatenates
-the resulting "bodies" arrays into a single file, de-duplicating stars by name
-(the first occurrence wins; later duplicates and their planets are dropped so a
-star catalogued in two sources is not placed twice).
+It shells out to ./catalogtool to convert each CSV catalog, concatenates the
+resulting "bodies" arrays, and de-duplicates stars by name (the first occurrence
+wins; later duplicates and their planets are dropped so a star catalogued in two
+sources is not placed twice). It then writes TWO files:
+  * a lean **manifest** JSON (--out): laws + the curated Solar System and black
+    holes inline (human-readable), plus a "body_catalog" reference; and
+  * a **BodyBin** binary (--out-bin): the bulk catalog bodies (nearby stars +
+    exoplanet systems), written by shelling out to `verse --export-body-catalog`
+    (the engine owns the Keplerian->state math + the binary format).
+So it needs ./verse AND ./catalogtool built (`make`), and a headless-capable GPU
+for the export step (same requirement as tools/shot.sh).
 
 Usage:
     python3 tools/build_known_universe.py \
         [--exoplanets assets/catalogs/exoplanets_sample.csv] \
         [--gaia       assets/catalogs/gaia_sample.csv] \
+        [--blackholes assets/catalogs/black_holes.csv] \
         [--solar      assets/universe.json] \
-        [--out        assets/universes/known_universe.json]
+        [--out        assets/universes/known_universe.json] \
+        [--out-bin    assets/catalogs/known_universe_bodies.bin]
 
-Point --exoplanets / --gaia at full NASA Exoplanet Archive / Gaia exports to
+To fetch the full NASA/ESA catalogs first, run tools/fetch_catalogs.py (it
+downloads exoplanets_full.csv + gaia_full.csv via the archive query APIs, which
+this script then prefers automatically). Or point --exoplanets / --gaia at full
+NASA Exoplanet Archive / Gaia exports to
 build a larger universe.  The simulator decouples cross-system gravity and draws
 distant stars as a cheap far-field point pass, so the full catalogs (~16k
 bodies) run in real time — --max-systems just chooses how big a slice you want,
@@ -214,9 +228,11 @@ def cap_nearest(bodies, max_systems):
         return bodies
     by_name = {b.get("name", ""): b for b in bodies}
 
+    roots = ("star", "black_hole", "quasar")   # a system root is a star OR a hole
+
     def root(b):
         cur, guard = b, 0
-        while cur.get("type") != "star" and guard < 16:
+        while cur.get("type") not in roots and guard < 16:
             p = by_name.get(cur.get("parent", ""))
             if p is None:
                 break
@@ -227,10 +243,53 @@ def cap_nearest(bodies, max_systems):
         p = star.get("pos_ly", [0.0, 0.0, 0.0])
         return (p[0] ** 2 + p[1] ** 2 + p[2] ** 2) ** 0.5
 
-    stars = sorted((b for b in bodies if b.get("type") == "star"), key=dist)
+    stars = sorted((b for b in bodies if b.get("type") in roots), key=dist)
     keep = {s.get("name", "") for s in stars[:max_systems]}
     keep.add("Sun")                    # the Solar System is always included
     return [b for b in bodies if root(b).get("name", "") in keep]
+
+
+def split_curated(bodies):
+    """Partition into (curated, bulk). Curated bodies stay human-readable in the
+    manifest JSON; bulk bodies go to the BodyBin. A body is curated iff it is a
+    black hole/quasar or its root (walking parent links) is the Sun — the SAME
+    rule the engine's exporter uses (universe.c body_is_curated), so the two
+    halves reassemble to exactly the input set with nothing dropped or doubled."""
+    by_name = {b.get("name", ""): b for b in bodies}
+    roots = ("star", "black_hole", "quasar")
+
+    def root(b):
+        cur, guard = b, 0
+        while cur.get("type") not in roots and guard < 32:
+            p = by_name.get(cur.get("parent", ""))
+            if p is None:
+                break
+            cur, guard = p, guard + 1
+        return cur
+
+    def curated(b):
+        return (b.get("type") in ("black_hole", "quasar")
+                or root(b).get("name", "") == "Sun")
+
+    cur, bulk = [], []
+    for b in bodies:
+        (cur if curated(b) else bulk).append(b)
+    return cur, bulk
+
+
+def export_body_catalog(bulk, laws, tmp, out_bin):
+    """Resolve `bulk` bodies to absolute state and write them to a BodyBin, by
+    shelling out to `verse --export-body-catalog` (the engine owns the
+    Keplerian→state math and the binary format). Needs ./verse built and a
+    headless-capable GPU (same requirement as the tools/shot.sh renders)."""
+    verse = os.path.join(ROOT, "verse")
+    if not os.path.exists(verse):
+        sys.exit("error: ./verse not built — run `make` first")
+    bulk_json = os.path.join(tmp, "bulk.json")
+    with open(bulk_json, "w", encoding="utf-8") as f:
+        json.dump({"laws": laws, "bodies": bulk}, f)
+    subprocess.run([verse, "--export-body-catalog", out_bin,
+                    "--preset", bulk_json], check=True)
 
 
 def main():
@@ -242,8 +301,16 @@ def main():
         "assets/catalogs/exoplanets_full.csv", "assets/catalogs/exoplanets_sample.csv"))
     ap.add_argument("--gaia", default=default_csv(
         "assets/catalogs/gaia_full.csv", "assets/catalogs/gaia_sample.csv"))
+    ap.add_argument("--blackholes", default="assets/catalogs/black_holes.csv",
+                    help="curated real black-hole CSV (no bulk feed exists; "
+                         "empty string to skip)")
     ap.add_argument("--solar", default="assets/universe.json")
-    ap.add_argument("--out", default="assets/universes/known_universe.json")
+    ap.add_argument("--out", default="assets/universes/known_universe.json",
+                    help="manifest JSON to write (laws + curated bodies + refs)")
+    ap.add_argument("--out-bin", default="assets/catalogs/known_universe_bodies.bin",
+                    help="BodyBin for the bulk catalog bodies the manifest references")
+    ap.add_argument("--star-catalog", default="assets/catalogs/gaia_stars.bin",
+                    help="StarBin of far-field scenery stars to reference (empty to omit)")
     ap.add_argument("--max-systems", type=int, default=0,
                     help="keep the Solar System + this many nearest star systems "
                          "(default 0 = everything, matching the shipped preset; "
@@ -265,6 +332,10 @@ def main():
         extra.append(catalogtool("gaia",
                                  os.path.join(ROOT, args.gaia),
                                  os.path.join(tmp, "gaia.json")))
+    if args.blackholes:
+        extra.append(catalogtool("blackholes",
+                                 os.path.join(ROOT, args.blackholes),
+                                 os.path.join(tmp, "bh.json")))
 
     # Drop catalogue systems with no real position (parked at the origin).
     extra = [drop_unplaced(src) for src in extra]
@@ -273,30 +344,41 @@ def main():
     bodies = dedup_positional(bodies)
     bodies = cap_nearest(bodies, args.max_systems)
 
-    universe = {
-        "laws": {
-            "G": 6.674e-11, "softening": 1e5, "time_scale": 1.0,
-            "force_exp": 2.0, "lambda": 0.0, "pn_factor": 0.0,
-            "c_light": 2.99792458e8,
-        },
-        "bodies": bodies,
+    laws = {
+        "G": 6.674e-11, "softening": 1e5, "time_scale": 1.0,
+        "force_exp": 2.0, "lambda": 0.0, "pn_factor": 0.0,
+        "c_light": 2.99792458e8,
     }
+
+    # Split: the curated Solar System + black holes stay inline in the manifest;
+    # the bulk catalog bodies (nearby stars + exoplanet systems) go to the
+    # BodyBin so the JSON stays a lean, readable manifest.
+    curated, bulk = split_curated(bodies)
+    export_body_catalog(bulk, laws, tmp, os.path.join(ROOT, args.out_bin))
+
+    manifest = {"laws": laws, "body_catalog": args.out_bin}
+    if args.star_catalog:
+        manifest["star_catalog"] = args.star_catalog
+    manifest["bodies"] = curated
     # Carry the Solar System's procedural rings and asteroid belts verbatim.
     for key in ("rings", "asteroid_belts"):
         if key in solar:
-            universe[key] = solar[key]
+            manifest[key] = solar[key]
 
     out_path = os.path.join(ROOT, args.out)
-    header = ("// OpenMultiVerse \"Known Universe\" — auto-generated by\n"
-              "// tools/build_known_universe.py. Solar System at the origin;\n"
-              "// catalogued stars/exoplanets at their true light-year positions.\n")
+    header = ("// OpenMultiVerse \"Known Universe\" — manifest, auto-generated by\n"
+              "// tools/build_known_universe.py. Laws + the curated Solar System and\n"
+              "// black holes inline; bulk catalog bodies load from body_catalog (a\n"
+              "// BodyBin), far-field scenery stars from star_catalog (a StarBin).\n")
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(header)
-        json.dump(universe, f, indent=2)
+        json.dump(manifest, f, indent=2)
         f.write("\n")
 
-    n_star = sum(1 for b in bodies if b.get("type") == "star")
-    print(f"[known] wrote {len(bodies)} bodies ({n_star} stars) -> {args.out}")
+    n_bh = sum(1 for b in curated if b.get("type") in ("black_hole", "quasar"))
+    print(f"[known] manifest: {len(curated)} curated bodies ({n_bh} black holes) "
+          f"-> {args.out}")
+    print(f"[known] body_catalog: {len(bulk)} bulk bodies -> {args.out_bin}")
 
 
 if __name__ == "__main__":

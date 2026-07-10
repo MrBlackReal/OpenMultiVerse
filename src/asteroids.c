@@ -20,7 +20,8 @@
  *   2. Major-body positions are cached in a small stack array before the
  *      inner loop so every access hits L1 cache instead of g_bodies[].
  *   3. Force accumulation uses double (same precision as positions/velocities).
- *   4. Softening omitted — asteroid–planet closest approaches are >> 1e5 m.
+ *   4. Softening included (SOFTENING) — a perturbed particle can cross a
+ *      planet and an unsoftened 1/r^2 would produce a permanent NaN particle.
  */
 #include "asteroids.h"
 #include "body.h"
@@ -346,7 +347,11 @@ void asteroids_step(double dt) {
                 double dx = bx[j] - p->pos[0];
                 double dy = by[j] - p->pos[1];
                 double dz = bz[j] - p->pos[2];
-                double r2 = dx*dx + dy*dy + dz*dz;
+                /* Softened like every other gravity kernel: a particle
+                 * perturbed onto a planet-crossing orbit can pass arbitrarily
+                 * close, and an unsoftened 1/r^2 there yields Inf → NaN that
+                 * propagates forever (there is no per-particle NaN sweep). */
+                double r2 = dx*dx + dy*dy + dz*dz + SOFTENING*SOFTENING;
                 double r  = sqrt(r2);
                 double f  = bgm[j] / (r2 * r);
                 ax += f * dx;

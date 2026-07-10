@@ -39,6 +39,7 @@ static const CatalogEntry s_catalogs[] = {
     { "Exoplanets — neighborhood",     "assets/catalogs/exoplanets_sample.csv", CATALOG_EXOPLANETS },
     { "Horizons — Solar System",       "assets/catalogs/horizons_sample.csv",   CATALOG_HORIZONS   },
     { "Gaia — nearby stars",           "assets/catalogs/gaia_sample.csv",       CATALOG_GAIA       },
+    { "Black holes — real",            "assets/catalogs/black_holes.csv",       CATALOG_BLACK_HOLES},
 };
 
 /* cimgui: ask for the C-friendly struct/enum definitions and the SDL2+OpenGL3
@@ -268,6 +269,17 @@ enum { NAV_SORT_NAME = 0, NAV_SORT_MASS, NAV_SORT_RADIUS };
 static int s_nav_sort  = NAV_SORT_NAME;
 static int s_nav_desc  = 0;
 
+/* Total order over doubles that stays a strict weak ordering even if a value is
+ * NaN (NaN sorts after all finite values; two NaNs compare equal). A naive
+ * (x>y)-(x<y) returns 0 for every NaN comparison — non-transitive — which is
+ * undefined behaviour for qsort and can read out of bounds in glibc. */
+static int nav_cmp_double(double x, double y)
+{
+    int xn = isnan(x), yn = isnan(y);
+    if (xn || yn) return xn - yn;
+    return (x > y) - (x < y);
+}
+
 static int nav_cmp(const void *pa, const void *pb)
 {
     int ia = *(const int *)pa, ib = *(const int *)pb;
@@ -275,11 +287,11 @@ static int nav_cmp(const void *pa, const void *pb)
     int r;
     switch (s_nav_sort) {
         case NAV_SORT_MASS:
-            r = (a->mass > b->mass) - (a->mass < b->mass);   break;
+            r = nav_cmp_double(a->mass, b->mass);     break;
         case NAV_SORT_RADIUS:
-            r = (a->radius > b->radius) - (a->radius < b->radius); break;
+            r = nav_cmp_double(a->radius, b->radius); break;
         default:
-            r = strcasecmp(a->name, b->name);                break;
+            r = strcasecmp(a->name, b->name);         break;
     }
     if (r == 0) r = ia - ib;              /* stable tiebreak by slot index */
     return s_nav_desc ? -r : r;
@@ -339,31 +351,57 @@ static void menu_render_navigate(void)
     igSpacing();
 
     /* Collect the alive bodies passing the type filter + name query, then sort
-     * the index list by the chosen key (buffer grows as the universe does). */
+     * the index list by the chosen key (buffer grows as the universe does).
+     *
+     * The scan+qsort is cached and only rebuilt when an input that affects the
+     * result changes (body count, query, filters, sort key/direction): with a
+     * blank filter over a 100k+ star import this otherwise ran an O(n) scan plus
+     * an O(n log n) sort in the UI thread every single frame. A body dying with
+     * g_nbodies unchanged can leave a stale row until the next rebuild, which is
+     * harmless — teleport_to_body re-validates the target's alive flag. */
     static int *s_idx = NULL;
     static int  s_idx_cap = 0;
+    static int  s_nmatch  = 0;
+    static int  s_c_nbodies = -1, s_c_sort = -1, s_c_desc = -1;
+    static unsigned s_c_gen = (unsigned)-1;
+    static char s_c_query[64] = "\x01";   /* impossible initial value → first build */
+    static bool s_c_stars = false, s_c_planets = false, s_c_holes = false;
+
     if (s_idx_cap < g_nbodies) {
         int cap = g_nbodies > 0 ? g_nbodies : 1;
         int *p = (int *)realloc(s_idx, (size_t)cap * sizeof(int));
         if (p) { s_idx = p; s_idx_cap = cap; }
     }
 
-    int nmatch = 0;
-    for (int i = 0; i < g_nbodies && nmatch < s_idx_cap; i++) {
-        const Body *b = &g_bodies[i];
-        if (!b->alive) continue;
-        int is_hole   = b->is_black_hole;
-        int is_star   = b->is_star && !is_hole;
-        int is_planet = !b->is_star;
-        if (is_hole   && !s_show_holes)   continue;
-        if (is_star   && !s_show_stars)   continue;
-        if (is_planet && !s_show_planets) continue;
-        if (s_query[0] && !name_matches(b->name, s_query)) continue;
-        s_idx[nmatch++] = i;
-    }
+    int rebuild = s_c_nbodies != g_nbodies || s_c_sort != s_nav_sort ||
+                  s_c_desc != s_nav_desc || s_c_stars != s_show_stars ||
+                  s_c_planets != s_show_planets || s_c_holes != s_show_holes ||
+                  s_c_gen != g_universe_generation ||
+                  strcmp(s_c_query, s_query) != 0;
+    if (rebuild) {
+        s_c_nbodies = g_nbodies; s_c_sort = s_nav_sort; s_c_desc = s_nav_desc;
+        s_c_gen = g_universe_generation;
+        s_c_stars = s_show_stars; s_c_planets = s_show_planets; s_c_holes = s_show_holes;
+        snprintf(s_c_query, sizeof(s_c_query), "%s", s_query);
 
-    if (nmatch > 1)
-        qsort(s_idx, (size_t)nmatch, sizeof(int), nav_cmp);
+        int nmatch = 0;
+        for (int i = 0; i < g_nbodies && nmatch < s_idx_cap; i++) {
+            const Body *b = &g_bodies[i];
+            if (!b->alive) continue;
+            int is_hole   = b->is_black_hole;
+            int is_star   = b->is_star && !is_hole;
+            int is_planet = !b->is_star;
+            if (is_hole   && !s_show_holes)   continue;
+            if (is_star   && !s_show_stars)   continue;
+            if (is_planet && !s_show_planets) continue;
+            if (s_query[0] && !name_matches(b->name, s_query)) continue;
+            s_idx[nmatch++] = i;
+        }
+        if (nmatch > 1)
+            qsort(s_idx, (size_t)nmatch, sizeof(int), nav_cmp);
+        s_nmatch = nmatch;
+    }
+    int nmatch = s_nmatch;
 
     const int MAX_RESULTS = 512;
     int shown = nmatch < MAX_RESULTS ? nmatch : MAX_RESULTS;
@@ -382,28 +420,37 @@ static void menu_render_navigate(void)
         igTableSetupColumn("Radius", ImGuiTableColumnFlags_WidthFixed,  110.0f, 0);
         igTableHeadersRow();
 
-        for (int r = 0; r < shown; r++) {
-            int i = s_idx[r];
-            const Body *b = &g_bodies[i];
-            char mass_s[32], rad_s[32], label[80];
-            nav_fmt_mass(b->mass, mass_s, sizeof(mass_s));
-            nav_fmt_radius(b->radius, rad_s, sizeof(rad_s));
+        /* Clip to the visible scroll region: only the ~dozen on-screen rows get
+         * formatted + emitted each frame, instead of all `shown` (up to 512).
+         * Rows are uniform height, so the clipper can seek without measuring. */
+        ImGuiListClipper *clip = ImGuiListClipper_ImGuiListClipper();
+        ImGuiListClipper_Begin(clip, shown, -1.0f);
+        while (ImGuiListClipper_Step(clip)) {
+            for (int r = clip->DisplayStart; r < clip->DisplayEnd; r++) {
+                int i = s_idx[r];
+                const Body *b = &g_bodies[i];
+                char mass_s[32], rad_s[32], label[80];
+                nav_fmt_mass(b->mass, mass_s, sizeof(mass_s));
+                nav_fmt_radius(b->radius, rad_s, sizeof(rad_s));
 
-            /* "##tp%d" keeps each Selectable's ID unique (names can repeat, e.g.
-             * many planets named "b"); the glyph flags the body kind. */
-            const char *glyph = b->is_black_hole ? "o" : b->is_star ? "*" : " ";
-            snprintf(label, sizeof(label), "%s %s##tp%d", glyph, b->name, i);
+                /* "##tp%d" keeps each Selectable's ID unique (names can repeat,
+                 * e.g. many planets named "b"); the glyph flags the body kind. */
+                const char *glyph = b->is_black_hole ? "o" : b->is_star ? "*" : " ";
+                snprintf(label, sizeof(label), "%s %s##tp%d", glyph, b->name, i);
 
-            igTableNextRow(0, 0.0f);
-            igTableSetColumnIndex(0);
-            if (igSelectable_Bool(label, false, ImGuiSelectableFlags_SpanAllColumns,
-                                  (ImVec2_c){ 0.0f, 0.0f }))
-                teleport_to_body(i);
-            igTableSetColumnIndex(1);
-            igText("%s", mass_s);
-            igTableSetColumnIndex(2);
-            igText("%s", rad_s);
+                igTableNextRow(0, 0.0f);
+                igTableSetColumnIndex(0);
+                if (igSelectable_Bool(label, false, ImGuiSelectableFlags_SpanAllColumns,
+                                      (ImVec2_c){ 0.0f, 0.0f }))
+                    teleport_to_body(i);
+                igTableSetColumnIndex(1);
+                igText("%s", mass_s);
+                igTableSetColumnIndex(2);
+                igText("%s", rad_s);
+            }
         }
+        ImGuiListClipper_End(clip);
+        ImGuiListClipper_destroy(clip);
         igEndTable();
     }
 
@@ -520,8 +567,16 @@ static void menu_render_inspect(void)
         else           igTextDisabled("Orbits    nothing (system root)");
 
         int children = 0;
-        for (int i = 0; i < g_nbodies; i++)
+        for (int i = 0; i < g_nbodies; i++) {
+            /* Field stars are system roots (parent == -1), never children of an
+             * inspected body — skip the ~263k-body bulk range instead of
+             * scanning it every frame the Inspect tab is open. */
+            if (i >= g_field_star_begin && i < g_field_star_end) {
+                i = g_field_star_end - 1;
+                continue;
+            }
             if (g_bodies[i].alive && g_bodies[i].parent == t) children++;
+        }
         if (children > 0)
             igText("Children  %d bodies in orbit", children);
     }
@@ -828,11 +883,19 @@ int menu_render(int current_preset, int *laws_changed, const char **out_load_pat
     if (laws_changed) *laws_changed = 0;
     if (!s_ctx) return -1;
 
+    /* Menu closed (the common case during normal flight): skip the entire ImGui
+     * frame. Running the SDL2/OpenGL3 backends' per-frame input+display setup and
+     * submitting an empty draw list every frame is pure waste when nothing is
+     * shown. The window is a hard toggle (no open/close animation), and
+     * menu_process_event() already no-ops while closed, so nothing depends on
+     * ImGui ticking here. */
+    if (!s_visible) return -1;
+
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplSDL2_NewFrame();
     igNewFrame();
 
-    if (s_visible) {
+    {
         igSetNextWindowPos((ImVec2_c){ 40.0f, 40.0f }, ImGuiCond_FirstUseEver,
                            (ImVec2_c){ 0.0f, 0.0f });
         igSetNextWindowSize((ImVec2_c){ 480.0f, 580.0f }, ImGuiCond_FirstUseEver);

@@ -6,7 +6,54 @@
  */
 #pragma once
 
+#include <stdint.h>
 #include "body.h"
+
+/*
+ * BodyBin — compact binary catalog of *interactive-tier* bodies (nearby stars
+ * and exoplanet systems with their planets/moons). Distinct from the StarBin
+ * "star_catalog" (catalog.h), which holds hundreds of thousands of frozen
+ * far-field scenery stars: BodyBin bodies are full simulated bodies with parent
+ * links, so it stores each body's absolute resolved state (like a snapshot) plus
+ * the fields the catalog importers set. A universe manifest opts in via a
+ * top-level "body_catalog" path; the bodies load into the interactive range
+ * (before the field-star range) with no warm-up, exactly like a snapshot.
+ *
+ * On-disk: one BodyBinHeader, then `count` BodyBinRecord, little-endian (x86
+ * build target). `record_size` is validated against sizeof(BodyBinRecord) so any
+ * ABI drift fails loudly.
+ */
+#define BODYBIN_MAGIC   0x424D564Fu   /* 'OMVB' */
+#define BODYBIN_VERSION 1u
+
+/* Record flag bits. */
+#define BODYBIN_IS_STAR        0x1u
+#define BODYBIN_IS_BLACK_HOLE  0x2u
+#define BODYBIN_IS_COMET       0x4u
+
+typedef struct {
+    uint32_t magic;        /* BODYBIN_MAGIC                                    */
+    uint32_t version;      /* BODYBIN_VERSION                                 */
+    uint32_t count;        /* number of BodyBinRecord that follow            */
+    uint32_t record_size;  /* = sizeof(BodyBinRecord); reader validates       */
+} BodyBinHeader;
+
+typedef struct {
+    double   pos[3];        /* metres, simulation frame (absolute state)      */
+    double   vel[3];        /* m/s                                            */
+    double   mass;          /* kg                                             */
+    double   radius;        /* m                                              */
+    double   rotation_rate; /* rad/s                                          */
+    double   rotation_angle;/* rad                                            */
+    float    color[3];      /* display RGB, 0..1                              */
+    float    obliquity;     /* axial tilt, degrees                            */
+    float    agn_activity;  /* AGN Eddington ratio (black holes)             */
+    float    accretion_disk;/* accretion-disk strength                        */
+    float    dust_torus;    /* dust-torus strength                            */
+    int32_t  parent;        /* catalog-local parent index (-1 = root)        */
+    uint32_t flags;         /* BODYBIN_IS_* bits                              */
+    char     name[32];      /* body name (NUL-terminated)                     */
+} BodyBinRecord;
 
 typedef struct {
     const char *name;
@@ -49,6 +96,17 @@ int universe_validate(const char *path);
  * Returns 0 on success, -1 on failure (diagnostic printed to stderr).
  */
 int universe_save(const char *path);
+
+/*
+ * universe_export_body_catalog — write the current live universe's *bulk*
+ * bodies (everything except the curated set: the Sun's system and every black
+ * hole/quasar) to `path` as a BodyBin binary, in absolute resolved state.
+ * Used by the manifest+binary build so a universe JSON stays a lean manifest
+ * while its thousands of catalog bodies live in the binary. Field-star-range
+ * bodies are excluded (they belong to the separate StarBin). Returns the number
+ * of records written (>= 0), or -1 on failure.
+ */
+int universe_export_body_catalog(const char *path);
 
 /* Set to 1 by universe_load() when it loaded a snapshot file, else 0. Snapshots
  * already hold settled state, so main.c skips the warm-up pre-simulation. */

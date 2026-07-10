@@ -1913,6 +1913,25 @@ void rings_step_system(int root, double dt)
     if (root < 0 || root >= g_nbodies || s_n_discs <= 0 || dt <= 0.0) return;
     if (!g_bodies[root].alive) return;
 
+    /* Gather this system's ring perturbers ONCE, not once per disc. The set is
+     * identical for every disc of the same root, so the old per-disc rescan of
+     * all bodies (skipping the field-star range) was the frame's single hottest
+     * function at galaxy scale. Perturbers are star-parented planets in this one
+     * system, so they always live below MAX_BODIES and never in the field-star
+     * range — bounding the gather to a tiny fixed list. */
+    int perturbers[MAX_BODIES];
+    int nperturb = 0;
+    int scan_end = g_nbodies < MAX_BODIES ? g_nbodies : MAX_BODIES;
+    for (int i = 0; i < scan_end; i++) {
+        if (i >= g_field_star_begin && i < g_field_star_end) {
+            i = g_field_star_end - 1;
+            continue;
+        }
+        if (!body_is_ring_perturber_planet(i)) continue;
+        if (body_root_star(i) != root) continue;
+        perturbers[nperturb++] = i;
+    }
+
     for (int d = 0; d < s_n_discs; d++) {
         ParticleDisc *disc = &s_discs[d];
         int parent_idx;
@@ -1930,19 +1949,9 @@ void rings_step_system(int root, double dt)
             }
         }
 
-        for (int i = 0; i < g_nbodies; i++) {
-            /* Skip the bulk field-star range: field stars are stars, never ring
-             * perturbers (which must be star-parented planets), so scanning them
-             * is pure waste — and at galaxy scale this loop, run per active
-             * system per outer step per disc, was the single hottest function in
-             * the frame (a full 262k-body scan each time). */
-            if (i >= g_field_star_begin && i < g_field_star_end) {
-                i = g_field_star_end - 1;
-                continue;
-            }
-            if (i == parent_idx) continue;
-            if (!body_is_ring_perturber_planet(i)) continue;
-            if (body_root_star(i) != root) continue;
+        for (int p = 0; p < nperturb; p++) {
+            int i = perturbers[p];
+            if (i == parent_idx) continue;   /* a disc never perturbs itself */
             update_disc_swept_contact(disc, i, dt);
         }
     }
@@ -2078,6 +2087,20 @@ void rings_on_collision(int target_idx, int impactor_idx, double rel_speed,
  *
  * Visual and motion transfer blends hide the otherwise abrupt parent change.
  */
+/* rings_on_body_slot_reused — invalidate any disc still bound to a body slot
+ * that is being handed to a brand-new body. Some death paths (e.g. a supernova
+ * flash destroying a ringed planet) set alive=0 without an absorbed-notify, so
+ * a dormant disc keeps its parent_idx; when universe_add_body later reuses that
+ * exact slot, the disc would silently reanimate around the unrelated new body
+ * (wrong centre/mass/obliquity). Called from the single slot-reuse choke point. */
+void rings_on_body_slot_reused(int idx)
+{
+    for (int d = 0; d < s_n_discs; d++) {
+        if (s_discs[d].initialized && s_discs[d].parent_idx == idx)
+            s_discs[d].initialized = 0;
+    }
+}
+
 void rings_on_body_absorbed(int target_idx, int impactor_idx)
 {
     for (int d = 0; d < s_n_discs; d++) {

@@ -28,6 +28,9 @@ void physics_respa_begin(double dt_outer);  /* slow half-kick + prime fast acc  
 void physics_respa_inner(double dt_inner);  /* fast KDK + drift all bodies      */
 void physics_respa_end  (double dt_outer);  /* slow half-kick + rotation + time */
 void physics_respa_begin_system(int root, double dt_outer);
+/* Like physics_respa_begin_system, but skips recomputing the slow force when
+ * recompute_slow==0 (acc[] must already be valid at the current positions). */
+void physics_respa_begin_system_ex(int root, double dt_outer, int recompute_slow);
 void physics_respa_inner_system(int root, double dt_inner);
 void physics_respa_end_system(int root, double dt_outer);
 

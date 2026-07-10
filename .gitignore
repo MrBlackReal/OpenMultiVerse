@@ -82,6 +82,11 @@ assets/catalogs/*_full.csv
 # Compact binary star catalogs referenced by a preset's "star_catalog" field
 # (regenerate via: catalogtool gaia-bin <gaia.csv> assets/catalogs/<name>.bin)
 assets/catalogs/*.bin
+# ...but the Known Universe's body_catalog IS committed: it holds the bulk
+# interactive bodies (nearby stars + exoplanet systems) that used to live inline
+# in known_universe.json, and there is no full-catalog CSV in the repo to rebuild
+# it from a fresh checkout.
+!assets/catalogs/known_universe_bodies.bin
 tools/_known_tmp/
 
 # Python bytecode cache

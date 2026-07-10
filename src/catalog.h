@@ -21,7 +21,8 @@ typedef enum {
     CATALOG_EXOPLANETS = 0,  /* NASA Exoplanet Archive "Planetary Systems" CSV */
     CATALOG_HORIZONS,        /* JPL Horizons heliocentric state-vector CSV     */
     CATALOG_GAIA,            /* Gaia / Hipparcos nearby-star CSV -> JSON        */
-    CATALOG_GAIA_BIN         /* Gaia CSV -> compact binary star catalog (.bin)  */
+    CATALOG_GAIA_BIN,        /* Gaia CSV -> compact binary star catalog (.bin)  */
+    CATALOG_BLACK_HOLES      /* curated real black-hole CSV -> JSON             */
 } CatalogType;
 
 /*
@@ -58,7 +59,8 @@ typedef struct {
     uint8_t  _pad;         /* reserved; keeps the record 8-byte aligned       */
 } StarBinRecord;
 
-/* Map "exoplanets" | "horizons" | "gaia" | "gaia-bin" to a CatalogType, or -1. */
+/* Map "exoplanets" | "horizons" | "gaia" | "gaia-bin" | "blackholes" to a
+ * CatalogType, or -1. */
 int catalog_type_from_name(const char *name);
 
 /*

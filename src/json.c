@@ -112,6 +112,8 @@ static char *parse_string(Parser *ps)
     while (*ps->p && *ps->p != '"') {
         if (*ps->p == '\\') {
             ps->p++;
+            if (!*ps->p) break;   /* dangling backslash at EOF: measure pass
+                                     counted 0 bytes for it, so emit none here */
             switch (*ps->p) {
             case '"':  *out++ = '"';  break;
             case '\\': *out++ = '\\'; break;
@@ -336,8 +338,17 @@ JsonNode *json_parse_file(const char *path)
         return NULL;
     }
 
-    fseek(f, 0, SEEK_END);
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        fprintf(stderr, "[json] cannot seek '%s'\n", path);
+        return NULL;
+    }
     long sz = ftell(f);
+    if (sz < 0) {                       /* directory, pipe, or ftell failure */
+        fclose(f);
+        fprintf(stderr, "[json] cannot size '%s'\n", path);
+        return NULL;
+    }
     fseek(f, 0, SEEK_SET);
 
     char *buf = (char *)malloc((size_t)sz + 1);
@@ -404,6 +415,10 @@ JsonNode *json_idx(const JsonNode *arr, int i)
 double json_num(const JsonNode *node, double def)
 {
     if (!node || node->type != JSON_NUMBER) return def;
+    /* Reject non-finite literals (e.g. "1e400" → Inf via strtod): no simulation
+     * field wants Inf/NaN, and letting one through propagates NaN across a whole
+     * system on the next force pass. Fall back to the caller's default. */
+    if (!isfinite(node->number)) return def;
     return node->number;
 }
 

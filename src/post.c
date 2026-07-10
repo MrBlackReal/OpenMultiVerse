@@ -207,6 +207,33 @@ void post_init(void)
     s_ok = 1;
 }
 
+void post_shutdown(void)
+{
+    glDeleteProgram(s_sh_bright);
+    glDeleteProgram(s_sh_blur);
+    glDeleteProgram(s_sh_comp);
+    glDeleteProgram(s_sh_flare);
+    s_sh_bright = s_sh_blur = s_sh_comp = s_sh_flare = 0;
+
+    if (s_scene_fbo) glDeleteFramebuffers(1, &s_scene_fbo);
+    glDeleteTextures(1, &s_scene_tex);
+    glDeleteTextures(1, &s_scene_depth);
+    glDeleteTextures(1, &s_grab_tex);
+    s_scene_fbo = s_scene_tex = s_scene_depth = s_grab_tex = 0;
+
+    for (int l = 0; l < BLOOM_LEVELS; l++) {
+        glDeleteFramebuffers(2, s_blur_fbo[l]);
+        glDeleteTextures(2, s_blur_tex[l]);
+        s_blur_fbo[l][0] = s_blur_fbo[l][1] = 0;
+        s_blur_tex[l][0] = s_blur_tex[l][1] = 0;
+    }
+
+    glDeleteVertexArrays(1, &s_quad_vao);
+    glDeleteBuffers(1, &s_quad_vbo);
+    s_quad_vao = s_quad_vbo = 0;
+    s_ok = 0;
+}
+
 int post_available(void) { return s_ok; }
 int post_enabled(void)   { return s_ok && s_enabled; }
 

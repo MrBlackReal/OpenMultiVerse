@@ -5,6 +5,7 @@
  */
 #include "accretion.h"
 #include "lifecycle.h"   /* g_stellar_years_per_sec, SOLAR_MASS_KG */
+#include "universe.h"    /* g_field_star_begin/_end */
 #include <math.h>
 
 #define ACC_ETA          0.1          /* radiative efficiency, L = η·Ṁ·c²        */
@@ -102,6 +103,14 @@ static void roche_feed(int hole, double dt_sec)
     Body *h = &g_bodies[hole];
     double t_transfer = ACC_T_TRANSFER_YR * SEC_PER_YEAR;
     for (int j = 0; j < g_nbodies; j++) {
+        /* Skip the bulk field-star range: field stars are never a hole's bound
+         * child (donors are star-parented companions), so scanning them is pure
+         * waste — and at galaxy scale this ~262k-body span, run per hole per
+         * step, was the dominant cost here. */
+        if (j >= g_field_star_begin && j < g_field_star_end) {
+            j = g_field_star_end - 1;
+            continue;
+        }
         Body *d = &g_bodies[j];
         if (j == hole || !d->alive || d->parent != hole) continue;
         if (d->mass <= 0.0 || d->radius <= 0.0) continue;
@@ -162,14 +171,17 @@ void accretion_step(double dt_real_sec)
          * angular momentum ℓ = L̃·GM/c, so J += ℓ·dM and a* = Jc/(GM²) climbs
          * toward the Thorne limit (Bardeen 1970). Use the pre-accretion mass. */
         double Mold = b->mass;
-        double mag  = fabs(b->spin_a);
-        double sgn  = b->spin_a < 0.0 ? -1.0 : 1.0;    /* 0 spins up prograde     */
-        double J    = mag * G_GRAV * Mold * Mold / C_LIGHT;
-        double dJ   = kerr_l_isco(mag) * (G_GRAV * Mold / C_LIGHT) * dM;
+        double a_old = b->spin_a;                       /* signed: +prograde       */
+        /* Work in SIGNED angular momentum: prograde accretion adds a POSITIVE dJ,
+         * so a retrograde hole (a<0) spins DOWN through zero and flips prograde
+         * rather than spinning further retrograde. */
+        double J    = a_old * G_GRAV * Mold * Mold / C_LIGHT;
+        double dJ   = kerr_l_isco(fabs(a_old)) * (G_GRAV * Mold / C_LIGHT) * dM;
         double Mnew = Mold + dM;
-        double magnew = (J + dJ) * C_LIGHT / (G_GRAV * Mnew * Mnew);
-        if (magnew > A_MAX) magnew = A_MAX;
-        b->spin_a = sgn * magnew;
+        double anew = (J + dJ) * C_LIGHT / (G_GRAV * Mnew * Mnew);
+        if (anew >  A_MAX) anew =  A_MAX;
+        if (anew < -A_MAX) anew = -A_MAX;
+        b->spin_a = anew;
 
         b->gas_reservoir -= dM;              /* deplete */
         b->mass           = Mnew;            /* the hole grows as it eats */

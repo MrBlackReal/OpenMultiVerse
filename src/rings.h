@@ -20,4 +20,7 @@ void rings_render(const float vp_camrel[16]);
 void rings_on_collision(int target_idx, int impactor_idx, double rel_speed,
                         const double dir[3], const double rel_vel[3]);
 void rings_on_body_absorbed(int target_idx, int impactor_idx);
+/* Invalidate any disc bound to a body slot that is being reused for a new body,
+ * so an orphaned ring can't reanimate around an unrelated body. */
+void rings_on_body_slot_reused(int idx);
 void rings_shutdown(void);

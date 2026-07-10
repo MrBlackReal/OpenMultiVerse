@@ -1398,7 +1398,16 @@ static void finalize_absorb_body(int target, int impactor, double rel_speed,
     const char *outcome_name = "absorb";
 
     for (int i = 0; i < cnb(); i++) {
-        if (!g_bodies[i].alive || g_bodies[i].parent != impactor) continue;
+        if (!g_bodies[i].alive) continue;
+        /* If the body being removed was mid-shredding a victim, release the
+         * victim: physics.c freezes bodies with tidal_frac>0 (their motion is
+         * art-directed by bh_tidal_pass), so a victim still pointing at a now-
+         * dead hole would otherwise be stuck in space forever, never devoured. */
+        if (g_bodies[i].tidal_frac > 0.0f && g_bodies[i].tidal_hole == impactor) {
+            g_bodies[i].tidal_frac = 0.0f;
+            g_bodies[i].tidal_hole = -1;
+        }
+        if (g_bodies[i].parent != impactor) continue;
         if (target == i || body_is_descendant_of(target, i))
             g_bodies[i].parent = body_root_star(target);
         else
@@ -1534,9 +1543,21 @@ static void bh_tidal_pass(int hole, double dt)
         if (old_mass > 0.0 && b->mass > 0.0)
             b->radius *= cbrt(b->mass / old_mass);   /* shrink at ~fixed density */
 
-        h->mass          += shed;
+        /* Conserve linear momentum: the shed mass carries the victim's velocity
+         * into the hole (mass-weighted), so a hole eating a comparable-mass
+         * victim recoils instead of drifting off with unaccounted momentum. */
+        double hm_new = h->mass + shed;
+        if (hm_new > 0.0) {
+            h->vel[0] = (h->vel[0] * h->mass + b->vel[0] * shed) / hm_new;
+            h->vel[1] = (h->vel[1] * h->mass + b->vel[1] * shed) / hm_new;
+            h->vel[2] = (h->vel[2] * h->mass + b->vel[2] * shed) / hm_new;
+        }
+        h->mass          = hm_new;
         h->gas_reservoir += shed;
         h->radius         = laws_schwarzschild_radius(h->mass);  /* horizon tracks mass */
+        horizon           = h->radius;   /* keep depth/inspiral/devour tests in
+                                            step with the growing horizon across
+                                            multiple victims in one pass */
         fed = 1;
 
         /* Controlled inspiral.  A close orbit around a supermassive hole is
@@ -1600,7 +1621,14 @@ static void bh_tidal_pass(int hole, double dt)
         if (b->tidal_frac >= 1.0f || b->mass <= old_mass * 1e-3 ||
             (horizon > 0.0 && newdist <= horizon * 1.05)) {
             double old_radius = h->radius;
-            h->mass          += b->mass;
+            /* Conserve momentum for the final swallowed remnant too. */
+            double hm_fin = h->mass + b->mass;
+            if (hm_fin > 0.0) {
+                h->vel[0] = (h->vel[0] * h->mass + b->vel[0] * b->mass) / hm_fin;
+                h->vel[1] = (h->vel[1] * h->mass + b->vel[1] * b->mass) / hm_fin;
+                h->vel[2] = (h->vel[2] * h->mass + b->vel[2] * b->mass) / hm_fin;
+            }
+            h->mass          = hm_fin;
             h->gas_reservoir += b->mass;
             b->mass       = 0.0;
             b->tidal_frac = 0.0f;
@@ -1883,7 +1911,9 @@ static void begin_merge_event(int target, int impactor, double rel_speed,
     for (int i = 0; i < MAX_MERGES; i++) {
         if (!s_merges[i].active) { slot = i; break; }
     }
-    if (slot < 0) slot = 0;
+    /* slot < 0 (pool full) is handled after the mass merge below by finalizing
+     * immediately instead of clobbering an active merge record — overwriting one
+     * left its impactor stranded as an alive, zero-mass "zombie" body. */
 
     if (b->trail && b->trail_count > 0) {
         touch_pos[0] = a->pos[0] + dir[0] * (old_radius + b->radius);
@@ -1912,6 +1942,15 @@ static void begin_merge_event(int target, int impactor, double rel_speed,
     b->vel[2] = a->vel[2];
     compute_collision_spin_state(target, impactor, dir, rel_vel,
                                  &a->obliquity, &a->rotation_rate);
+
+    /* No free animation slot: the physical merge is already done above, so
+     * retire the impactor cleanly (no approach animation) rather than dropping
+     * a zombie. */
+    if (slot < 0) {
+        finalize_absorb_body(target, impactor, rel_speed,
+                             COLLISION_VIS_MERGE, old_radius, 0);
+        return;
+    }
 
     s_merges[slot].active    = 1;
     s_merges[slot].target    = target;
@@ -2296,7 +2335,12 @@ static void absorb_body(int target, int impactor, double rel_speed,
 
     if (!a->alive || !b->alive || a->is_star || b->is_star) return;
 
-    old_radius = current_contact_radius(target);
+    /* Capture the PHYSICAL radius (as every other absorb path does), not the
+     * mid-animation visual radius from current_contact_radius(): a crater/major
+     * impact landing while a prior RadiusTransition is still easing would
+     * otherwise bake the interpolated in-between size into a->radius below,
+     * permanently corrupting the physical radius/density. */
+    old_radius = a->radius;
     mass_ratio = fmin(a->mass, b->mass) / fmax(fmax(a->mass, b->mass), 1.0);
     outcome = classify_collision(target, impactor, rel_speed);
     {

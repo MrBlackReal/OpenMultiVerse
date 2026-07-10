@@ -13,6 +13,7 @@
 #pragma once
 
 void post_init(void);       /* load shaders + quad; safe to call once after GL init */
+void post_shutdown(void);   /* delete all FBOs/textures/shaders/buffers post owns */
 void post_begin(void);      /* bind HDR scene target (no-op if disabled) */
 void post_end(void);        /* run bloom + composite to screen (no-op if disabled) */
 

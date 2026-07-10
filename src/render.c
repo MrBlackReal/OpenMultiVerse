@@ -201,6 +201,7 @@ static GLint  s_at_color     = -1;
 static GLint  s_at_intensity = -1;
 static GLint  s_at_aspect    = -1;
 static GLint  s_at_screen    = -1;
+static GLint  s_at_fov_tan   = -1;
 static GLint  s_at_aurora    = -1;
 static GLint  s_at_aur_shape = -1;
 static GLint  s_at_aur_look  = -1;
@@ -231,6 +232,12 @@ static GLint    s_field_near       = -1, s_field_horizon = -1;
 static GLint    s_field_time       = -1, s_field_twinkle = -1;
 static int      s_field_count      = 0;      /* stars in the VBO                 */
 static int      s_field_vbo_cap    = 0;      /* stars the VBO can hold           */
+/* Field-star positions are stored in the VBO RELATIVE to this reference (the
+ * field centroid, AU), and u_cam is uploaded relative to it too. Subtracting a
+ * common ~1e10 AU offset in double before the float cast avoids catastrophic
+ * float32 cancellation (a_pos - u_cam) that jittered the bulk field at galaxy
+ * scale. Refreshed each time the VBO is rebuilt. */
+static double   s_field_ref[3]     = { 0.0, 0.0, 0.0 };
 static unsigned s_field_generation = 0;      /* g_universe_generation it was built for */
 
 /* Impact ejecta particles — additive GL_POINTS from collision system */
@@ -1127,7 +1134,8 @@ void render_init(void) {
     s_sp_tidal_glow     = glGetUniformLocation(s_sphere_shader, "u_tidal_glow");
     s_sp_opacity        = glGetUniformLocation(s_sphere_shader, "u_opacity");
 
-    /* Frame-constant uniforms (fov_tan, aspect, screen do not change at runtime) */
+    /* Seed fov_tan/aspect/screen; all three are re-uploaded per frame in the
+     * draw path since FOV (slider) and the window size can change at runtime. */
     glUseProgram(s_sphere_shader);
     glUniform1f(s_sp_fov_tan, tanf(FOV * 0.5f * (float)(PI / 180.0)));
     glUniform1f(s_sp_aspect,  (float)WIN_W / (float)WIN_H);
@@ -1336,9 +1344,9 @@ void render_init(void) {
         s_at_aur_shape = glGetUniformLocation(s_atm_shader, "u_aur_shape");
         s_at_aur_look  = glGetUniformLocation(s_atm_shader, "u_aur_look");
         s_at_time      = glGetUniformLocation(s_atm_shader, "u_time");
+        s_at_fov_tan   = glGetUniformLocation(s_atm_shader, "u_fov_tan");
         glUseProgram(s_atm_shader);
-        glUniform1f(glGetUniformLocation(s_atm_shader, "u_fov_tan"),
-                    tanf(FOV * 0.5f * (float)(PI / 180.0)));
+        glUniform1f(s_at_fov_tan, tanf(FOV * 0.5f * (float)(PI / 180.0)));
         glUniform1f(s_at_aspect, (float)WIN_W / (float)WIN_H);
         glUniform2f(s_at_screen, (float)WIN_W, (float)WIN_H);
         glUseProgram(0);
@@ -1798,6 +1806,21 @@ static void field_stars_ensure(void)
     if (!buf) return;
 
     const double R_SUN_M = 6.957e8, M_SUN = 4.83;   /* matches star_dot_apparent_mag */
+
+    /* First pass: centroid of the live field stars (double), used as the shared
+     * reference so stored positions carry only their offset FROM it, not the
+     * galaxy's absolute ~1e10 AU coordinate. */
+    double cx = 0.0, cy = 0.0, cz = 0.0;
+    int nlive = 0;
+    for (int i = begin; i < end; i++) {
+        Body *b = &g_bodies[i];
+        if (!b->alive || !b->is_star) continue;
+        cx += b->pos[0] * RS; cy += b->pos[1] * RS; cz += b->pos[2] * RS;
+        nlive++;
+    }
+    if (nlive > 0) { cx /= nlive; cy /= nlive; cz /= nlive; }
+    s_field_ref[0] = cx; s_field_ref[1] = cy; s_field_ref[2] = cz;
+
     int w = 0;
     for (int i = begin; i < end; i++) {
         Body *b = &g_bodies[i];
@@ -1806,9 +1829,9 @@ static void field_stars_ensure(void)
         double L  = Lr * Lr;
         if (!(L > 1e-6)) L = 1e-6;
         float absmag = (float)(M_SUN - 2.5 * log10(L));   /* distance-independent */
-        buf[w*8+0] = (float)(b->pos[0] * RS);
-        buf[w*8+1] = (float)(b->pos[1] * RS);
-        buf[w*8+2] = (float)(b->pos[2] * RS);
+        buf[w*8+0] = (float)(b->pos[0] * RS - cx);
+        buf[w*8+1] = (float)(b->pos[1] * RS - cy);
+        buf[w*8+2] = (float)(b->pos[2] * RS - cz);
         buf[w*8+3] = b->col[0];
         buf[w*8+4] = b->col[1];
         buf[w*8+5] = b->col[2];
@@ -1903,6 +1926,11 @@ void render_frame(const float view[16], const float proj[16],
      * so all vertex positions in phong.vert are free of float32 cancellation. */
     glUniformMatrix4fv(s_sp_vp,       1, GL_FALSE, vp_camrel);
     glUniform1f(s_sp_aspect, aspect);
+    /* FOV is a live slider (g_settings.fov): the phong/atm fragment shaders
+     * reconstruct the per-pixel camera ray from u_fov_tan, so it must track the
+     * projection matrix every frame — uploading it once at init desynced the
+     * ray-sphere silhouette from the billboard footprint after any FOV change. */
+    glUniform1f(s_sp_fov_tan, tanf(FOV * 0.5f * (float)(PI / 180.0)));
     glUniform2f(s_sp_screen, (float)WIN_W, (float)WIN_H);
     glUniform3f(s_sp_sun_world,  sun_wx, sun_wy, sun_wz);
     glUniform3f(s_sp_cam_right,  cam_right[0], cam_right[1], cam_right[2]);
@@ -2269,6 +2297,7 @@ void render_frame(const float view[16], const float proj[16],
     if (s_atm_shader) {
         glUseProgram(s_atm_shader);
         glUniform1f(s_at_aspect, aspect);
+        glUniform1f(s_at_fov_tan, tanf(FOV * 0.5f * (float)(PI / 180.0)));  /* live FOV slider */
         glUniform2f(s_at_screen, (float)WIN_W, (float)WIN_H);
         glUniformMatrix4fv(s_at_vp, 1, GL_FALSE, vp_camrel);
         glUniform3f(s_at_cam_right, cam_right[0], cam_right[1], cam_right[2]);
@@ -3047,8 +3076,12 @@ void render_frame(const float view[16], const float proj[16],
         float near_dist = (float)((double)g_settings.near_dot_dist_ly * LY * RS);
         glUseProgram(s_field_shader);
         glUniformMatrix4fv(s_field_vp, 1, GL_FALSE, vp_camrel);
-        glUniform3f(s_field_cam, (float)g_cam.pos[0], (float)g_cam.pos[1],
-                    (float)g_cam.pos[2]);
+        /* Camera relative to the same field reference: rel = a_pos - u_cam is
+         * then evaluated on small offsets, free of the float32 cancellation that
+         * subtracting two ~1e10 AU absolutes would suffer. */
+        glUniform3f(s_field_cam, (float)(g_cam.pos[0] - s_field_ref[0]),
+                    (float)(g_cam.pos[1] - s_field_ref[1]),
+                    (float)(g_cam.pos[2] - s_field_ref[2]));
         glUniform1f(s_field_near,    near_dist);
         glUniform1f(s_field_horizon, (float)g_settings.farfield_horizon_au);
         glUniform1f(s_field_time,    (float)SDL_GetTicks() * 0.001f);
@@ -3558,6 +3591,26 @@ void render_shutdown(void) {
     glDeleteVertexArrays(1, &s_build_line_vao);
     glDeleteBuffers(1, &s_build_ui_vbo);
     glDeleteVertexArrays(1, &s_build_ui_vao);
+    /* Field-star + black-hole/AGN + volumetric passes were created in
+     * render_init but omitted from cleanup — delete them so a future
+     * renderer-reset (window recreate) doesn't leak GPU objects. */
+    glDeleteProgram(s_field_shader);
+    glDeleteBuffers(1, &s_field_vbo);
+    glDeleteVertexArrays(1, &s_field_vao);
+    glDeleteProgram(s_bh_shader);
+    glDeleteProgram(s_jet_shader);
+    glDeleteProgram(s_torus_shader);
+    glDeleteProgram(s_agncore_shader);
+    glDeleteProgram(s_vol_composite_shader);
+    glDeleteVertexArrays(1, &s_vol_quad_vao);
+    glDeleteBuffers(1, &s_vol_quad_vbo);
+    glDeleteFramebuffers(2, s_vol_fbo);
+    glDeleteTextures(2, s_vol_color);
+    s_field_shader = s_bh_shader = s_jet_shader = 0;
+    s_torus_shader = s_agncore_shader = s_vol_composite_shader = 0;
+    s_field_vao = s_field_vbo = s_vol_quad_vao = s_vol_quad_vbo = 0;
+    s_vol_fbo[0] = s_vol_fbo[1] = s_vol_color[0] = s_vol_color[1] = 0;
+    post_shutdown();
     s_sphere_shader = s_dot_shader = 0;
     s_impact_particle_shader = 0;
     s_supernova_core_shader = s_supernova_cloud_shader = 0;

@@ -47,6 +47,7 @@
 #include "universe.h"
 #include "body.h"
 #include "physics.h"
+#include "rings.h"
 #include "accretion.h"
 #include "comet.h"
 #include "json.h"
@@ -472,8 +473,8 @@ static void load_snapshot(const JsonNode *bodies_arr)
         bo->accretion_disk = (float)json_num(json_get(bn, "disk"),
                                              bo->is_black_hole ? 1.0 : 0.0);
         bo->dust_torus     = (float)json_num(json_get(bn, "torus"), 0.0);
-        bo->mass    = json_num(json_get(bn, "mass"), 0.0);
-        bo->radius  = json_num(json_get(bn, "radius_km"), 1.0) * 1000.0;
+        bo->mass    = fmax(0.0, json_num(json_get(bn, "mass"), 0.0));
+        bo->radius  = fmax(0.0, json_num(json_get(bn, "radius_km"), 1.0)) * 1000.0;
         /* Snapshot restore: black-hole radius re-derived from mass, the same
          * single root as a fresh load (keeps stale snapshots consistent). */
         if (bo->is_black_hole && bo->mass > 0.0)
@@ -708,6 +709,83 @@ int universe_save(const char *path)
     return 0;
 }
 
+/* True if body `i` is "curated" — kept human-readable in the manifest JSON
+ * rather than exported to the BodyBin: the Sun's own system, or any black
+ * hole/quasar (a hand-maintained handful). Everything else is bulk. */
+static int body_is_curated(int i)
+{
+    if (g_bodies[i].is_black_hole) return 1;
+    int r = body_root_star(i);
+    if (r >= 0 && strcmp(g_bodies[r].name, "Sun") == 0) return 1;
+    return 0;
+}
+
+int universe_export_body_catalog(const char *path)
+{
+    /* Slot map: each exported (bulk, alive, non-field) body gets a sequential
+     * catalog-local index; -1 for everything excluded. Parent links are then
+     * written as these local indices so reload is unambiguous. */
+    int *slot = (int *)malloc((size_t)(g_nbodies > 0 ? g_nbodies : 1) * sizeof(int));
+    if (!slot) {
+        fprintf(stderr, "[universe] body_catalog export: slot alloc failed\n");
+        return -1;
+    }
+    uint32_t count = 0;
+    for (int i = 0; i < g_nbodies; i++) {
+        int field = (i >= g_field_star_begin && i < g_field_star_end);
+        slot[i] = (g_bodies[i].alive && !field && !body_is_curated(i))
+                  ? (int)count++ : -1;
+    }
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        fprintf(stderr, "[universe] cannot write body_catalog '%s'\n", path);
+        free(slot); return -1;
+    }
+    BodyBinHeader h = { BODYBIN_MAGIC, BODYBIN_VERSION, count,
+                        (uint32_t)sizeof(BodyBinRecord) };
+    if (fwrite(&h, sizeof h, 1, f) != 1) {
+        fprintf(stderr, "[universe] body_catalog '%s': header write error\n", path);
+        fclose(f); free(slot); return -1;
+    }
+
+    int write_err = 0;
+    for (int i = 0; i < g_nbodies && !write_err; i++) {
+        if (slot[i] < 0) continue;
+        Body *b = &g_bodies[i];
+        BodyBinRecord r;
+        memset(&r, 0, sizeof r);
+        for (int k = 0; k < 3; k++) {
+            r.pos[k] = b->pos[k]; r.vel[k] = b->vel[k]; r.color[k] = b->col[k];
+        }
+        r.mass = b->mass; r.radius = b->radius;
+        r.rotation_rate = b->rotation_rate; r.rotation_angle = b->rotation_angle;
+        r.obliquity = (float)b->obliquity;
+        r.agn_activity = b->agn_activity;
+        r.accretion_disk = b->accretion_disk;
+        r.dust_torus = b->dust_torus;
+        r.flags = (b->is_star ? BODYBIN_IS_STAR : 0u)
+                | (b->is_black_hole ? BODYBIN_IS_BLACK_HOLE : 0u)
+                | (b->is_comet ? BODYBIN_IS_COMET : 0u);
+        /* Parent as a catalog-local index; a bulk body whose parent was excluded
+         * (should not happen — bulk systems are self-contained) becomes a root. */
+        int p = b->parent;
+        r.parent = (p >= 0 && p < g_nbodies && slot[p] >= 0) ? slot[p] : -1;
+        snprintf(r.name, sizeof r.name, "%s", b->name);
+        if (fwrite(&r, sizeof r, 1, f) != 1) write_err = 1;
+    }
+
+    fclose(f);
+    free(slot);
+    if (write_err) {
+        fprintf(stderr, "[universe] body_catalog '%s': record write error\n", path);
+        return -1;
+    }
+    fprintf(stdout, "[universe] body_catalog: wrote %u bodies -> %s\n", count, path);
+    fflush(stdout);
+    return (int)count;
+}
+
 int universe_validate(const char *path)
 {
     JsonNode *root = json_parse_file(path);
@@ -814,7 +892,11 @@ static void load_star_catalog(const char *path)
     }
 
     /* --- stream records into g_bodies (chunked read) --- */
-    ensure_capacity(g_nbodies + (int)h.count);        /* upper bound before dedup */
+    /* h.count is file-supplied (untrusted): guard the (int) cast + addition
+     * against signed-overflow UB.  The per-record ensure_capacity in the loop
+     * keeps growth correct even when we skip this upfront reserve. */
+    if (h.count <= (uint32_t)(INT_MAX - g_nbodies))
+        ensure_capacity(g_nbodies + (int)h.count);    /* upper bound before dedup */
     const size_t CHUNK = 8192;
     StarBinRecord *buf = (StarBinRecord *)malloc(CHUNK * sizeof *buf);
     unsigned added = 0, skipped = 0;
@@ -883,6 +965,102 @@ static void load_star_catalog(const char *path)
     fclose(f);
     fprintf(stdout, "[universe] star_catalog '%s': +%u stars (%u skipped as duplicates)\n",
             path, added, skipped);
+}
+
+/*
+ * load_body_catalog — append interactive-tier bodies from a BodyBin file
+ * (universe.h) into g_bodies[].  Referenced by a manifest via the optional
+ * top-level "body_catalog" path.  Unlike the frozen field-star catalog, these
+ * are full simulated bodies (stars + their planets/moons), so each record
+ * carries absolute resolved state and a catalog-local parent index; they load
+ * exactly like a snapshot (no Keplerian derivation, CoM correction, bulk
+ * velocity, or warm-up).  A missing file is not an error — the binary is
+ * regenerated locally (build_known_universe.py) and gitignored.
+ */
+static void load_body_catalog(const char *path)
+{
+    if (!path || !path[0]) return;
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stdout, "[universe] body_catalog '%s' not found — skipping "
+                        "(regenerate with: tools/build_known_universe.py)\n", path);
+        return;
+    }
+
+    BodyBinHeader h;
+    if (fread(&h, sizeof h, 1, f) != 1 || h.magic != BODYBIN_MAGIC) {
+        fprintf(stderr, "[universe] body_catalog '%s': not a BodyBin file\n", path);
+        fclose(f); return;
+    }
+    if (h.version != BODYBIN_VERSION || h.record_size != sizeof(BodyBinRecord)) {
+        fprintf(stderr, "[universe] body_catalog '%s': incompatible (v%u rec%u; "
+                        "expected v%u rec%zu)\n", path, h.version, h.record_size,
+                BODYBIN_VERSION, sizeof(BodyBinRecord));
+        fclose(f); return;
+    }
+    if (h.count == 0) { fclose(f); return; }
+
+    /* Parent indices in the file are catalog-local; add this base so they point
+     * at the right g_bodies slot once appended after the manifest's bodies. */
+    const int base = g_nbodies;
+    if (h.count <= (uint32_t)(INT_MAX - g_nbodies))
+        ensure_capacity(g_nbodies + (int)h.count);
+
+    const size_t CHUNK = 8192;
+    BodyBinRecord *buf = (BodyBinRecord *)malloc(CHUNK * sizeof *buf);
+    unsigned added = 0;
+    if (buf) {
+        uint32_t remaining = h.count;
+        while (remaining > 0) {
+            size_t want = remaining < CHUNK ? remaining : CHUNK;
+            size_t got = fread(buf, sizeof *buf, want, f);
+            if (got == 0) break;
+            for (size_t j = 0; j < got; j++) {
+                BodyBinRecord *r = &buf[j];
+                ensure_capacity(g_nbodies + 1);
+                Body *bo = &g_bodies[g_nbodies];
+                body_defaults(bo);
+                snprintf(bo->name, sizeof bo->name, "%s", r->name);
+                bo->mass   = r->mass;
+                bo->radius = r->radius;
+                bo->pos[0] = r->pos[0]; bo->pos[1] = r->pos[1]; bo->pos[2] = r->pos[2];
+                bo->vel[0] = r->vel[0]; bo->vel[1] = r->vel[1]; bo->vel[2] = r->vel[2];
+                bo->col[0] = r->color[0]; bo->col[1] = r->color[1]; bo->col[2] = r->color[2];
+                bo->is_star       = (r->flags & BODYBIN_IS_STAR) ? 1 : 0;
+                bo->is_black_hole = (r->flags & BODYBIN_IS_BLACK_HOLE) ? 1 : 0;
+                bo->is_comet      = (r->flags & BODYBIN_IS_COMET) ? 1 : 0;
+                bo->agn_activity   = r->agn_activity;
+                bo->accretion_disk = r->accretion_disk;
+                bo->dust_torus     = r->dust_torus;
+                bo->obliquity      = r->obliquity;
+                bo->rotation_rate  = r->rotation_rate;
+                bo->rotation_angle = r->rotation_angle;
+                /* Black-hole radius is derived from mass (single root), matching
+                 * the JSON loader — never trust a stored horizon. */
+                if (bo->is_black_hole && bo->mass > 0.0)
+                    bo->radius = laws_schwarzschild_radius(bo->mass);
+                bo->parent = (r->parent >= 0) ? base + r->parent : -1;
+                accretion_init_body(bo);
+                alloc_trail(bo);
+                g_nbodies++;
+                added++;
+            }
+            remaining -= (uint32_t)got;
+        }
+        free(buf);
+    }
+
+    /* Guard parent links against a malformed file (out-of-range / self / points
+     * before the catalog base into a manifest body is allowed; only reject the
+     * clearly invalid so body_root_star()'s chain walk can never loop). */
+    for (int i = base; i < g_nbodies; i++) {
+        int p = g_bodies[i].parent;
+        if (p >= g_nbodies || p == i) g_bodies[i].parent = -1;
+    }
+
+    fclose(f);
+    fprintf(stdout, "[universe] body_catalog '%s': +%u bodies\n", path, added);
 }
 
 void universe_load(const char *path)
@@ -1003,8 +1181,8 @@ void universe_load(const char *path)
             if (strcmp(type, "star") != 0 && !is_bh) continue;
 
             const char *name   = json_str(json_get(bn, "name"),      "unknown");
-            double      mass   = json_num(json_get(bn, "mass"),       0.0);
-            double      rad_km = json_num(json_get(bn, "radius_km"),  1.0);
+            double      mass   = fmax(0.0, json_num(json_get(bn, "mass"),      0.0));
+            double      rad_km = fmax(0.0, json_num(json_get(bn, "radius_km"), 1.0));
             float       col[3];
             read_color(json_get(bn, "color"), col);
 
@@ -1107,8 +1285,8 @@ void universe_load(const char *path)
                 continue;
 
             const char *name     = json_str(json_get(bn, "name"),      "unknown");
-            double      mass     = json_num(json_get(bn, "mass"),       0.0);
-            double      rad_km   = json_num(json_get(bn, "radius_km"),  1.0);
+            double      mass     = fmax(0.0, json_num(json_get(bn, "mass"),      0.0));
+            double      rad_km   = fmax(0.0, json_num(json_get(bn, "radius_km"), 1.0));
             const char *par_name = json_str(json_get(bn, "parent"),     "");
             float       col[3];
             read_color(json_get(bn, "color"), col);
@@ -1145,6 +1323,11 @@ void universe_load(const char *path)
             if (kep) {
                 a        = json_num(json_get(kep, "a"),            1.0);
                 double e = json_num(json_get(kep, "e"),            0.0);
+                /* keplerian_to_state assumes a bound orbit: e>=1 makes
+                 * sqrt(1-e^2) NaN and solve_kepler diverge, seeding a NaN body
+                 * that NaNs its whole system on the next force pass. Clamp. */
+                if (e < 0.0)   e = 0.0;
+                if (e > 0.999) e = 0.999;
                 double ii= json_num(json_get(kep, "i"),            0.0);
                 double O = json_num(json_get(kep, "Omega"),        0.0);
                 double w = json_num(json_get(kep, "omega_tilde"),  0.0);
@@ -1204,8 +1387,8 @@ void universe_load(const char *path)
             if (strcmp(type, "moon") != 0) continue;
 
             const char *name     = json_str(json_get(bn, "name"),     "unknown");
-            double      mass     = json_num(json_get(bn, "mass"),      0.0);
-            double      rad_km   = json_num(json_get(bn, "radius_km"), 1.0);
+            double      mass     = fmax(0.0, json_num(json_get(bn, "mass"),      0.0));
+            double      rad_km   = fmax(0.0, json_num(json_get(bn, "radius_km"), 1.0));
             const char *par_name = json_str(json_get(bn, "parent"),    "");
             float       col[3];
             read_color(json_get(bn, "color"), col);
@@ -1234,6 +1417,8 @@ void universe_load(const char *path)
             if (mk) {
                 a_km             = json_num(json_get(mk, "a_km"),      0.0);
                 double e         = json_num(json_get(mk, "e"),          0.0);
+                if (e < 0.0)   e = 0.0;         /* bound orbit only (see above) */
+                if (e > 0.999) e = 0.999;
                 double i_deg     = json_num(json_get(mk, "i_deg"),      0.0);
                 double Omega_deg = json_num(json_get(mk, "Omega_deg"),  0.0);
                 double omega_deg = json_num(json_get(mk, "omega_deg"),  0.0);
@@ -1341,6 +1526,15 @@ void universe_load(const char *path)
             g_nbodies, n_stars, n_stars == 1 ? "" : "s");
     fflush(stdout);
 
+    /* Append the manifest's bulk interactive bodies from a BodyBin catalog, if
+     * referenced.  These are full simulated bodies (nearby stars + exoplanet
+     * systems) carrying absolute resolved state, so they join the interactive
+     * range here — after the manifest's own bodies were post-processed, and
+     * before the frozen field-star range below.  They need no CoM / bulk-velocity
+     * / warm-up (state is final), so the bv[]/root_star[] arrays are never
+     * indexed with them. */
+    load_body_catalog(json_str(json_get(root, "body_catalog"), ""));
+
     /* Append a bulk star field from a compact binary catalog, if the preset
      * references one.  Done after post-processing (so the bv[]/root_star[]
      * arrays, sized to the JSON body count, are never indexed with catalog
@@ -1389,6 +1583,8 @@ int universe_add_body(const BodyCreateSpec *spec)
 
     idx = find_reusable_body_slot();
     reused_slot = (idx >= 0);
+    if (reused_slot)
+        rings_on_body_slot_reused(idx);   /* drop any orphaned ring on this slot */
     if (!reused_slot) {
         /* No dead slot to reuse — grow the heap array, just like the loader. */
         ensure_capacity(g_nbodies + 1);

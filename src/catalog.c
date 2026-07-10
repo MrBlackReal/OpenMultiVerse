@@ -20,6 +20,10 @@
 /* ------------------------------------------------------------------ units */
 #define CAT_PI        3.14159265358979323846
 #define PC_TO_LY      3.2615638        /* parsec -> light-year                */
+#define MLY_TO_LY     1.0e6            /* mega-light-year -> light-year        */
+#define CAT_G         6.674e-11        /* gravitational constant (Newtonian)   */
+#define CAT_C         2.99792458e8     /* speed of light, m/s                  */
+#define CAT_DAY       86400.0          /* seconds per day                      */
 #define MSUN_KG       1.98892e30
 #define RSUN_KM       695700.0
 #define MEARTH_KG     5.972e24
@@ -276,14 +280,39 @@ static int convert_exoplanets(const char *in_path, const char *out_path, int max
     }
     fclose(in);
 
-    /* Count distinct hosts (first occurrence wins) for the single-system case. */
+    /* Group rows by host in first-seen order via an open-addressing hash, so the
+     * distinct-host count, the "process each host once" test, and the per-host
+     * planet gather below are all O(n) instead of the former O(n^2) rescans
+     * (a full ~38k-row archive otherwise did ~1e9 strcmps). host_next chains the
+     * rows of each host in original order; is_head marks first occurrences. */
+    int  *host_next = (int *)malloc((size_t)nrows * sizeof(int));
+    int  *host_tail = (int *)malloc((size_t)nrows * sizeof(int));
+    char *is_head   = (char *)calloc((size_t)nrows, 1);
+    size_t hcap = 1;
+    while (hcap < (size_t)nrows * 2 + 1) hcap <<= 1;
+    int *htab = (int *)malloc(hcap * sizeof(int));
+    if (!host_next || !host_tail || !is_head || !htab) {
+        fprintf(stderr, "[catalog] out of memory grouping %d rows\n", nrows);
+        free(host_next); free(host_tail); free(is_head); free(htab);
+        free(rows); free(header);
+        return -1;
+    }
+    for (size_t t = 0; t < hcap; t++) htab[t] = -1;
     int n_hosts = 0;
     for (int i = 0; i < nrows; i++) {
-        int seen = 0;
-        for (int j = 0; j < i; j++)
-            if (strcmp(rows[j].host, rows[i].host) == 0) { seen = 1; break; }
-        if (!seen) n_hosts++;
+        host_next[i] = -1;
+        unsigned long h = 5381;
+        for (const char *c = rows[i].host; *c; c++) h = h * 33u + (unsigned char)*c;
+        size_t slot = (size_t)h & (hcap - 1);
+        int head = -1;
+        while (htab[slot] != -1) {
+            if (strcmp(rows[htab[slot]].host, rows[i].host) == 0) { head = htab[slot]; break; }
+            slot = (slot + 1) & (hcap - 1);
+        }
+        if (head < 0) { htab[slot] = i; host_tail[i] = i; is_head[i] = 1; n_hosts++; }
+        else          { host_next[host_tail[head]] = i; host_tail[head] = i; }
     }
+    free(htab);
 
     FILE *o = fopen(out_path, "wb");
     if (!o) { fprintf(stderr, "[catalog] cannot write '%s'\n", out_path); free(rows); free(header); return -1; }
@@ -296,10 +325,7 @@ static int convert_exoplanets(const char *in_path, const char *out_path, int max
     int bodies = 0, systems = 0, first = 1;
     for (int i = 0; i < nrows; i++) {
         /* Process each host once, at its first appearance. */
-        int seen = 0;
-        for (int j = 0; j < i; j++)
-            if (strcmp(rows[j].host, rows[i].host) == 0) { seen = 1; break; }
-        if (seen) continue;
+        if (!is_head[i]) continue;
         if (max_systems > 0 && systems >= max_systems) break;
         systems++;
 
@@ -324,10 +350,9 @@ static int convert_exoplanets(const char *in_path, const char *out_path, int max
         fprintf(o, "      \"obliquity_deg\": 0.0, \"rotation_period_days\": 25.0 }");
         bodies++;
 
-        /* Planets of this host, in encounter order. */
+        /* Planets of this host, in original row order (chained at group time). */
         int p_idx = 0;
-        for (int k = i; k < nrows; k++) {
-            if (strcmp(rows[k].host, s->host) != 0) continue;
+        for (int k = i; k != -1; k = host_next[k]) {
             ExoRow *p = &rows[k];
 
             double a = !isnan(p->a) ? p->a : a_from_period(p->per, s->smass);
@@ -360,6 +385,9 @@ static int convert_exoplanets(const char *in_path, const char *out_path, int max
 
     fprintf(o, "\n  ]\n}\n");
     fclose(o);
+    free(host_next);
+    free(host_tail);
+    free(is_head);
     free(rows);
     free(header);
 
@@ -819,6 +847,138 @@ static int convert_gaia_bin(const char *in_path, const char *out_path, int max_i
     return (int)count;
 }
 
+/* ------------------------------------------------------------------ black holes */
+/*
+ * Curated real-black-hole importer. There is no clean bulk feed for black
+ * holes (unlike exoplanets/Gaia stars), so this reads a small hand-maintained
+ * CSV and emits positioned "black_hole"/"quasar" bodies the loader already
+ * understands. Columns (any subset; # comment lines skipped):
+ *   name, kind, ra_deg|ra, dec_deg|dec, dist_pc, dist_mly, mass_msun, spin,
+ *   activity
+ * Exactly one of dist_pc / dist_mly is expected per row. `kind` is one of
+ *   stellar | smbh | quasar
+ * and sets the type + accretion-disk/torus/activity defaults; `activity`
+ * overrides the AGN Eddington ratio when present. `spin` is the dimensionless
+ * Kerr a* (0..~0.998), converted to the rotation the loader turns back into
+ * spin_a via a* = Ω·Rs/c (accretion.c). The radius is derived from mass by the
+ * loader; the radius_km written here (Schwarzschild 2GM/c²) is only so the file
+ * views correctly standalone.
+ */
+static int convert_black_holes(const char *in_path, const char *out_path, int max_items)
+{
+    FILE *in = fopen(in_path, "rb");
+    if (!in) { fprintf(stderr, "[catalog] cannot open '%s'\n", in_path); return -1; }
+
+    /* header */
+    char *header = NULL;
+    for (;;) {
+        char *ln = read_line(in);
+        if (!ln) break;
+        char *t = trim(ln);
+        if (t[0] == '\0' || t[0] == '#') { free(ln); continue; }
+        header = ln; break;
+    }
+    if (!header) {
+        fprintf(stderr, "[catalog] '%s': missing header\n", in_path);
+        fclose(in); return -1;
+    }
+    char *hdr[CATALOG_MAX_COLS];
+    int nh = split_csv(header, hdr, CATALOG_MAX_COLS);
+    for (int i = 0; i < nh; i++) { hdr[i] = trim(hdr[i]); lower(hdr[i]); }
+
+    int ci_name = col_index(hdr, nh, "name");
+    int ci_kind = col_index(hdr, nh, "kind");
+    int ci_ra   = col_index(hdr, nh, "ra_deg");
+    if (ci_ra  < 0) ci_ra  = col_index(hdr, nh, "ra");
+    int ci_dec  = col_index(hdr, nh, "dec_deg");
+    if (ci_dec < 0) ci_dec = col_index(hdr, nh, "dec");
+    int ci_dpc  = col_index(hdr, nh, "dist_pc");
+    int ci_dmly = col_index(hdr, nh, "dist_mly");
+    int ci_mass = col_index(hdr, nh, "mass_msun");
+    int ci_spin = col_index(hdr, nh, "spin");
+    int ci_act  = col_index(hdr, nh, "activity");
+    if (ci_ra < 0 || ci_dec < 0 || ci_mass < 0 || (ci_dpc < 0 && ci_dmly < 0)) {
+        fprintf(stderr, "[catalog] '%s': need ra, dec, mass_msun and dist_pc|dist_mly\n", in_path);
+        free(header); fclose(in); return -1;
+    }
+
+    FILE *o = fopen(out_path, "wb");
+    if (!o) { fprintf(stderr, "[catalog] cannot write '%s'\n", out_path); free(header); fclose(in); return -1; }
+    fprintf(o, "{\n  // Generated by catalogtool from a curated black-hole catalog: %s\n", in_path);
+    write_default_laws(o);
+    fprintf(o, "  \"bodies\": [\n");
+
+    int count = 0, first = 1;
+    for (;;) {
+        char *ln = read_line(in);
+        if (!ln) break;
+        char *t = trim(ln);
+        if (t[0] == '\0' || t[0] == '#') { free(ln); continue; }
+        if (max_items > 0 && count >= max_items) { free(ln); break; }
+
+        char *f[CATALOG_MAX_COLS];
+        int nf = split_csv(ln, f, CATALOG_MAX_COLS);
+
+        double ra = field_num(f, nf, ci_ra), dec = field_num(f, nf, ci_dec);
+        double mass_msun = field_num(f, nf, ci_mass);
+        double dpc = field_num(f, nf, ci_dpc), dmly = field_num(f, nf, ci_dmly);
+        double dist_ly = !isnan(dpc)  ? dpc  * PC_TO_LY
+                       : !isnan(dmly) ? dmly * MLY_TO_LY : NAN;
+        if (isnan(ra) || isnan(dec) || isnan(mass_msun) || mass_msun <= 0.0
+            || isnan(dist_ly) || dist_ly <= 0.0) { free(ln); continue; }
+
+        double pos[3];
+        eq_to_ecliptic_ly(ra, dec, dist_ly, pos);
+
+        double mass_kg = mass_msun * MSUN_KG;
+        double rs_m    = 2.0 * CAT_G * mass_kg / (CAT_C * CAT_C);  /* Schwarzschild */
+
+        const char *kind = field(f, nf, ci_kind);
+        int is_quasar = (strcmp(kind, "quasar") == 0);
+        double activity = field_num(f, nf, ci_act);
+        if (isnan(activity)) activity = is_quasar ? 1.0 : 0.0;  /* default by kind */
+        double disk  = 1.0;                                     /* every hole gets a disk */
+        double torus = is_quasar ? 1.0 : 0.0;                   /* AGN doughnut for quasars */
+
+        /* Colour: warm accretion glow; quasars run a touch hotter/bluer. */
+        double col[3] = { 1.00, 0.60, 0.30 };
+        if (is_quasar)                  { col[0]=0.85; col[1]=0.80; col[2]=1.00; }
+        else if (strcmp(kind,"smbh")==0){ col[0]=1.00; col[1]=0.68; col[2]=0.40; }
+
+        /* Dimensionless spin a* -> authored rotation period. The loader seeds
+         * spin_a = Ω·Rs/c, so Ω = a*·c/Rs and period = 2π/Ω. */
+        double spin = field_num(f, nf, ci_spin);
+        double period_days = 0.0;
+        if (!isnan(spin) && spin != 0.0 && rs_m > 0.0)
+            period_days = (2.0 * CAT_PI * rs_m) / (fabs(spin) * CAT_C) / CAT_DAY;
+
+        const char *name = field(f, nf, ci_name);
+        char fallback[32];
+        if (!name[0]) { snprintf(fallback, sizeof fallback, "BH_%d", count + 1); name = fallback; }
+
+        if (!first) fprintf(o, ",\n");
+        first = 0;
+        fprintf(o, "    { \"name\": ");
+        put_json_str(o, name);
+        fprintf(o, ", \"type\": \"%s\",\n", is_quasar ? "quasar" : "black_hole");
+        fprintf(o, "      \"mass\": %.6e, \"radius_km\": %.3f,\n", mass_kg, rs_m / 1000.0);
+        fprintf(o, "      \"pos_ly\": [%.6f, %.6f, %.6f],\n", pos[0], pos[1], pos[2]);
+        fprintf(o, "      \"color\": [%.3f, %.3f, %.3f],\n", col[0], col[1], col[2]);
+        fprintf(o, "      \"activity\": %.4f, \"disk\": %.3f, \"torus\": %.3f", activity, disk, torus);
+        if (period_days > 0.0)
+            fprintf(o, ",\n      \"obliquity_deg\": 0.0, \"rotation_period_days\": %.8g }", period_days);
+        else
+            fprintf(o, " }");
+        count++;
+        free(ln);
+    }
+
+    fprintf(o, "\n  ]\n}\n");
+    fclose(o); fclose(in); free(header);
+    fprintf(stdout, "[catalog] blackholes: wrote %d black holes -> %s\n", count, out_path);
+    return count;
+}
+
 /* ------------------------------------------------------------------ API */
 
 int catalog_type_from_name(const char *name)
@@ -828,6 +988,8 @@ int catalog_type_from_name(const char *name)
     if (!strcmp(name, "horizons"))   return CATALOG_HORIZONS;
     if (!strcmp(name, "gaia"))       return CATALOG_GAIA;
     if (!strcmp(name, "gaia-bin"))   return CATALOG_GAIA_BIN;
+    if (!strcmp(name, "blackholes")) return CATALOG_BLACK_HOLES;
+    if (!strcmp(name, "black-holes")) return CATALOG_BLACK_HOLES;
     return -1;
 }
 
@@ -839,6 +1001,7 @@ int catalog_convert(CatalogType type, const char *in_path,
         case CATALOG_HORIZONS:   return convert_horizons(in_path, out_path, max_items);
         case CATALOG_GAIA:       return convert_gaia(in_path, out_path, max_items);
         case CATALOG_GAIA_BIN:   return convert_gaia_bin(in_path, out_path, max_items);
+        case CATALOG_BLACK_HOLES: return convert_black_holes(in_path, out_path, max_items);
     }
     fprintf(stderr, "[catalog] unknown catalog type\n");
     return -1;

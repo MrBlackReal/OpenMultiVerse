@@ -3,12 +3,13 @@
  * JSON. Shares the conversion core with the simulator (src/catalog.c).
  *
  * Build:  make catalogtool
- * Usage:  ./catalogtool <exoplanets|horizons|gaia> <in.csv> <out.json> [max]
+ * Usage:  ./catalogtool <exoplanets|horizons|gaia|blackholes> <in.csv> <out.json> [max]
  *
  *   exoplanets  NASA Exoplanet Archive "Planetary Systems" CSV
  *   horizons    JPL Horizons heliocentric state-vector CSV
  *   gaia        Gaia / Hipparcos nearby-star CSV
- *   max         optional cap on systems (exoplanets) / stars (gaia)
+ *   blackholes  curated real black-hole CSV (assets/catalogs/black_holes.csv)
+ *   max         optional cap on systems (exoplanets) / stars (gaia) / holes
  */
 #include "catalog.h"
 #include <stdio.h>
@@ -18,7 +19,7 @@ int main(int argc, char **argv)
 {
     if (argc < 4) {
         fprintf(stderr,
-            "usage: %s <exoplanets|horizons|gaia> <in.csv> <out.json> [max]\n",
+            "usage: %s <exoplanets|horizons|gaia|blackholes> <in.csv> <out.json> [max]\n",
             argv[0]);
         return 2;
     }
