@@ -220,6 +220,20 @@ static GLint  s_dot_vp      = -1;
 static GLint  s_dot_time    = -1;
 static GLint  s_dot_twinkle = -1;
 
+/* Cluster impostors: dense field-star clumps drawn as one aggregate glow when
+ * their members are sub-pixel / culled at distance (Phase A #2 cluster/hybrid
+ * aggregation).  Reuses star_dot.vert (per-point size) + cluster.frag (soft
+ * additive glow).  Buffer layout matches the dot VBO: (x,y,z, r,g,b,a, size). */
+static GLuint s_cluster_shader = 0;
+static GLuint s_cluster_vao    = 0;
+static GLuint s_cluster_vbo    = 0;
+static int    s_cluster_vbo_cap = 0;       /* points the VBO can hold          */
+static GLint  s_cluster_vp      = -1;
+static GLint  s_cluster_time    = -1;
+static GLint  s_cluster_twinkle = -1;
+static float *s_cluster_data    = NULL;    /* CPU scratch, grows with the list */
+static int    s_cluster_data_cap = 0;
+
 /* Static field-star dots (the bulk Gaia catalog field).  Frozen scenery: the
  * VBO holds absolute positions + baked absolute magnitude, uploaded once per
  * universe load and drawn every frame by star_field.vert with GPU-side
@@ -411,6 +425,117 @@ static void lod_update_density_scale(void)
     if (f < 1.0) f = 1.0;
     if (f > (double)g_settings.lod_density_max) f = (double)g_settings.lod_density_max;
     s_lod_scale = (float)f;
+}
+
+/* ── cluster impostors (Phase A #2 cluster/hybrid aggregation) ────────────────
+ * Draw each dense field-star clump (extracted by cosmic_field) as ONE additive
+ * aggregate glow, but only in the regime where its members are sub-pixel and
+ * would otherwise merge into a blob or be culled — the impostor crossfades OUT
+ * as the clump resolves into individual stars on approach, so it complements
+ * (never double-draws) the per-star dots/field points.  This is what fills the
+ * gap when the ~16-ly dot horizon culls individual catalog stars but their
+ * collective glow should still read from galaxy distances.  Cheap: the cluster
+ * list is cached (static field stars), so this only projects it each frame. */
+static double smoothstepd(double edge0, double edge1, double x);
+static void clusters_render(const float vp_camrel[16])
+{
+    if (g_settings.cluster_impostors <= 0.0f || !s_cluster_shader) return;
+    const CosmicCluster *cl;
+    int nc = cosmic_field_clusters(&cl);
+    if (nc <= 0) return;
+
+    if (nc > s_cluster_data_cap) {
+        int c = s_cluster_data_cap ? s_cluster_data_cap : 256;
+        while (c < nc) c *= 2;
+        float *t = realloc(s_cluster_data, (size_t)c * 8 * sizeof(float));
+        if (!t) return;
+        s_cluster_data = t; s_cluster_data_cap = c;
+    }
+
+    const double cx = g_cam.pos[0], cy = g_cam.pos[1], cz = g_cam.pos[2];
+    const float intensity = (float)g_settings.cluster_impostors;
+    int count = 0;
+
+    for (int k = 0; k < nc; k++) {
+        float rx = (float)(cl[k].pos_m[0] * RS - cx);
+        float ry = (float)(cl[k].pos_m[1] * RS - cy);
+        float rz = (float)(cl[k].pos_m[2] * RS - cz);
+
+        float sx, sy;
+        if (!mat4_project(vp_camrel, rx, ry, rz, WIN_W, WIN_H, &sx, &sy)) continue;
+
+        /* Projected RMS extent in pixels: offset the centroid by the cluster
+         * radius along each world axis and take the largest screen shift (robust
+         * for any view orientation — at least one axis is well off the view ray). */
+        float ext_au = (float)(cl[k].radius_m * RS);
+        float ext_px = 0.0f;
+        for (int ax = 0; ax < 3; ax++) {
+            float ox = rx, oy = ry, oz = rz;
+            if      (ax == 0) ox += ext_au;
+            else if (ax == 1) oy += ext_au;
+            else              oz += ext_au;
+            float ex, ey;
+            if (!mat4_project(vp_camrel, ox, oy, oz, WIN_W, WIN_H, &ex, &ey)) continue;
+            float dpx = ex - sx, dpy = ey - sy;
+            float d = sqrtf(dpx*dpx + dpy*dpy);
+            if (d > ext_px) ext_px = d;
+        }
+
+        /* Mean projected member separation drives the resolve handoff: when it
+         * is sub-pixel the clump is one glow (impostor on); past ~1.6 px the
+         * members separate into individual dots/field-stars (impostor fades). */
+        float mean_n  = cbrtf((float)cl[k].count);
+        float sep_px  = mean_n > 0.0f ? ext_px / mean_n : ext_px;
+        float resolve = 1.0f - (float)smoothstepd(0.35, 1.6, sep_px);
+        if (resolve <= 0.001f) continue;
+
+        /* Aggregate brightness: log-compressed in member count (a rich clump is
+         * brighter but never blows out), scaled by the user intensity. */
+        float bright = intensity * (0.10f + 0.05f * log2f((float)cl[k].count));
+
+        float size_px = 2.2f * ext_px;
+        if (size_px < 3.0f)   size_px = 3.0f;
+        if (size_px > 110.0f) size_px = 110.0f;
+
+        float *dp = &s_cluster_data[count * 8];
+        dp[0] = rx; dp[1] = ry; dp[2] = rz;
+        dp[3] = cl[k].color[0] * bright;
+        dp[4] = cl[k].color[1] * bright;
+        dp[5] = cl[k].color[2] * bright;
+        dp[6] = resolve;      /* → v_color.a → impostor crossfade in cluster.frag */
+        dp[7] = size_px;
+        count++;
+    }
+
+    if (count <= 0) return;
+
+    glUseProgram(s_cluster_shader);
+    glUniformMatrix4fv(s_cluster_vp, 1, GL_FALSE, vp_camrel);
+    glUniform1f(s_cluster_time,    0.0f);
+    glUniform1f(s_cluster_twinkle, 0.0f);   /* no twinkle on aggregate glows */
+    glBindVertexArray(s_cluster_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, s_cluster_vbo);
+    if (count > s_cluster_vbo_cap) {
+        int c = s_cluster_vbo_cap ? s_cluster_vbo_cap : 256;
+        while (c < count) c *= 2;
+        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)c * 8 * sizeof(float),
+                     NULL, GL_DYNAMIC_DRAW);
+        s_cluster_vbo_cap = c;
+    }
+    glBufferSubData(GL_ARRAY_BUFFER, 0,
+                    (GLsizeiptr)count * 8 * sizeof(float), s_cluster_data);
+
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE);                        /* additive glow */
+    glEnable(GL_PROGRAM_POINT_SIZE);
+    glDrawArrays(GL_POINTS, 0, count);
+    glDisable(GL_PROGRAM_POINT_SIZE);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);  /* restore default */
+    glDisable(GL_BLEND);
+    glDepthMask(GL_TRUE);
+    glBindVertexArray(0);
 }
 
 /* ── body lighting via the RadianceField (Phase A #4) ────────────────────────
@@ -1419,6 +1544,31 @@ void render_init(void) {
     glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, 8*sizeof(float),
                           (void*)(7*sizeof(float)));
     glBindVertexArray(0);
+
+    /* --- Cluster impostor shader + VBO (aggregate glow for dense star clumps).
+     * Same vertex format as the dots; drawn additively in a separate pass. --- */
+    s_cluster_shader = gl_shader_load("assets/shaders/star_dot.vert",
+                                      "assets/shaders/cluster.frag");
+    if (s_cluster_shader) {
+        s_cluster_vp      = glGetUniformLocation(s_cluster_shader, "u_vp");
+        s_cluster_time    = glGetUniformLocation(s_cluster_shader, "u_time");
+        s_cluster_twinkle = glGetUniformLocation(s_cluster_shader, "u_twinkle");
+        s_cluster_vao = gl_vao_create();
+        s_cluster_vbo_cap = 256;
+        s_cluster_vbo = gl_vbo_create((GLsizeiptr)s_cluster_vbo_cap * 8 * sizeof(float),
+                                      NULL, GL_DYNAMIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8*sizeof(float), (void*)0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 8*sizeof(float),
+                              (void*)(3*sizeof(float)));
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, 8*sizeof(float),
+                              (void*)(7*sizeof(float)));
+        glBindVertexArray(0);
+    } else {
+        fprintf(stderr, "[Render] cluster shader failed (impostors disabled)\n");
+    }
 
     /* Impact particle VBO: layout = (x,y,z, r,g,b,a, size) per particle */
     s_impact_particle_vao = gl_vao_create();
@@ -3099,6 +3249,11 @@ void render_frame(const float view[16], const float proj[16],
         glBindVertexArray(0);
     }
 
+    /* ---- Cluster impostors: aggregate glow for dense field-star clumps whose
+     * members are sub-pixel / culled here (drawn after the star points so it
+     * composites over their faint remainder, additively). */
+    clusters_render(vp_camrel);
+
     /* ------------------------------------------------------------------ 4. Rings + Asteroid belts */
     rings_render(vp_camrel);
     asteroids_render(vp_camrel);
@@ -3597,6 +3752,11 @@ void render_shutdown(void) {
     glDeleteProgram(s_field_shader);
     glDeleteBuffers(1, &s_field_vbo);
     glDeleteVertexArrays(1, &s_field_vao);
+    glDeleteProgram(s_cluster_shader);
+    glDeleteBuffers(1, &s_cluster_vbo);
+    glDeleteVertexArrays(1, &s_cluster_vao);
+    s_cluster_shader = 0;
+    free(s_cluster_data); s_cluster_data = NULL; s_cluster_data_cap = 0;
     glDeleteProgram(s_bh_shader);
     glDeleteProgram(s_jet_shader);
     glDeleteProgram(s_torus_shader);

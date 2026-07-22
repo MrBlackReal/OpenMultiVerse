@@ -50,8 +50,24 @@ Replace discrete “planet view / solar system view / galaxy view” modes with 
     log-compressed, capped ×4) — LOD driven by distance *and* the field.
     Remaining hard switches are non-visual implementation routing (near/far dot
     path at 3 ly, supernova/nebula billboard↔fullscreen raster selection).
-    **Remaining for ✅:** cluster/hybrid aggregation (drawing a dense clump as
-    an aggregate impostor instead of N dots) once galaxy-scale presets need it.
+    **Cluster/hybrid aggregation (landed — first iteration):** dense field-star
+    clumps are now drawn as a single aggregate impostor glow instead of N dots.
+    `cosmic_field.c cluster_extract()` coarse-bins the frozen field-star
+    partition (25 ly cells, ≥24 stars → one cluster) once per universe load,
+    caching a `CosmicCluster` list (centroid, RMS extent, member count, mean
+    colour) at zero recurring cost. `render.c clusters_render()` projects each
+    cached clump and draws one additive soft-glow point sprite
+    (`cluster.frag`), sized to the clump's on-screen extent. The impostor is a
+    true LOD *crossfade*, not a pop: its alpha is driven by the projected mean
+    member separation, so it is full only where members are sub-pixel/culled
+    (the ~16 ly dot horizon) and fades to zero as the clump resolves into
+    individual stars on approach — complementary to the per-star dots/field
+    points, never double-drawing. Live `g_settings.cluster_impostors` intensity
+    (Menu → Visuals, persisted; 0 = off) + headless `[Clusters]` verification
+    print. Verified on `known_universe` (3 clumps, richest 74 stars / 8.7 ly):
+    absent among the stars, resolving into soft glows from ~1000 ly out.
+    **Remaining:** dynamic-body clustering (currently field stars only) and
+    richer per-cluster morphology (impostor shape from the member distribution).
 * **Stable floating-origin / camera-relative transforms**
 
   * essential for local precision
@@ -140,8 +156,10 @@ exposing `cosmic_field_sample(pos, radius) → {number/mass density, clumpiness,
 continuous fill, dominant DISCRETE/CONTINUOUS/HYBRID class}`. This was built
 *ahead of #2* precisely so continuous LOD has the "local density and field
 variance" it needs. Verified via a live HUD readout and a headless
-`[CosmicField]` print. **Remaining:** #2 LOD consumer; and richer content
-tagging / hybrid structures as later presets need them.
+`[CosmicField]` print. **#2 LOD consumer landed:** `cosmic_field_clusters()`
+now extracts dense field-star clumps as `CosmicCluster` hybrid aggregates,
+consumed by the renderer's cluster-impostor pass (see §0.1). **Remaining:**
+richer content tagging / hybrid structures as later presets need them.
 
 ### Why this matters
 
@@ -1213,8 +1231,9 @@ galaxies in universe JSON.
 
 1. Logarithmic spatial transform 🟡 (depth transform + true-depth far field done)
 3. Unified `CosmicField` abstraction ✅ (density/variance field landed — built ahead of #2)
-2. Continuous LOD system 🟡 (per-body crossfades + CosmicField-driven windows landed;
-   cluster/hybrid aggregation remains for dense galaxy presets)
+2. Continuous LOD system 🟡 (per-body crossfades + CosmicField-driven windows +
+   cluster/hybrid aggregation landed; dynamic-body clustering + richer impostor
+   morphology remain)
 4. Shared `RadianceField` abstraction 🟡 (emitter field, multi-light shading,
    spectral T + physical chromaticity, nebulae as receivers *and* emitters
    all landed; galaxy light distribution, glare adoption and relativistic

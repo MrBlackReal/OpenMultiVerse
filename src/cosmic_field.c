@@ -36,6 +36,12 @@
 #define COSMIC_MIN_BODIES   2                      /* discrete-signal threshold */
 #define COSMIC_FILL_EPS     0.05                   /* continuous-signal thresh. */
 
+/* Cluster extraction (see cosmic_field.h): coarse cells over the frozen
+ * field-star partition; a cell with >= CLUSTER_MIN stars becomes one impostor. */
+#define CLUSTER_GROUP_LY    25.0                   /* coarse cell edge, ly      */
+#define CLUSTER_MIN         24                     /* min stars to form a clump */
+#define CLUSTER_MAX         4096                   /* cap on emitted clusters   */
+
 /* 21 bits per axis, biased to unsigned → range ±(2^20) ly, far past a galaxy. */
 #define CELL_BITS   21
 #define CELL_BIAS   (1 << 20)                      /* 1048576                   */
@@ -79,6 +85,11 @@ static int      s_fbuilt = 0;
 static unsigned s_fbuilt_gen = (unsigned)-1;   /* universe gen it was built for */
 static int      s_fbuilt_begin = 0, s_fbuilt_end = 0;
 
+/* Cached cluster list, rebuilt with the field partition (once per load). */
+static CosmicCluster *s_clusters = NULL;
+static int            s_cluster_count = 0;
+static int            s_cluster_cap = 0;
+
 /* splitmix64 finaliser — good dispersion for the packed integer cell key. */
 static inline uint64_t hash64(uint64_t x)
 {
@@ -102,6 +113,15 @@ static inline uint64_t pack_cell(int cx, int cy, int cz)
 static inline int cell_coord(double pos_m)
 {
     double c = floor(pos_m / COSMIC_CELL_M);
+    if (c < (double)CELL_MIN) return CELL_MIN;
+    if (c > (double)CELL_MAX) return CELL_MAX;
+    return (int)c;
+}
+
+/* Coarse (cluster-grid) cell coordinate along one axis. */
+static inline int coarse_coord(double pos_m)
+{
+    double c = floor(pos_m / (CLUSTER_GROUP_LY * LY));
     if (c < (double)CELL_MIN) return CELL_MIN;
     if (c > (double)CELL_MAX) return CELL_MAX;
     return (int)c;
@@ -146,6 +166,8 @@ void cosmic_field_shutdown(void)
     free(s_fcell_body); s_fcell_body = NULL; s_fcell_body_cap = 0;
     s_fbuilt = 0;       s_fbuilt_gen = (unsigned)-1;
     s_fbuilt_begin = s_fbuilt_end = 0;
+    free(s_clusters);   s_clusters = NULL;
+    s_cluster_count = 0; s_cluster_cap = 0;
 }
 
 /* A half-open body-index range [lo, hi) to include in a partition build. */
@@ -242,6 +264,80 @@ static void dynamic_rebuild(void)
                          &s_cell_body, &s_cell_body_cap, ranges, 2);
 }
 
+/* Accumulator for one coarse cluster cell (open-addressed by packed key). */
+typedef struct {
+    uint64_t key;
+    int      n;
+    float    col[3];   /* summed member colours                              */
+    double   sum[3];   /* summed member positions, ly                        */
+    double   sumsq;    /* summed |pos|^2, ly^2 (for RMS extent)              */
+} ClAcc;
+
+/* Extract dense star clumps from the frozen field-star partition into the
+ * cached cluster list.  Coarse counting-sort into CLUSTER_GROUP_LY cells; a
+ * cell with >= CLUSTER_MIN stars becomes one aggregate impostor.  Runs once
+ * per universe load (field stars never move) — no recurring per-frame cost. */
+static void cluster_extract(void)
+{
+    s_cluster_count = 0;
+    int fb, fe; field_range(&fb, &fe);
+    int alive = 0;
+    for (int i = fb; i < fe; i++) if (g_bodies[i].alive) alive++;
+    if (alive < CLUSTER_MIN) return;
+
+    int cap = next_pow2(2 * alive + 1);
+    ClAcc *acc = calloc((size_t)cap, sizeof(ClAcc));
+    if (!acc) { fprintf(stderr, "[cosmic_field] cluster acc alloc failed\n"); return; }
+    for (int i = 0; i < cap; i++) acc[i].key = KEY_EMPTY;
+    uint32_t mask = (uint32_t)cap - 1u;
+
+    for (int i = fb; i < fe; i++) {
+        if (!g_bodies[i].alive) continue;
+        uint64_t key = pack_cell(coarse_coord(g_bodies[i].pos[0]),
+                                 coarse_coord(g_bodies[i].pos[1]),
+                                 coarse_coord(g_bodies[i].pos[2]));
+        uint32_t s = (uint32_t)hash64(key) & mask;
+        while (acc[s].key != KEY_EMPTY && acc[s].key != key) s = (s + 1u) & mask;
+        ClAcc *a = &acc[s];
+        if (a->key == KEY_EMPTY) a->key = key;
+        double px = g_bodies[i].pos[0] / LY;
+        double py = g_bodies[i].pos[1] / LY;
+        double pz = g_bodies[i].pos[2] / LY;
+        a->n++;
+        a->sum[0] += px; a->sum[1] += py; a->sum[2] += pz;
+        a->sumsq  += px*px + py*py + pz*pz;
+        a->col[0] += g_bodies[i].col[0];
+        a->col[1] += g_bodies[i].col[1];
+        a->col[2] += g_bodies[i].col[2];
+    }
+
+    for (int s = 0; s < cap && s_cluster_count < CLUSTER_MAX; s++) {
+        ClAcc *a = &acc[s];
+        if (a->key == KEY_EMPTY || a->n < CLUSTER_MIN) continue;
+        double inv = 1.0 / (double)a->n;
+        double mx = a->sum[0]*inv, my = a->sum[1]*inv, mz = a->sum[2]*inv;
+        double var = a->sumsq*inv - (mx*mx + my*my + mz*mz);
+        if (var < 0.0) var = 0.0;
+        double rms_ly = sqrt(var);
+        if (rms_ly < 2.0) rms_ly = 2.0;   /* floor so a tight clump has extent */
+
+        if (s_cluster_count >= s_cluster_cap) {
+            int nc = s_cluster_cap ? s_cluster_cap * 2 : 256;
+            CosmicCluster *t = realloc(s_clusters, (size_t)nc * sizeof(CosmicCluster));
+            if (!t) break;
+            s_clusters = t; s_cluster_cap = nc;
+        }
+        CosmicCluster *c = &s_clusters[s_cluster_count++];
+        c->pos_m[0] = mx * LY; c->pos_m[1] = my * LY; c->pos_m[2] = mz * LY;
+        c->radius_m = rms_ly * LY;
+        c->count    = a->n;
+        c->color[0] = a->col[0] * (float)inv;
+        c->color[1] = a->col[1] * (float)inv;
+        c->color[2] = a->col[2] * (float)inv;
+    }
+    free(acc);
+}
+
 /* Rebuild the frozen field-star partition (once per universe load). */
 static void field_partition_rebuild(void)
 {
@@ -252,6 +348,7 @@ static void field_partition_rebuild(void)
     s_fbuilt_gen   = g_universe_generation;
     s_fbuilt_begin = g_field_star_begin;
     s_fbuilt_end   = g_field_star_end;
+    cluster_extract();
 }
 
 /* Rebuild the field partition only if the universe (or its field range) changed. */
@@ -416,6 +513,12 @@ int cosmic_field_sample_camera(CosmicSample *out)
 {
     double pos_m[3] = { g_cam.pos[0] * AU, g_cam.pos[1] * AU, g_cam.pos[2] * AU };
     return cosmic_field_sample(pos_m, COSMIC_HUD_RADIUS_LY * LY, out);
+}
+
+int cosmic_field_clusters(const CosmicCluster **out)
+{
+    if (out) *out = s_clusters;
+    return s_cluster_count;
 }
 
 const char *cosmic_field_class_name(CosmicClass c)

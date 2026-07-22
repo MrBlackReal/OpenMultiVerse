@@ -63,3 +63,23 @@ int  cosmic_field_sample_camera(CosmicSample *out);
 
 /* Human-readable class name ("DISCRETE" / "CONTINUOUS" / "HYBRID"). */
 const char *cosmic_field_class_name(CosmicClass c);
+
+/* ── cluster / hybrid aggregation (Phase A #2 consumer) ─────────────────────
+ * A dense clump of stars extracted from the frozen field-star partition so it
+ * can be drawn as ONE aggregate impostor glow when far (its members would be
+ * sub-pixel and merge into a single blob anyway) instead of N far dots.  The
+ * renderer crossfades the impostor OUT as the clump resolves into individual
+ * stars on approach — the last "cluster/hybrid aggregation" LOD handoff.
+ *
+ * Extracted once per universe load (field stars never move), cached; zero
+ * recurring per-frame cost — the consumer only projects the cached list. */
+typedef struct {
+    double pos_m[3];   /* member centroid, SI metres                          */
+    double radius_m;   /* RMS spatial extent of members, metres               */
+    int    count;      /* member star count                                   */
+    float  color[3];   /* mean member display colour                          */
+} CosmicCluster;
+
+/* Access the cached cluster list.  Returns the count; *out points at an
+ * internal array valid until the next universe (re)load.  Main-thread only. */
+int cosmic_field_clusters(const CosmicCluster **out);

@@ -34,6 +34,7 @@ void settings_reset(void)
     g_settings.dot_hide_px            = 2.5f;
     g_settings.dot_excl_px            = 6.0f;
     g_settings.near_dot_dist_ly       = 3.0f;
+    g_settings.cluster_impostors      = 1.0f;
 
     g_settings.label_max_dist_au = 55.0f;
     g_settings.label_pin_planets = 3;
@@ -140,6 +141,7 @@ void settings_load(void)
     g_settings.dot_hide_px            = (float)json_num(json_get(root, "dot_hide_px"),            g_settings.dot_hide_px);
     g_settings.dot_excl_px            = (float)json_num(json_get(root, "dot_excl_px"),            g_settings.dot_excl_px);
     g_settings.near_dot_dist_ly       = (float)json_num(json_get(root, "near_dot_dist_ly"),       g_settings.near_dot_dist_ly);
+    g_settings.cluster_impostors      = (float)json_num(json_get(root, "cluster_impostors"),      g_settings.cluster_impostors);
     /* Keep each crossfade window well-ordered (end > start) so the smoothstep
      * edges never coincide/cross — guards a hand-edited settings file. */
     if (g_settings.lod_body_fade_end_px < g_settings.lod_body_fade_start_px + 0.05f)
@@ -150,6 +152,7 @@ void settings_load(void)
         g_settings.dot_excl_px = g_settings.dot_hide_px + 0.1f;
     if (g_settings.lod_density_max < 1.0f) g_settings.lod_density_max = 1.0f;
     if (g_settings.near_dot_dist_ly < 0.1f) g_settings.near_dot_dist_ly = 0.1f;
+    if (g_settings.cluster_impostors < 0.0f) g_settings.cluster_impostors = 0.0f;
 
     g_settings.label_max_dist_au = (float)json_num(json_get(root, "label_max_dist_au"), g_settings.label_max_dist_au);
     g_settings.label_pin_planets = (int)json_num(json_get(root, "label_pin_planets"), g_settings.label_pin_planets);
@@ -262,7 +265,8 @@ int settings_save(void)
     fprintf(f, "  \"lod_density_max\": %.6g,\n", (double)g_settings.lod_density_max);
     fprintf(f, "  \"dot_hide_px\": %.6g, \"dot_excl_px\": %.6g,\n",
             (double)g_settings.dot_hide_px, (double)g_settings.dot_excl_px);
-    fprintf(f, "  \"near_dot_dist_ly\": %.6g,\n\n", (double)g_settings.near_dot_dist_ly);
+    fprintf(f, "  \"near_dot_dist_ly\": %.6g,\n", (double)g_settings.near_dot_dist_ly);
+    fprintf(f, "  \"cluster_impostors\": %.6g,\n", (double)g_settings.cluster_impostors);
 
     fprintf(f, "  \"label_max_dist_au\": %.6g,\n", (double)g_settings.label_max_dist_au);
     fprintf(f, "  \"label_pin_planets\": %d, \"label_pin_systems\": %d,\n\n",

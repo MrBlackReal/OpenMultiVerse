@@ -1352,6 +1352,21 @@ int main(int argc, char **argv) {
                 cs.clumpiness, cs.continuous_fill, cs.nebulae_hit,
                 cosmic_field_class_name(cs.dominant));
 
+        /* Cluster aggregation (Phase A #2): how many dense field-star clumps
+         * were extracted for impostor rendering, and the richest one. */
+        {
+            const CosmicCluster *cl;
+            int ncl = cosmic_field_clusters(&cl);
+            int biggest = 0;
+            for (int ci = 1; ci < ncl; ci++)
+                if (cl[ci].count > cl[biggest].count) biggest = ci;
+            fprintf(stdout, "[Clusters] extracted=%d", ncl);
+            if (ncl > 0)
+                fprintf(stdout, " richest=%d stars (extent %.1f ly)",
+                        cl[biggest].count, cl[biggest].radius_m / LY);
+            fprintf(stdout, "\n");
+        }
+
         /* Same for the radiance field: total/dominant incident flux at the
          * camera, so lighting is verifiable without pixels (Sun @ 1 AU ≈ 1361). */
         RadianceSample rs;

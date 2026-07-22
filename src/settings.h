@@ -42,6 +42,10 @@ typedef struct {
     float  dot_hide_px;            /* dot overlap dedup: hidden below this ...   */
     float  dot_excl_px;            /* ... fully separated above this (screen px) */
     float  near_dot_dist_ly;       /* near/far dot path split distance (ly)      */
+    float  cluster_impostors;      /* aggregate-glow intensity for dense star     */
+                                   /* clumps drawn as one impostor instead of N   */
+                                   /* far dots (0 = off). Fades out as the clump  */
+                                   /* resolves into individual stars on approach. */
 
     /* ---- labels ------------------------------------------------------- */
     float  label_max_dist_au;  /* planet/moon labels hidden beyond this (AU); */

@@ -1,0 +1,27 @@
+// Cluster/hybrid LOD aggregation demo — a dense globular-style star cluster
+// (~900 field stars in a ~2 ly gaussian at (0,0,300 ly)) in an otherwise
+// sparse field. From afar the cluster renders as ONE aggregate impostor glow;
+// fly toward it and the glow crossfades into hundreds of individual stars.
+// The far-field scenery stars load from star_catalog (a StarBin).
+{
+  "laws": {
+    "G": 6.674e-11,
+    "softening": 100000.0,
+    "time_scale": 1.0,
+    "force_exp": 2.0,
+    "lambda": 0.0,
+    "pn_factor": 0.0,
+    "c_light": 299792458.0
+  },
+  "star_catalog": "assets/catalogs/cluster_demo_stars.bin",
+  "bodies": [
+    {
+      "name": "Anchor",
+      "type": "star",
+      "pos_ly": [0.0, -260.0, 0.0],
+      "mass": 1.989e30,
+      "radius_km": 696000.0,
+      "color": [1.0, 0.95, 0.85]
+    }
+  ]
+}
