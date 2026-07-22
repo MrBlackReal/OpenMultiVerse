@@ -68,3 +68,15 @@ void         galaxy_color(int i, float out[3]);
 int          galaxy_type(int i);           /* 0 spiral, 1 elliptical, 2 irregular */
 float        galaxy_seed(int i);
 void         galaxy_axis(int i, float out[3]);
+
+/* AGN host query: 1 if galaxy i hosts a central supermassive black hole, with
+ * its mass (kg), Eddington ratio (0 = quiescent), and dust-torus strength
+ * written to the out params (any may be NULL); 0 otherwise. */
+int          galaxy_agn(int i, double *mass_kg, float *activity, float *torus);
+
+/* Compose the finished BH/AGN engine into the galaxy renderer: for every AGN
+ * host galaxy, spawn a black-hole Body at its photometric centre so the
+ * existing render_frame AGN passes draw its accretion disk + jets in situ.
+ * Call once after galaxy_init() and after each universe (re)load, before the
+ * acceleration structures / warm-up. A no-op when g_settings.galaxy_agn is 0. */
+void         galaxy_spawn_agn(void);

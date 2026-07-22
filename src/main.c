@@ -391,6 +391,7 @@ static void init_runtime_world(void) {
     nebula_init();
     boot_log("Initializing galaxies");
     galaxy_init();
+    galaxy_spawn_agn();   /* embed AGN nuclei in host galaxies (after positions) */
     boot_log("Initializing comets");
     comet_init();
     loading_phase("Allocating trails");
@@ -1365,6 +1366,18 @@ int main(int argc, char **argv) {
                 fprintf(stdout, " richest=%d stars (extent %.1f ly)",
                         cl[biggest].count, cl[biggest].radius_m / LY);
             fprintf(stdout, "\n");
+        }
+
+        /* AGN-in-galaxy-host: the nuclei spawned into host galaxies, with world
+         * positions (AU) so a fly-to camera can be framed on one. */
+        for (int gi = 0; gi < galaxy_count(); gi++) {
+            double mkg; float act;
+            if (!galaxy_agn(gi, &mkg, &act, NULL)) continue;
+            double gp[3];
+            galaxy_position(gi, gp);
+            fprintf(stdout, "[GalaxyAGN] %-18s M=%.2e Msun act=%.2f "
+                    "pos_au=%.3e,%.3e,%.3e\n",
+                    galaxy_name(gi), mkg / 1.989e30, act, gp[0], gp[1], gp[2]);
         }
 
         /* Same for the radiance field: total/dominant incident flux at the

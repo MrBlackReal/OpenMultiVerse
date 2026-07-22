@@ -46,6 +46,10 @@ typedef struct {
                                    /* clumps drawn as one impostor instead of N   */
                                    /* far dots (0 = off). Fades out as the clump  */
                                    /* resolves into individual stars on approach. */
+    int    galaxy_agn;             /* spawn a black-hole nucleus at each AGN host  */
+                                   /* galaxy centre (M87 + Cen A active with jets, */
+                                   /* Sgr A and M31 quiescent). Applied on universe*/
+                                   /* (re)load; 0 = no galaxy nuclei.              */
 
     /* ---- labels ------------------------------------------------------- */
     float  label_max_dist_au;  /* planet/moon labels hidden beyond this (AU); */

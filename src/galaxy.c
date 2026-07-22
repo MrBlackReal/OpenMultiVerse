@@ -14,10 +14,17 @@
 #include "starsys.h"     /* suppressed cells: promoted stars are real bodies */
 #include "gl_utils.h"
 #include "common.h"
+#include "body.h"        /* g_bodies: post-set BH fields on the spawned nucleus */
+#include "universe.h"    /* universe_add_body / BodyCreateSpec                  */
+#include "laws.h"        /* laws_schwarzschild_radius                           */
+#include "accretion.h"   /* accretion_init_body (seeds spin + gas reservoir)    */
+#include "settings.h"    /* g_settings.galaxy_agn gate                          */
 #include <stdio.h>
+#include <string.h>
 #include <math.h>
 
 #define AU_PER_LY        63241.077
+#define MSUN             1.989e30    /* kg per solar mass (AGN host BH masses) */
 #define GALAXY_MAX_DIST  1400.0    /* AU clamp shell: just inside the nebula
                                     * shell (1500) so a galaxy behind a nebula
                                     * keeps drawing behind it */
@@ -55,6 +62,12 @@ typedef struct {
                           /* subtle veil, not fog)                     */
     float  col[3];        /* overall stellar-population tint           */
     int    type;          /* GAL_* morphology                          */
+    double bh_mass_msun;  /* central SMBH mass (solar masses); 0 = no  */
+                          /* nucleus. Drives Rs, so it sets the whole  */
+                          /* AGN render scale via bh_scales().         */
+    float  agn_activity;  /* Eddington ratio: 0 quiescent (bare shadow */
+                          /* + faint disk), >0 active (jets + torus).  */
+    float  agn_torus;     /* dust-torus strength (active hosts only)   */
 } GalaxyDef;
 
 static const GalaxyDef GALAXIES[] = {
@@ -63,18 +76,21 @@ static const GalaxyDef GALAXIES[] = {
      * inside it renders as the Milky Way band (brightest toward Sagittarius),
      * and zooming out it coalesces into a spiral seen from outside: the
      * §0.1 scale-continuity "leave your own galaxy" experience. */
-    { "Milky Way",             266.405, -28.936,  2.60e4,     0.0, 5.0e4, 0.0, 192.859,  27.128, 0.20f, {0.90f,0.88f,0.84f}, GAL_SPIRAL     },
-    /* name                    RA(deg)  Dec(deg)  dist(ly)   size'  r_ly  incl  pole_ra  pole_dec bright colour              type */
-    { "LMC",                    80.89,  -69.76,   1.63e5,   645.0,  0.0, 35.0, -999.0,   0.0,    1.0f, {0.80f,0.82f,0.95f}, GAL_IRREGULAR  },
-    { "SMC",                    13.19,  -72.83,   2.00e5,   320.0,  0.0, 50.0, -999.0,   0.0,    1.0f, {0.78f,0.80f,0.94f}, GAL_IRREGULAR  },
-    { "Andromeda (M31)",        10.68,   41.27,   2.54e6,   190.0,  0.0, 77.0, -999.0,   0.0,    1.0f, {0.94f,0.88f,0.78f}, GAL_SPIRAL     },
-    { "Triangulum (M33)",       23.46,   30.66,   2.73e6,    71.0,  0.0, 54.0, -999.0,   0.0,    1.0f, {0.82f,0.86f,0.96f}, GAL_SPIRAL     },
-    { "Bode's (M81)",          148.89,   69.07,   1.18e7,    27.0,  0.0, 59.0, -999.0,   0.0,    1.0f, {0.92f,0.87f,0.78f}, GAL_SPIRAL     },
-    { "Sculptor (NGC 253)",     11.89,  -25.29,   1.14e7,    27.0,  0.0, 78.0, -999.0,   0.0,    1.0f, {0.90f,0.82f,0.70f}, GAL_SPIRAL     },
-    { "Centaurus A",           201.37,  -43.02,   1.20e7,    26.0,  0.0, 40.0, -999.0,   0.0,    1.0f, {0.88f,0.82f,0.74f}, GAL_ELLIPTICAL },
-    { "Whirlpool (M51)",       202.47,   47.20,   2.30e7,    11.0,  0.0, 22.0, -999.0,   0.0,    1.0f, {0.80f,0.86f,0.98f}, GAL_SPIRAL     },
-    { "Sombrero (M104)",       190.00,  -11.62,   2.93e7,     9.0,  0.0, 84.0, -999.0,   0.0,    1.0f, {0.93f,0.88f,0.78f}, GAL_SPIRAL     },
-    { "Virgo A (M87)",         187.71,   12.39,   5.30e7,     8.0,  0.0,  0.0, -999.0,   0.0,    1.0f, {0.92f,0.88f,0.80f}, GAL_ELLIPTICAL },
+    /* AGN nuclei (bh_mass in M☉, Eddington ratio, dust-torus): Sgr A* + M31 are
+     * quiescent (bare shadow + faint disk); Centaurus A + M87 are the real active
+     * hosts (jets). Rows with mass 0 have no nucleus. Masses: SIMBAD/literature. */
+    { "Milky Way",             266.405, -28.936,  2.60e4,     0.0, 5.0e4, 0.0, 192.859,  27.128, 0.20f, {0.90f,0.88f,0.84f}, GAL_SPIRAL    , 4.15e6, 0.0f, 0.0f },
+    /* name                    RA(deg)  Dec(deg)  dist(ly)   size'  r_ly  incl  pole_ra  pole_dec bright colour              type            bh_M☉  act  torus */
+    { "LMC",                    80.89,  -69.76,   1.63e5,   645.0,  0.0, 35.0, -999.0,   0.0,    1.0f, {0.80f,0.82f,0.95f}, GAL_IRREGULAR , 0.0,    0.0f, 0.0f },
+    { "SMC",                    13.19,  -72.83,   2.00e5,   320.0,  0.0, 50.0, -999.0,   0.0,    1.0f, {0.78f,0.80f,0.94f}, GAL_IRREGULAR , 0.0,    0.0f, 0.0f },
+    { "Andromeda (M31)",        10.68,   41.27,   2.54e6,   190.0,  0.0, 77.0, -999.0,   0.0,    1.0f, {0.94f,0.88f,0.78f}, GAL_SPIRAL    , 1.4e8,  0.0f, 0.0f },
+    { "Triangulum (M33)",       23.46,   30.66,   2.73e6,    71.0,  0.0, 54.0, -999.0,   0.0,    1.0f, {0.82f,0.86f,0.96f}, GAL_SPIRAL    , 0.0,    0.0f, 0.0f },
+    { "Bode's (M81)",          148.89,   69.07,   1.18e7,    27.0,  0.0, 59.0, -999.0,   0.0,    1.0f, {0.92f,0.87f,0.78f}, GAL_SPIRAL    , 0.0,    0.0f, 0.0f },
+    { "Sculptor (NGC 253)",     11.89,  -25.29,   1.14e7,    27.0,  0.0, 78.0, -999.0,   0.0,    1.0f, {0.90f,0.82f,0.70f}, GAL_SPIRAL    , 0.0,    0.0f, 0.0f },
+    { "Centaurus A",           201.37,  -43.02,   1.20e7,    26.0,  0.0, 40.0, -999.0,   0.0,    1.0f, {0.88f,0.82f,0.74f}, GAL_ELLIPTICAL, 5.5e7,  0.5f, 1.0f },
+    { "Whirlpool (M51)",       202.47,   47.20,   2.30e7,    11.0,  0.0, 22.0, -999.0,   0.0,    1.0f, {0.80f,0.86f,0.98f}, GAL_SPIRAL    , 0.0,    0.0f, 0.0f },
+    { "Sombrero (M104)",       190.00,  -11.62,   2.93e7,     9.0,  0.0, 84.0, -999.0,   0.0,    1.0f, {0.93f,0.88f,0.78f}, GAL_SPIRAL    , 0.0,    0.0f, 0.0f },
+    { "Virgo A (M87)",         187.71,   12.39,   5.30e7,     8.0,  0.0,  0.0, -999.0,   0.0,    1.0f, {0.92f,0.88f,0.80f}, GAL_ELLIPTICAL, 6.5e9,  1.0f, 1.0f },
 };
 #define GALAXY_COUNT ((int)(sizeof(GALAXIES) / sizeof(GALAXIES[0])))
 
@@ -518,4 +534,64 @@ void galaxy_axis(int i, float out[3])
     out[0] = s_gal[i].axis[0];
     out[1] = s_gal[i].axis[1];
     out[2] = s_gal[i].axis[2];
+}
+
+int galaxy_agn(int i, double *mass_kg, float *activity, float *torus)
+{
+    if (i < 0 || i >= GALAXY_COUNT || GALAXIES[i].bh_mass_msun <= 0.0) return 0;
+    if (mass_kg)  *mass_kg  = GALAXIES[i].bh_mass_msun * MSUN;
+    if (activity) *activity = GALAXIES[i].agn_activity;
+    if (torus)    *torus    = GALAXIES[i].agn_torus;
+    return 1;
+}
+
+/* Spawn a black-hole Body at each AGN host galaxy's centre. The four AGN passes
+ * in render_frame (bh/jet/torus/agncore) then draw the full nucleus for free —
+ * this is a pure data-level composition of the finished engine, with no changes
+ * to the render passes. Bodies sit at real galaxy distances (Mly), so they are
+ * culled past farfield_horizon_au until the camera flies to the nucleus. */
+void galaxy_spawn_agn(void)
+{
+    if (!g_settings.galaxy_agn) return;
+
+    for (int i = 0; i < GALAXY_COUNT; i++) {
+        double mass_kg; float activity, torus;
+        if (!galaxy_agn(i, &mass_kg, &activity, &torus)) continue;
+
+        double pos_au[3];
+        galaxy_position(i, pos_au);
+
+        char nm[48];
+        snprintf(nm, sizeof(nm), "%.24s Nucleus", galaxy_name(i));
+
+        BodyCreateSpec spec;
+        memset(&spec, 0, sizeof(spec));
+        spec.name   = nm;
+        spec.mass   = mass_kg;
+        spec.radius = laws_schwarzschild_radius(mass_kg);
+        spec.pos[0] = pos_au[0] * AU;   /* AU → metres: Body state is SI */
+        spec.pos[1] = pos_au[1] * AU;
+        spec.pos[2] = pos_au[2] * AU;
+        spec.is_star = 1;               /* a hole is always a system root */
+        spec.parent  = -1;
+        spec.obliquity = 35.0;          /* tilt so both jet lobes frame nicely */
+        /* Spin drives the Blandford–Znajek jets: active hosts need a real SMBH
+         * horizon period (~minutes) so accretion_init_body clamps a* near the
+         * Thorne limit. Quiescent nuclei can turn slowly (no jet regardless). */
+        spec.rotation_rate = (activity > 0.0f)
+                           ? (2.0 * PI) / (0.003 * DAY)
+                           : (2.0 * PI) / DAY;
+        spec.col[0] = 1.00f; spec.col[1] = 0.86f; spec.col[2] = 0.72f;
+
+        int idx = universe_add_body(&spec);
+        if (idx < 0) continue;
+
+        Body *b = &g_bodies[idx];
+        b->is_black_hole  = 1;
+        b->agn_activity   = activity;
+        b->accretion_disk = 1.0f;       /* even quiescent holes get a faint disk */
+        b->dust_torus     = torus;
+        b->radius         = laws_schwarzschild_radius(b->mass);
+        accretion_init_body(b);         /* seed spin_a + gas reservoir */
+    }
 }

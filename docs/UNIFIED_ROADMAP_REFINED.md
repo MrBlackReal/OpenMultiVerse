@@ -546,7 +546,9 @@ live under Menu → Visuals and persist in `settings.json`.
 
 **Status:** ✅ — a raymarched black hole with composable, physically-sized AGN
 elements (accretion disk, dust torus, relativistic jets). Verified across every
-combination via headless offscreen renders (`tools/shot.sh`), ~50–105 fps.
+combination via headless offscreen renders (`tools/shot.sh`), ~50–105 fps. This
+engine is now also **hosted inside galaxies** — `galaxy_spawn_agn()` drops an
+AGN `Body` at a host galaxy's centre and these same passes draw it (§4.2).
 
 ### Core: raymarched Schwarzschild hole (`bh.vert`/`bh.frag`)
 
@@ -1049,9 +1051,21 @@ corner case); lens-flare occlusion already agrees via the depth buffer.
 * irregular ✅ (torn clumpy cloud: ragged noise-warped outline, off-centre
   warm stellar bar, pink HII complexes, dark dust patches — LMC/SMC read as
   structured Magellanic Clouds close-up and from Earth, not cotton balls)
-* active galactic nuclei — *the AGN central engine already exists* (§1.4:
-  raymarched hole + accretion disk + dust torus + relativistic jets); what
-  remains here is embedding it in a galaxy host (the render path now exists).
+* active galactic nuclei ✅ — the §1.4 engine is now **hosted inside galaxies**.
+  `GalaxyDef` carries an optional central-SMBH mass + Eddington ratio + torus;
+  `galaxy_spawn_agn()` (called from `init_runtime_world` after `galaxy_init`)
+  drops a black-hole `Body` at each host's photometric centre, so the existing
+  four AGN passes draw its accretion disk + jets **unchanged** — a pure data-
+  level composition, no render-pass edits. Hosts: **M87** + **Centaurus A**
+  active (jets + dust torus), **Sgr A\*** + **Andromeda** quiescent (bare shadow
+  + faint disk). Everything is Rs-scaled from mass via `bh_scales()`, so the
+  nucleus is a physically-sized point you **fly to** (culled past
+  `farfield_horizon_au` from afar): approach a galactic centre and its disk +
+  relativistic jets bloom inside the surrounding galaxy glow. Gated by the
+  `galaxy_agn` setting (default on). *Deferred:* an artistic galaxy-scale jet
+  (a `u_visual_scale` multiplier + full 3-D jet axis) for the kpc "beam across
+  the galaxy" poster — a follow-up on this proven base, since it would touch the
+  four AGN render passes.
 
 ### Visual components
 
@@ -1067,8 +1081,9 @@ corner case); lens-flare occlusion already agrees via the depth buffer.
   blue arms, pink HII knots)
 * rotational shear ✅ (flat rotation curve, ω ∝ 1/r on `u_time`; noise is
   sampled in the co-rotating frame so clumps ride the shear)
-* central black hole glow 🟡 (the bulge core glows; a true embedded AGN
-  engine remains)
+* central black hole ✅ (the bulge core glows, and host galaxies now carry a
+  real embedded AGN engine — a black-hole `Body` at the photometric centre; see
+  the "active galactic nuclei" bullet above)
 
 **Status detail:** first iteration implemented as `src/galaxy.{c,h}` +
 `assets/shaders/galaxy.frag`, mirroring the nebula architecture: 10 real
@@ -1092,9 +1107,10 @@ depth-correctly: `post.c` exposes the scene depth as a texture
 so planets embed properly in the glow — better than the old full-res path,
 which blended the whole band over them. Full-res depth-tested fallback when
 bloom/post is off.
-**Remaining:** an AGN preset hosted inside a galaxy, per-region galaxy light
-(the single integrated emitter is a point approximation), and authored
-galaxies in universe JSON.
+**Remaining:** per-region galaxy light (the single integrated emitter is a
+point approximation), authored galaxies in universe JSON, and the deferred
+galaxy-scale artistic AGN jet (see the AGN bullet). *(AGN hosted inside a
+galaxy — landed; see the "active galactic nuclei" bullet.)*
 
 ---
 

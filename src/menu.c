@@ -777,6 +777,12 @@ static void menu_render_settings(void)
                       0.5f, 50.0f, "%.1f ly", ImGuiSliderFlags_Logarithmic);
         igSliderFloat("Cluster impostors", &g_settings.cluster_impostors,
                       0.0f, 3.0f, "%.2fx", 0);
+        igCheckbox("Galaxy AGN nuclei", (bool *)&g_settings.galaxy_agn);
+        igSetItemTooltip("Spawn a black-hole nucleus at each AGN host galaxy's centre\n"
+                         "(M87 + Centaurus A active with jets; Sgr A* + Andromeda\n"
+                         "quiescent). Fly to a galactic centre to see the accretion\n"
+                         "disk + jets bloom inside the galaxy glow. Takes effect on the\n"
+                         "next universe (re)load.");
         /* Keep each window well-ordered live (end > start) so the smoothstep
          * edges never coincide/cross while a slider is being dragged. */
         if (g_settings.lod_body_fade_end_px < g_settings.lod_body_fade_start_px + 0.05f)
