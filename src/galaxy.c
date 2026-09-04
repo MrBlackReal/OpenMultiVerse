@@ -87,7 +87,7 @@ static const GalaxyDef GALAXIES[] = {
     { "Triangulum (M33)",       23.46,   30.66,   2.73e6,    71.0,  0.0, 54.0, -999.0,   0.0,    1.0f, {0.82f,0.86f,0.96f}, GAL_SPIRAL    , 0.0,    0.0f, 0.0f },
     { "Bode's (M81)",          148.89,   69.07,   1.18e7,    27.0,  0.0, 59.0, -999.0,   0.0,    1.0f, {0.92f,0.87f,0.78f}, GAL_SPIRAL    , 0.0,    0.0f, 0.0f },
     { "Sculptor (NGC 253)",     11.89,  -25.29,   1.14e7,    27.0,  0.0, 78.0, -999.0,   0.0,    1.0f, {0.90f,0.82f,0.70f}, GAL_SPIRAL    , 0.0,    0.0f, 0.0f },
-    { "Centaurus A",           201.37,  -43.02,   1.20e7,    26.0,  0.0, 40.0, -999.0,   0.0,    1.0f, {0.88f,0.82f,0.74f}, GAL_ELLIPTICAL, 5.5e7,  0.5f, 1.0f },
+    { "Centaurus A",           201.37,  -43.02,   1.20e7,    26.0,  0.0, 40.0, -999.0,   0.0,    1.0f, {0.88f,0.82f,0.74f}, GAL_ELLIPTICAL, 5.5e7,  0.7f, 1.0f },
     { "Whirlpool (M51)",       202.47,   47.20,   2.30e7,    11.0,  0.0, 22.0, -999.0,   0.0,    1.0f, {0.80f,0.86f,0.98f}, GAL_SPIRAL    , 0.0,    0.0f, 0.0f },
     { "Sombrero (M104)",       190.00,  -11.62,   2.93e7,     9.0,  0.0, 84.0, -999.0,   0.0,    1.0f, {0.93f,0.88f,0.78f}, GAL_SPIRAL    , 0.0,    0.0f, 0.0f },
     { "Virgo A (M87)",         187.71,   12.39,   5.30e7,     8.0,  0.0,  0.0, -999.0,   0.0,    1.0f, {0.92f,0.88f,0.80f}, GAL_ELLIPTICAL, 6.5e9,  1.0f, 1.0f },
@@ -593,5 +593,20 @@ void galaxy_spawn_agn(void)
         b->dust_torus     = torus;
         b->radius         = laws_schwarzschild_radius(b->mass);
         accretion_init_body(b);         /* seed spin_a + gas reservoir */
+
+        /* Active hosts: stretch the (physically tiny) jet into a galaxy-scale kpc
+         * beam so it reads against the host from a distance, and aim it along the
+         * galaxy's disc axis. The disk/torus stay Rs-sized (a compact bright
+         * nucleus). Target jet length ≈ 0.35 × the galaxy's radius, independent of
+         * BH mass; a scale of 1 (quiescent hosts) leaves the jet physical. */
+        if (activity > 0.0f) {
+            double rs_au    = b->radius / AU;               /* Rs in AU           */
+            double spin     = fabs(b->spin_a);
+            double base_len = rs_au * (12.0 + 46.0 * spin); /* physical jet (AU)  */
+            double target   = 1.0 * galaxy_radius_au(i);    /* per-lobe reach     */
+            if (base_len > 0.0)
+                b->agn_visual_scale = (float)(target / base_len);
+            galaxy_axis(i, b->agn_axis);                    /* disc axis = jet axis */
+        }
     }
 }

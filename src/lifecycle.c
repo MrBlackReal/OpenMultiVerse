@@ -5,6 +5,7 @@
 #include "body.h"
 #include "field_graph.h"
 #include "supernova.h"
+#include "universe.h"
 #include <math.h>
 
 double g_stellar_years_per_sec = 0.0;   /* auto-aging off by default */
@@ -25,6 +26,14 @@ int lifecycle_will_supernova(double mass_kg)
 int lifecycle_is_evolvable_star(int i)
 {
     if (i < 0 || i >= g_nbodies) return 0;
+    /* Gaia far-field stars are frozen scenery baked into a static GPU VBO — never
+     * per-body simulated. Evolving one (aging or a triggered death) would spawn a
+     * remnant + supernova event while the original point stays baked in the VBO,
+     * i.e. an invisible detonation that also litters orphan remnant bodies. Treat
+     * the whole [begin,end) field range as non-evolvable. (Fly close enough and
+     * starsys promotion turns a field star into a real, evolvable system body,
+     * which lands OUTSIDE this range.) */
+    if (i >= g_field_star_begin && i < g_field_star_end) return 0;
     const Body *b = &g_bodies[i];
     if (!b->alive || !b->is_star || b->is_black_hole) return 0;
     /* Remnants are terminal — they don't evolve further. */

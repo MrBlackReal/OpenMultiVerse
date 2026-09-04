@@ -50,6 +50,9 @@ typedef struct {
                                    /* galaxy centre (M87 + Cen A active with jets, */
                                    /* Sgr A and M31 quiescent). Applied on universe*/
                                    /* (re)load; 0 = no galaxy nuclei.              */
+    int    orbit_predict;          /* draw the inspect-selected body's predicted   */
+                                   /* future path (ghost line: cyan bound, amber   */
+                                   /* escaping). 0 = off.                          */
 
     /* ---- labels ------------------------------------------------------- */
     float  label_max_dist_au;  /* planet/moon labels hidden beyond this (AU); */

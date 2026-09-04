@@ -43,6 +43,7 @@
 #include "benchmark.h"
 #include "comet.h"
 #include "trails.h"
+#include "orbit_predict.h"
 #include "labels.h"
 #include "render.h"
 #include "rings.h"
@@ -397,6 +398,7 @@ static void init_runtime_world(void) {
     loading_phase("Allocating trails");
     boot_log("Initializing trails");
     trails_gl_init();
+    orbit_predict_init();
     loading_phase("Initializing renderer");
     boot_log("Initializing renderer");
     render_init();
@@ -438,6 +440,7 @@ static void shutdown_runtime_world(void) {
     rings_shutdown();
     render_shutdown();
     labels_shutdown();
+    orbit_predict_shutdown();
     trails_gl_shutdown();
     comet_shutdown();
     galaxy_shutdown();
@@ -1375,9 +1378,34 @@ int main(int argc, char **argv) {
             if (!galaxy_agn(gi, &mkg, &act, NULL)) continue;
             double gp[3];
             galaxy_position(gi, gp);
+            float ax[3]; galaxy_axis(gi, ax);
             fprintf(stdout, "[GalaxyAGN] %-18s M=%.2e Msun act=%.2f "
-                    "pos_au=%.3e,%.3e,%.3e\n",
-                    galaxy_name(gi), mkg / 1.989e30, act, gp[0], gp[1], gp[2]);
+                    "pos_au=%.3e,%.3e,%.3e jet_axis=%.3f,%.3f,%.3f\n",
+                    galaxy_name(gi), mkg / 1.989e30, act, gp[0], gp[1], gp[2],
+                    ax[0], ax[1], ax[2]);
+        }
+
+        /* Orbit prediction (Layer 5.4): validate the forward integrator + energy
+         * classifier on a representative body — the forced OMV_PREDICT_BODY if
+         * set, else the first curated non-star with a parent. */
+        {
+            int pb = -1;
+            const char *fe = getenv("OMV_PREDICT_BODY");
+            if (fe && fe[0])
+                for (int i = 0; i < g_nbodies; i++)
+                    if (g_bodies[i].alive && !strcmp(g_bodies[i].name, fe)) { pb = i; break; }
+            if (pb < 0)
+                for (int i = 0; i < g_nbodies && i < MAX_BODIES; i++)
+                    if (g_bodies[i].alive && !g_bodies[i].is_star &&
+                        g_bodies[i].parent >= 0) { pb = i; break; }
+            OrbitPredictInfo pi;
+            if (pb >= 0 && orbit_predict_compute(pb, &pi, NULL, 64))
+                fprintf(stdout, "[OrbitPredict] %s parent=%s %s period=%.1fd "
+                        "a=%.4fau peri=%.4f apo=%.4f e=%.4f pts=%d\n",
+                        g_bodies[pb].name,
+                        pi.parent >= 0 ? g_bodies[pi.parent].name : "-",
+                        pi.plunge ? "plunge" : (pi.bound ? "bound" : "escaping"),
+                        pi.period_days, pi.a_au, pi.peri_au, pi.apo_au, pi.ecc, pi.count);
         }
 
         /* Same for the radiance field: total/dominant incident flux at the

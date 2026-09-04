@@ -11,27 +11,26 @@ selectable "multiverse"), **real-astronomical-data import**, **galaxy-scale
 rendering** (camera-driven active region + far-field points, ~16k bodies in real
 time), a **stellar lifecycle** system, and visual systems (HDR bloom, volumetric
 nebulae, black holes). Forward-looking plans and in-progress work live in `docs/`
-(`UNIFIED_ROADMAP_REFINED.md` — the single unified roadmap; it absorbed the former
-`SCALING_HANDOFF.md` and `VISUALS_ROADMAP.md`).
+(`UNIFIED_ROADMAP_REFINED.md`).
 
 ---
 
 ## Table of Contents
-
-1. [Overview](#1-overview)
-2. [Repository Layout](#2-repository-layout)
-3. [Build and Runtime Dependencies](#3-build-and-runtime-dependencies)
-4. [Runtime Flow](#4-runtime-flow)
-5. [Core State and Units](#5-core-state-and-units)
-6. [Module Reference](#6-module-reference)
-7. [Universe Data Format](#7-universe-data-format)
-8. [Physics Architecture](#8-physics-architecture)
-9. [Collision and Supernova Flow](#9-collision-and-supernova-flow)
-10. [Rendering Pipeline](#10-rendering-pipeline)
-11. [Shader Reference](#11-shader-reference)
-12. [File Dependency Map](#12-file-dependency-map)
-13. [Where to Make Changes](#13-where-to-make-changes)
-
+> `grep -nE '^## ' ARCHITECTURE.md`
+1. [Overview](#1-overview) — L36
+2. [Repository Layout](#2-repository-layout) — L73
+3. [Build and Runtime Dependencies](#3-build-and-runtime-dependencies) — L144
+4. [Runtime Flow](#4-runtime-flow) — L200
+5. [Core State and Units](#5-core-state-and-units) — L257
+6. [Module Reference](#6-module-reference) — L338
+7. [Universe Data Format](#7-universe-data-format) — L1016
+8. [Physics Architecture](#8-physics-architecture) — L1201
+9. [Collision and Supernova Flow](#9-collision-and-supernova-flow) — L1318
+10. [Rendering Pipeline](#10-rendering-pipeline) — L1386
+11. [Shader Reference](#11-shader-reference) — L1485
+12. [File Dependency Map](#12-file-dependency-map) — L1522
+13. [Where to Make Changes](#13-where-to-make-changes) — L1590
+`docs/MODULE_MAP.md` for functions
 ---
 
 ## 1. Overview
@@ -532,6 +531,22 @@ Trail data is stored in each `Body`:
 Sampling is spatial, not purely time-based. Constants in `common.h` control
 minimum/maximum segment length, satellite trail length, retained world length,
 curve subdivision error, and close-approach densification.
+
+### `orbit_predict.c` / `orbit_predict.h`
+
+Orbit-prediction "ghost lines" (roadmap Layer 5.4) — the forward complement of
+trails: where a body *will* go, not where it has been. For the inspected/selected
+body (or a forced target via the `OMV_PREDICT_BODY` env var) it forward-integrates
+a test particle under the **active universe's** force laws (`g_laws`, so
+`force_exp != 2`, `lambda`, and PN all show up — e.g. precessing rosettes) against
+the body's frozen parent chain, then draws a camera-relative line strip reusing the
+trail shaders (`solid.vert`/`solid.frag`). Specific orbital energy classifies the
+path: bound (cyan) vs escaping (amber) vs plunging.
+
+`orbit_predict_compute()` is pure physics (no GL, main-thread) and fills an
+`OrbitPredictInfo` (parent, bound/plunge flags, period, semi-major axis, peri/apo,
+eccentricity); `orbit_predict_render()`/`_init()`/`_shutdown()` own the GL side.
+Toggle/appearance settings live in `g_settings` (`settings.c/.h`) and the menu.
 
 ### `labels.c` / `labels.h`
 

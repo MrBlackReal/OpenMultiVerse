@@ -38,6 +38,13 @@ typedef struct {
                            /* be bare or dressed; default on for BH/quasar types  */
     float  dust_torus;     /* obscuring dust-torus strength (0 = none): the outer */
                            /* AGN doughnut that hides the core when edge-on       */
+    float  agn_visual_scale;/* artistic jet-size multiplier (0/1 = physical Rs).  */
+                           /* >1 stretches the relativistic jet to galaxy scale   */
+                           /* (a kpc beam) while the disk/torus stay Rs-sized —    */
+                           /* used by galaxy-hosted nuclei. Disk visuals unchanged */
+    float  agn_axis[3];    /* explicit 3-D jet/spin axis (unit; 0,0,0 = derive    */
+                           /* from obliquity). Aligns a hosted nucleus' jet with   */
+                           /* its galaxy's disc axis.                             */
 
     /* Accretion state (black holes; evolved by accretion.c on the stellar
      * clock). agn_activity above is the Eddington ratio, now an OUTPUT of this

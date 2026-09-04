@@ -541,6 +541,10 @@ static void menu_render_inspect(void)
                 g_paused = 0;
                 inspect_focus_body(death_remnant);
             }
+        } else if (t >= g_field_star_begin && t < g_field_star_end) {
+            igTextDisabled("Far-field catalogue star (frozen scenery).\n"
+                           "Fly close to promote it into a live system before\n"
+                           "it can evolve or go supernova.");
         } else {
             igTextDisabled("This object has reached its final state.");
         }
@@ -783,6 +787,12 @@ static void menu_render_settings(void)
                          "quiescent). Fly to a galactic centre to see the accretion\n"
                          "disk + jets bloom inside the galaxy glow. Takes effect on the\n"
                          "next universe (re)load.");
+        igCheckbox("Orbit prediction", (bool *)&g_settings.orbit_predict);
+        igSetItemTooltip("In Inspect mode, draw the predicted FUTURE path of the body\n"
+                         "under the crosshair (or the locked orbit target) as a ghost\n"
+                         "line: cyan = bound orbit, amber = escaping, red = plunging.\n"
+                         "Integrated under this universe's force laws, so modified\n"
+                         "gravity shows precessing (non-closing) orbits.");
         /* Keep each window well-ordered live (end > start) so the smoothstep
          * edges never coincide/cross while a slider is being dragged. */
         if (g_settings.lod_body_fade_end_px < g_settings.lod_body_fade_start_px + 0.05f)

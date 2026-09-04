@@ -65,6 +65,7 @@
 #include "galaxy.h"
 #include "comet.h"
 #include "trails.h"
+#include "orbit_predict.h"
 #include "rings.h"
 #include "asteroids.h"
 #include "labels.h"
@@ -3261,6 +3262,9 @@ void render_frame(const float view[16], const float proj[16],
     /* ------------------------------------------------------------------ 5. Trails */
     trails_render(vp_camrel);
 
+    /* ---- 5b. Orbit prediction: the inspect-selected body's future path ----- */
+    orbit_predict_render(vp_camrel);
+
     /* ------------------------------------------------------------------ 6. Star glare
      * Drawn after trails so stellar corona covers orbit lines inside the glow disc.
      * Additive blend (GL_ONE / GL_ONE) accumulates glow from multiple stars.
@@ -3370,8 +3374,18 @@ void render_frame(const float view[16], const float proj[16],
             float rx = (float)(g_bodies[i].pos[0] * RS - g_cam.pos[0]);
             float ry = (float)(g_bodies[i].pos[1] * RS - g_cam.pos[1]);
             float rz = (float)(g_bodies[i].pos[2] * RS - g_cam.pos[2]);
-            if (rx*rx + ry*ry + rz*rz > g_settings.farfield_horizon_au *
-                                        g_settings.farfield_horizon_au)
+            double horizon = g_settings.farfield_horizon_au;
+            /* Galaxy-scale nuclei (kpc jets) get a jet-length-scaled horizon so
+             * the beam stays visible from outside the host galaxy, without the
+             * physical far horizon hiding it — yet still culls at cosmological
+             * range so it never specks the distant sky. */
+            if (g_bodies[i].is_black_hole && g_bodies[i].agn_visual_scale > 1.0f) {
+                double rs_au   = g_bodies[i].radius * RS;
+                double jet_len = rs_au * 58.0 * g_bodies[i].agn_visual_scale;
+                double h = 25.0 * jet_len;
+                if (h > horizon) horizon = h;
+            }
+            if (rx*rx + ry*ry + rz*rz > horizon * horizon)
                 continue;   /* past horizon → invisible in every pass below */
         }
         if (n_bh >= s_bh_cap) {
@@ -3514,17 +3528,31 @@ void render_frame(const float view[16], const float proj[16],
             float power = g_bodies[i].agn_activity * (0.15f + 0.85f * spin);
             if (power <= 0.0f) continue;
 
-            /* Jets fire along the spin axis (= disk normal). */
-            double ob = g_bodies[i].obliquity * (PI / 180.0);
-            float ax = 0.0f, ay = (float)cos(ob), az = (float)sin(ob);
+            /* Jets fire along the spin axis (= disk normal): an explicit 3-D
+             * axis (a galaxy-hosted nucleus aligns to its disc axis) if set,
+             * else derived from obliquity in the y-z plane. */
+            float ax, ay, az;
+            const float *jaxis = g_bodies[i].agn_axis;
+            float alen = sqrtf(jaxis[0]*jaxis[0] + jaxis[1]*jaxis[1] + jaxis[2]*jaxis[2]);
+            if (alen > 1e-4f) {
+                ax = jaxis[0]/alen; ay = jaxis[1]/alen; az = jaxis[2]/alen;
+            } else {
+                double ob = g_bodies[i].obliquity * (PI / 180.0);
+                ax = 0.0f; ay = (float)cos(ob); az = (float)sin(ob);
+            }
             /* Skip when nearly pole-on: the axis-aligned ribbon degenerates to a
              * quad edge there, and the beamed core carries the look instead. */
             float jalign = fabsf((rx * ax + ry * ay + rz * az) / (dist > 1e-6f ? dist : 1.0f));
             if (jalign > 0.94f) continue;
+            /* Artistic galaxy-scale multiplier: stretch the jet to a kpc beam for
+             * hosted nuclei (1 = physical Rs). Aspect preserved (jet.frag keeps the
+             * core collimated); the disk/torus stay Rs-sized. */
+            float vscale = g_bodies[i].agn_visual_scale > 0.0f
+                         ? g_bodies[i].agn_visual_scale : 1.0f;
             glUniform3f(s_jet_center, rx, ry, rz);
             glUniform3f(s_jet_axis, ax, ay, az);
-            glUniform1f(s_jet_len,   radius * (12.0f + 46.0f * spin));
-            glUniform1f(s_jet_width, radius * 4.5f);
+            glUniform1f(s_jet_len,   radius * (12.0f + 46.0f * spin) * vscale);
+            glUniform1f(s_jet_width, radius * 4.5f * vscale);
             glUniform3f(s_jet_color, 0.55f, 0.72f, 1.0f);
             glUniform1f(s_jet_activity, power);
             glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
