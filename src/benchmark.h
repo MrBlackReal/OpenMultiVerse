@@ -37,5 +37,24 @@ void benchmark_update(float dt_real);
 int  benchmark_hud(char *stage, int stage_n, char *line, int line_n,
                    float *progress);
 
+/* Run the second (galaxies-OFF) pass, which prices the galaxy render layer by
+ * differencing the two. Off by default — it doubles a ~7-minute run, and the
+ * per-stage fps numbers come from the first pass either way. Call before
+ * benchmark_start(). */
+void benchmark_set_ab(int on);
+
+/* Enable per-stage screenshots into `dir` (created by the caller). Marked
+ * stages capture one frame mid-hold, during the galaxies-ON pass only — the
+ * galaxies-OFF pass would produce misleading images of the same scene. Call
+ * before benchmark_start(). */
+void benchmark_set_shot_dir(const char *dir);
+
+/* If a screenshot is due this frame, returns its path and clears the request;
+ * NULL otherwise. main.c must call this AFTER render_frame()/post_end() and
+ * before the buffer swap, since the capture reads GL_BACK. The frames around a
+ * capture are excluded from timing — glReadPixels stalls the pipeline and would
+ * otherwise show up as a fake 1% low. */
+const char *benchmark_take_shot_path(void);
+
 /* Free the tour allocation. */
 void benchmark_shutdown(void);

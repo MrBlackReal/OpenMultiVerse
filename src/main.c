@@ -58,6 +58,10 @@
 #include "cosmic_field.h"
 #include "radiance_field.h"
 #include "field_graph.h"
+#include "profiler.h"
+
+/* Active-system count, captured for profiler spike context only. */
+static int s_prof_active_systems = 0;
 #include "starsys.h"
 #include "spectral.h"
 #include "audio.h"
@@ -150,6 +154,20 @@ static void boot_log(const char *msg) {
 
 static void clear_movement_keys(void) {
     s_key_w = s_key_s = s_key_a = s_key_d = s_key_q = s_key_e = 0;
+}
+
+/* Open/close the ImGui multiverse panel.  While it is open it owns every input
+ * event (see the poll loop), so opening must release any state the game is
+ * holding: the pending SDL_KEYUPs are swallowed by the menu and would other-
+ * wise leave a key stuck down for as long as the panel stays up. */
+static void set_menu_open(int open) {
+    menu_set_visible(open);
+    if (open) {
+        s_freelook = 0;
+        SDL_SetRelativeMouseMode(SDL_FALSE);
+        clear_movement_keys();
+        build_set_tab_held(0);
+    }
 }
 
 static void leave_inspect_keep_mouse(void) {
@@ -603,6 +621,7 @@ static void app_quit(void) {
     if (settings_dirty())     /* persist only if something changed this session */
         settings_save();
     audio_shutdown();
+    if (profiler_enabled()) profiler_dump_stdout();
     benchmark_shutdown();
     menu_shutdown();
     loading_shutdown();
@@ -844,13 +863,8 @@ static void handle_event(const SDL_Event *e, float dt, int *running) {
             /* Toggle the multiverse picker. When it opens, release the mouse so
              * the cursor can interact with the ImGui window. No-op without
              * USE_IMGUI (menu_visible() stays 0). */
-            if (!e->key.repeat) {
-                menu_toggle();
-                if (menu_visible()) {
-                    s_freelook = 0;
-                    SDL_SetRelativeMouseMode(SDL_FALSE);
-                }
-            }
+            if (!e->key.repeat)
+                set_menu_open(!menu_visible());
             break;
         case SDLK_TAB:
             build_set_tab_held(1);
@@ -1183,8 +1197,12 @@ static void integrate_system_hot(int s, double sys_dt)
         physics_respa_end_system(root, dt_outer);
         rings_step_system(root, dt_outer);
         trails_tick_system(root, dt_outer);
-        if (local_encounter)
+        if (local_encounter) {
+            double t0 = profiler_enabled() ? profiler_now_ms() : 0.0;
             collision_step_system(root, dt_outer);
+            if (profiler_enabled())
+                profiler_record_collision_time(profiler_now_ms() - t0);
+        }
     }
 }
 
@@ -1213,7 +1231,12 @@ static void print_usage(const char *prog)
 "                          supernovae, accretion) — testable headless.\n"
 "\n"
 "Benchmark / tools:\n"
+"  --profile               Per-stage frame profiler; prints a report on exit.\n"
 "  --benchmark             Scripted galaxy flythrough; prints an FPS report.\n"
+"  --benchmark-ab          Also fly a galaxies-OFF pass to price the galaxy\n"
+"                          layer (doubles the run time).\n"
+"  --benchmark-shots DIR   Also write one PPM per marked stage into DIR\n"
+"                          (solar system, supernova, galaxies, quasars, ...).\n"
 "  --export-body-catalog PATH\n"
 "                          Load --preset, write its bulk (non-curated) bodies to a\n"
 "                          BodyBin at PATH, and exit (offline manifest+binary build).\n"
@@ -1233,8 +1256,10 @@ int main(int argc, char **argv) {
      * --frames N           frames to render before the shot (default 6).
      * --preset PATH        load this universe JSON instead of the default.
      * --cam x,y,z,yaw,pitch position the camera (AU, degrees) after load.    */
-    const char *shot_path   = NULL;
-    int         shot_frames = 6;
+    const char *shot_path      = NULL;
+    const char *bench_shot_dir = NULL;
+    int         bench_ab       = 0;
+    int         shot_frames    = 6;
     int         headless    = 0;
     int         run_bench   = 0;
     int         cam_set     = 0;
@@ -1271,6 +1296,15 @@ int main(int argc, char **argv) {
         /* Scripted cinematic flythrough of the Milky Way and its neighbour
          * galaxies, timing each leg and printing an FPS report on completion. */
         else if (!strcmp(argv[a], "--benchmark")) run_bench = 1;
+        /* Per-stage frame profiler; report on exit. */
+        else if (!strcmp(argv[a], "--profile")) profiler_set_enabled(1);
+        /* Add the galaxies-OFF pass that prices the galaxy layer (doubles the
+         * run time; the per-stage fps numbers do not need it). */
+        else if (!strcmp(argv[a], "--benchmark-ab")) { run_bench = 1; bench_ab = 1; }
+        /* Per-stage screenshots from the benchmark tour, into an existing
+         * directory: one PPM per marked stage, galaxies-ON pass only. */
+        else if (!strcmp(argv[a], "--benchmark-shots") && a + 1 < argc)
+            bench_shot_dir = argv[++a];
         /* Hide the 2D HUD overlay + body labels (clean cinematic screenshots);
          * same effect as pressing H in-app. */
         else if (!strcmp(argv[a], "--no-hud")) g_hud_hidden = 1;
@@ -1340,6 +1374,8 @@ int main(int argc, char **argv) {
      * the run actually measures throughput rather than the vsync interval. */
     if (run_bench) {
         set_vsync(0);
+        benchmark_set_ab(bench_ab);
+        if (bench_shot_dir) benchmark_set_shot_dir(bench_shot_dir);
         benchmark_start();
     }
 
@@ -1482,9 +1518,21 @@ int main(int argc, char **argv) {
         prev = now;
 
         SDL_Event e;
+        profiler_frame_begin();
+        profiler_stage_begin(PROFILER_STAGE_INPUT);
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) running = 0;
-            if (menu_process_event(&e)) continue;  /* ImGui consumed this event */
+            if (menu_process_event(&e)) {
+                /* The open menu is modal — it swallows all input. The one
+                 * exception is the close keys, so the panel can never trap the
+                 * user; while a text field has focus they belong to ImGui
+                 * ('u' is a letter there, Esc cancels the edit). */
+                if (e.type == SDL_KEYDOWN && !e.key.repeat &&
+                    !menu_wants_text_input() &&
+                    (e.key.keysym.sym == SDLK_u || e.key.keysym.sym == SDLK_ESCAPE))
+                    set_menu_open(0);
+                continue;
+            }
             handle_event(&e, dt, &running);
         }
 
@@ -1519,7 +1567,11 @@ int main(int argc, char **argv) {
         /* Star→system promotion (§0.1 final step): make the nearest
          * procedural galaxy stars real bodies before physics runs, so a
          * freshly promoted system integrates this same frame. */
+        profiler_stage_end(PROFILER_STAGE_INPUT);
+
+        profiler_stage_begin(PROFILER_STAGE_STARSYS);
         starsys_tick(g_cam.pos, (float)SDL_GetTicks() * 0.001f);
+        profiler_stage_end(PROFILER_STAGE_STARSYS);
 
         /* Physics — RESPA hierarchical integrator */
         if (!g_paused && g_sim_speed > 0.0) {
@@ -1554,6 +1606,7 @@ int main(int argc, char **argv) {
                 const int *act_slots = NULL;
                 int n_active = physics_active_systems(cam_m, ACTIVE_RADIUS_LY * LY,
                                                       &act_slots);
+                s_prof_active_systems = n_active;
                 for (int a = 0; a < n_active; a++)
                     s_active_sys[a] = act_slots[a];
 
@@ -1600,6 +1653,11 @@ int main(int argc, char **argv) {
                     if (!s_hot) { fprintf(stderr, "[main] hot-flag alloc failed\n"); exit(1); }
                     s_hot_cap = cap;
                 }
+                /* This classifier calls the collision broadphase predicates
+                 * once per active system, so it is collision cost and belongs
+                 * in that stage — it sits outside collision_step(), which is
+                 * exactly how it stayed invisible. */
+                profiler_stage_begin(PROFILER_STAGE_COLLISION);
                 int n_cold = 0;
                 for (int a = 0; a < n_active; a++) {
                     int s = s_active_sys[a];
@@ -1616,10 +1674,12 @@ int main(int argc, char **argv) {
                     s_hot[a] = (unsigned char)hot;
                     n_cold += !hot;
                 }
+                profiler_stage_end(PROFILER_STAGE_COLLISION);
 
                 /* Cold systems integrate concurrently (mirrors the warm-up loop).
                  * Below the threshold the per-frame fork/join cost outweighs the
                  * gain, so OpenMP's if-clause runs the loop serially in-thread. */
+                profiler_stage_begin(PROFILER_STAGE_PHYSICS);
                 #define PARALLEL_MIN_COLD_SYSTEMS 8
 #ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic) if(n_cold >= PARALLEL_MIN_COLD_SYSTEMS)
@@ -1636,19 +1696,27 @@ int main(int argc, char **argv) {
                     integrate_system_hot(s_active_sys[a], effective_sim_dt);
                 }
                 physics_advance_time(effective_sim_dt);
+                profiler_stage_end(PROFILER_STAGE_PHYSICS);
+
+                profiler_stage_begin(PROFILER_STAGE_COLLISION);
                 supernova_step(effective_sim_dt);
                 collision_step(effective_sim_dt);
+                profiler_stage_end(PROFILER_STAGE_COLLISION);
+                profiler_stage_begin(PROFILER_STAGE_PHYSICS);
                 asteroids_step(effective_sim_dt);
                 rings_tick(effective_sim_dt);
+                profiler_stage_end(PROFILER_STAGE_PHYSICS);
                 /* Stellar evolution runs on its own clock (years/real-second),
                  * decoupled from the capped orbital dt — so a star can age and
                  * die without ever speeding up the integrator. dt is the real
                  * frame time; no-op unless auto-aging is enabled. */
+                profiler_stage_begin(PROFILER_STAGE_LIFECYCLE);
                 lifecycle_step(dt);
                 /* Black-hole accretion runs on the same stellar clock: quasars
                  * drain their gas reservoir → Ṁ → Eddington ratio (activity) and
                  * grow, so they visibly fade over cosmic time. No-op at rate 0. */
                 accretion_step(dt);
+                profiler_stage_end(PROFILER_STAGE_LIFECYCLE);
                 /* Safety net: if a step produced a non-finite body (NaN/inf),
                  * remove it before it corrupts the camera-relative render math
                  * and freezes the view. The log tells us a runaway happened.
@@ -1678,6 +1746,7 @@ int main(int argc, char **argv) {
 
         /* Refresh the cosmic density field (throttled; rebuilds on body-set
          * change). Queried by the HUD and, later, continuous LOD. */
+        profiler_stage_begin(PROFILER_STAGE_FIELDS);
         cosmic_field_tick(dt);
 
         /* Refresh emitter luminosities (throttled; they drift on the stellar
@@ -1687,6 +1756,7 @@ int main(int argc, char **argv) {
         /* Refresh the field graph's harvested edges (throttled; rebuilds on
          * body-set change). Queried by the Inspect panel's Relations view. */
         field_graph_tick(dt);
+        profiler_stage_end(PROFILER_STAGE_FIELDS);
 
         /* Build matrices.
          * view_rot: rotation-only lookAt (origin as eye). Used for all distant
@@ -1703,6 +1773,7 @@ int main(int argc, char **argv) {
         mat4_perspective(proj, FOV, aspect, 0.0001f, RENDER_DEPTH_FAR);
 
         float fdx, fdy, fdz;
+        profiler_stage_begin(PROFILER_STAGE_CAMPREP);
         cam_get_dir(&fdx, &fdy, &fdz);
 
         float up[3] = { 0.0f, 1.0f, 0.0f };
@@ -1719,6 +1790,7 @@ int main(int argc, char **argv) {
         /* One shared nearest-star/-body pass for this frame — trail fade, the
          * HUD readout and the adaptive-warp governor all read g_cam_prox. */
         body_update_cam_proximity();
+        profiler_stage_end(PROFILER_STAGE_CAMPREP);
 
         /* Bloom: render the scene into an HDR target, then composite the glow
          * to the screen. When disabled/unavailable these are no-ops and we draw
@@ -1730,7 +1802,9 @@ int main(int argc, char **argv) {
             glViewport(0, 0, WIN_W, WIN_H);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         }
+        profiler_stage_begin(PROFILER_STAGE_RENDER);
         render_frame(view, proj, view_rot, dt);
+        profiler_stage_end(PROFILER_STAGE_RENDER);
 
         /* Relativistic optics: derive an effective beta from the camera's actual
          * speed (position delta / dt). Warp velocities are >> c, so this is a
@@ -1801,16 +1875,30 @@ int main(int argc, char **argv) {
             post_set_relativistic(rel_beta, rel_cx, rel_cy);
         }
 
+        profiler_stage_begin(PROFILER_STAGE_POST);
         post_end();
+        profiler_stage_end(PROFILER_STAGE_POST);
+        profiler_stage_begin(PROFILER_STAGE_UI);
         ui_render();
+        profiler_stage_end(PROFILER_STAGE_UI);
 
         /* Multiverse overlay (drawn last, on top). Returns a preset to switch
          * to, or -1, and may set load_path (e.g. a freshly imported real-data
          * catalog); law-slider edits set laws_changed. No-op without USE_IMGUI. */
         int laws_changed = 0;
         const char *load_path = NULL;
+        profiler_stage_begin(PROFILER_STAGE_UI);
         int menu_pick = menu_render(preset_index_of_path(s_universe_path),
                                     &laws_changed, &load_path);
+        profiler_stage_end(PROFILER_STAGE_UI);
+
+        /* Benchmark stage screenshot: same back-buffer capture as --shot, but
+         * mid-run and without quitting. Requested by benchmark_update() earlier
+         * this frame; taken here because the frame is now fully drawn. */
+        {
+            const char *bshot = benchmark_take_shot_path();
+            if (bshot) save_screenshot_ppm(bshot);
+        }
 
         /* Headless screenshot: capture the back buffer (this frame) then quit. */
         if (shot_path && ++frame_no >= shot_frames) {
@@ -1835,11 +1923,27 @@ int main(int argc, char **argv) {
          * nothing ever syncs the GPU — at thousands of fps the driver's
          * command queue grows without bound until frames come back corrupted
          * (fully black, NaN-like). One glFinish per frame bounds the queue;
-         * windowed mode doesn't need it (vsync/swap paces the pipeline). */
-        if (headless)
+         * windowed mode doesn't need it (vsync/swap paces the pipeline).
+         *
+         * Timed as SWAP, not UI: this is the frame's GPU drain, the headless
+         * equivalent of SwapWindow. Charging it to whatever stage happens to
+         * enclose it makes that stage look like it owns every GPU cost. */
+        if (headless) {
+            profiler_stage_begin(PROFILER_STAGE_SWAP);
             glFinish();
+            profiler_stage_end(PROFILER_STAGE_SWAP);
+        }
 
+        profiler_stage_begin(PROFILER_STAGE_SWAP);
         SDL_GL_SwapWindow(s_win);
+        profiler_stage_end(PROFILER_STAGE_SWAP);
+        {
+            ProfilerFrameContext pctx;
+            pctx.bodies_active  = g_nbodies;
+            pctx.systems_active = s_prof_active_systems;
+            pctx.systems_dirty  = collision_dirty_system_count();
+            profiler_frame_end(&pctx);
+        }
 
         if (laws_changed)
             physics_refresh_timestep_model();

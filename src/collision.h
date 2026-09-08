@@ -44,6 +44,8 @@ void collision_body_heat_glow(int body_idx, float out_color[3],
 float collision_body_star_heat(int body_idx);
 int collision_body_has_active_merge(int body_idx);
 int collision_body_absorbed_by(int body_idx);
+/* Systems currently queued as dirty — profiler context, not a control input. */
+int collision_dirty_system_count(void);
 int collision_body_needs_dense_trail(int body_idx);
 int collision_particles(CollisionParticle *out, int max_particles,
                         const double cam_pos[3]);

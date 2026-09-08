@@ -18,6 +18,7 @@
  *     and appends the live planet position as the final vertex.
  */
 #include "trails.h"
+#include "profiler.h"
 #include "universe.h"   /* g_field_star_begin/end */
 #include "body.h"
 #include "camera.h"
@@ -33,6 +34,8 @@ static int     s_n   = 0;
 /* Dirty tracking — skip upload when no new samples */
 static int *s_last_head  = NULL;
 static int *s_last_count = NULL;
+/* Vertices actually uploaded per body after decimation (<= trail_count). */
+static int *s_emitted    = NULL;
 
 static GLuint s_shader          = 0;
 static GLint  s_loc_vp          = -1;
@@ -62,12 +65,14 @@ void trails_gl_init(void)
     s_vbo        = (GLuint*)malloc(s_n * sizeof(GLuint));
     s_last_head  = (int*)   malloc(s_n * sizeof(int));
     s_last_count = (int*)   malloc(s_n * sizeof(int));
+    s_emitted    = (int*)   malloc(s_n * sizeof(int));
     s_ref_pos    = (double(*)[3])calloc(s_n, sizeof(*s_ref_pos));
-    if (!s_vao || !s_vbo || !s_last_head || !s_last_count || !s_ref_pos) return;
+    if (!s_vao || !s_vbo || !s_last_head || !s_last_count || !s_emitted || !s_ref_pos) return;
 
     for (int i = 0; i < s_n; i++) {
         s_last_head[i]  = 0;
         s_last_count[i] = 0;
+        s_emitted[i]    = 0;
 
         /* Stars never draw a trail (the render loop skips is_star / NULL-trail
          * bodies), so don't spend a ~0.25 MB dynamic VBO and a driver round-trip
@@ -103,9 +108,11 @@ void trails_add_body(int body_idx)
     GLuint *new_vbo = (GLuint*)malloc(new_n * sizeof(GLuint));
     int *new_head = (int*)malloc(new_n * sizeof(int));
     int *new_count = (int*)malloc(new_n * sizeof(int));
+    int *new_emit  = (int*)malloc(new_n * sizeof(int));
     double (*new_ref)[3] = (double(*)[3])calloc(new_n, sizeof(*new_ref));
-    if (!new_vao || !new_vbo || !new_head || !new_count || !new_ref) {
-        free(new_vao); free(new_vbo); free(new_head); free(new_count); free(new_ref);
+    if (!new_vao || !new_vbo || !new_head || !new_count || !new_emit || !new_ref) {
+        free(new_vao); free(new_vbo); free(new_head); free(new_count);
+        free(new_emit); free(new_ref);
         return;
     }
     if (s_n > 0) {
@@ -113,18 +120,22 @@ void trails_add_body(int body_idx)
         memcpy(new_vbo, s_vbo, s_n * sizeof(GLuint));
         memcpy(new_head, s_last_head, s_n * sizeof(int));
         memcpy(new_count, s_last_count, s_n * sizeof(int));
+        memcpy(new_emit, s_emitted, s_n * sizeof(int));
         memcpy(new_ref, s_ref_pos, s_n * sizeof(*s_ref_pos));
     }
-    free(s_vao); free(s_vbo); free(s_last_head); free(s_last_count); free(s_ref_pos);
+    free(s_vao); free(s_vbo); free(s_last_head); free(s_last_count);
+    free(s_emitted); free(s_ref_pos);
     s_vao = new_vao;
     s_vbo = new_vbo;
     s_last_head = new_head;
     s_last_count = new_count;
+    s_emitted = new_emit;
     s_ref_pos = new_ref;
 
     for (int i = s_n; i < new_n; i++) {
         s_last_head[i] = 0;
         s_last_count[i] = 0;
+        s_emitted[i] = 0;
         /* Skip GL resources for stars / trail-less bodies (see trails_gl_init). */
         if (i < g_nbodies && (g_bodies[i].is_star || !g_bodies[i].trail)) {
             s_vao[i] = 0;
@@ -214,9 +225,17 @@ void trails_reset_body(int body_idx)
     }
 }
 
+/* Below this on-screen length a trail cannot render anything meaningful; it is
+ * a sub-pixel smear that still costs a full draw call. */
+#define TRAIL_MIN_PIXELS 2.0
+
+static int s_drawn = 0, s_culled = 0, s_reup = 0;
+static long s_reup_verts = 0;
+
 void trails_render(const float vp[16])
 {
     if (!s_shader) return;
+    s_drawn = s_culled = s_reup = 0; s_reup_verts = 0;
 
     /* Distance from camera to nearest star — controls LOD fade.
      * Computed in render units (AU).  Returns early if trails are fully faded. */
@@ -253,8 +272,54 @@ void trails_render(const float vp[16])
         if (b->is_star || b->trail_count < 2 || !b->trail) continue;
         if (!b->alive && b->trail_fade <= 0.0) continue;
 
+        /* Screen-space cull. Every surviving body below costs a VAO bind, a VBO
+         * bind, at least one glBufferSubData and a draw call — thousands of tiny
+         * state changes per frame at galaxy scale. A trail whose entire arc
+         * subtends less than a pixel or two cannot show anything, so reject it
+         * before touching GL at all.
+         *
+         * trail_total_len is world metres; positions here are AU. The global
+         * trail_fade above is a fade for the system you are in — it does not
+         * cull the thousands of other systems' trails behind it. */
+        double px = 1e30;   /* on-screen length of the whole trail, pixels */
+        {
+            double dx = b->pos[0] * RS - g_cam.pos[0];
+            double dy = b->pos[1] * RS - g_cam.pos[1];
+            double dz = b->pos[2] * RS - g_cam.pos[2];
+            double dist_au = sqrt(dx*dx + dy*dy + dz*dz);
+            if (dist_au > 1e-9) {
+                double extent_au = b->trail_total_len * RS;
+                /* pixels ~= (extent / dist) / fov_rad * screen_height */
+                px = (extent_au / dist_au) / (FOV * PI / 180.0) * (double)WIN_H;
+                if (px < TRAIL_MIN_PIXELS) { s_culled++; continue; }
+            }
+        }
+        s_drawn++;
+
         const int head  = b->trail_head;
         const int count = b->trail_count;
+
+        /* Screen-space decimation. A trail holds up to TRAIL_LEN (16384)
+         * samples, and appending one sample renormalises every vertex's alpha
+         * against a shifted total length — so the whole buffer is re-linearised
+         * and re-uploaded. Measured: ~350k vertices, ~5.6 MB per frame, 93% of
+         * the trail pass.
+         *
+         * A polyline covering `px` pixels cannot resolve more than about two
+         * vertices per pixel, so emit every stride-th sample. This is the same
+         * continuous-LOD bargain the renderer already makes for dots, spheres
+         * and glares — detail proportional to apparent size. Cumulative length
+         * is still accumulated across skipped samples, so the alpha ramp is
+         * unchanged, and the newest sample is always emitted so the tip meets
+         * the live position. */
+        int stride = 1;
+        {
+            double budget = px * 2.0;
+            if (budget < 32.0) budget = 32.0;         /* floor: keep the shape */
+            if ((double)count > budget) stride = (int)((double)count / budget);
+            if (stride < 1) stride = 1;
+        }
+
 
         glBindVertexArray(s_vao[i]);
         glBindBuffer(GL_ARRAY_BUFFER, s_vbo[i]);
@@ -263,7 +328,9 @@ void trails_render(const float vp[16])
          * VBO stores positions relative to s_ref_pos[i] (the body's world
          * position at upload time), keeping values small for float precision.
          * Camera movement is handled cheaply via u_body_offset each frame. */
+        double zt_up = profiler_enabled() ? profiler_now_ms() : 0.0;
         if (head != s_last_head[i] || count != s_last_count[i]) {
+            s_reup++;
             /* Capture reference point: body's current world position. */
             s_ref_pos[i][0] = b->pos[0] * RS;
             s_ref_pos[i][1] = b->pos[1] * RS;
@@ -274,6 +341,7 @@ void trails_render(const float vp[16])
             double total_len = b->trail_total_len;
             double cumulative_len = 0.0;
             int oldest_idx = (head - count + TRAIL_LEN) & TRAIL_MASK;
+            int e = 0;                                 /* emitted vertex count */
             for (int k = 0; k < count; k++) {
                 int idx = (head - count + k + TRAIL_LEN) & TRAIL_MASK;
                 float alpha_t;
@@ -281,21 +349,29 @@ void trails_render(const float vp[16])
                     cumulative_len += b->trail_seg_len[idx];
                     if (cumulative_len > total_len) cumulative_len = total_len;
                 }
+                /* Always keep the first and last sample; thin the middle. */
+                if (stride > 1 && k != 0 && k != count - 1 && (k % stride) != 0)
+                    continue;
                 if (total_len > 0.0) alpha_t = (float)(cumulative_len / total_len);
                 else alpha_t = (k == count - 1) ? 1.0f : 0.0f;
-                s_scratch[k*4+0] = (float)(b->trail[idx][0] - s_ref_pos[i][0]);
-                s_scratch[k*4+1] = (float)(b->trail[idx][1] - s_ref_pos[i][1]);
-                s_scratch[k*4+2] = (float)(b->trail[idx][2] - s_ref_pos[i][2]);
+                s_scratch[e*4+0] = (float)(b->trail[idx][0] - s_ref_pos[i][0]);
+                s_scratch[e*4+1] = (float)(b->trail[idx][1] - s_ref_pos[i][1]);
+                s_scratch[e*4+2] = (float)(b->trail[idx][2] - s_ref_pos[i][2]);
                 /* alpha_t^1.5 (= alpha_t * sqrt(alpha_t)): power curve that
                  * keeps the tail nearly invisible and snaps bright only near
                  * the current position. Linear fade looks too uniform. */
-                s_scratch[k*4+3] = alpha_t * sqrtf(alpha_t);
+                s_scratch[e*4+3] = alpha_t * sqrtf(alpha_t);
+                e++;
             }
+            s_emitted[i] = e;
+            s_reup_verts += e;
             glBufferSubData(GL_ARRAY_BUFFER, 0,
-                            count * 4 * sizeof(float), s_scratch);
+                            e * 4 * sizeof(float), s_scratch);
             s_last_head[i]  = head;
             s_last_count[i] = count;
         }
+        if (profiler_enabled())
+            profiler_zone_add("  trail relinearise", profiler_now_ms() - zt_up);
 
         /* Pass per-body offset = ref_pos - cam_pos, computed in double precision
          * to avoid float cancellation jitter when the camera is near the body. */
@@ -318,10 +394,10 @@ void trails_render(const float vp[16])
                 1.0f
             };
             glBufferSubData(GL_ARRAY_BUFFER,
-                            count * 4 * sizeof(float), sizeof(live), live);
-            draw_count = count + 1;
+                            s_emitted[i] * 4 * sizeof(float), sizeof(live), live);
+            draw_count = s_emitted[i] + 1;
         } else {
-            draw_count = count;
+            draw_count = s_emitted[i];
         }
 
         float alpha = 0.6f * (float)b->trail_fade * trail_fade;
@@ -332,6 +408,13 @@ void trails_render(const float vp[16])
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
     glBindVertexArray(0);
+
+    if (profiler_enabled()) {
+        profiler_zone_add("  trails drawn", (double)s_drawn);
+        profiler_zone_add("  trails culled", (double)s_culled);
+        profiler_zone_add("  trails re-uploaded", (double)s_reup);
+        profiler_zone_add("  reup verts (k)", (double)s_reup_verts / 1000.0);
+    }
 }
 
 void trails_gl_shutdown(void)

@@ -5,6 +5,7 @@
  * below are no-op stubs so the rest of the program is unaffected.
  */
 #include "menu.h"
+#include "profiler.h"
 #include "presets.h"
 #include "laws.h"
 #include "settings.h"
@@ -125,13 +126,51 @@ void menu_shutdown(void)
     s_ctx = NULL;
 }
 
+/* Is this event user input (as opposed to a window/system event)? Only these
+ * are swallowed by an open menu: the app must still see resizes, quit
+ * requests and the like while the panel is up. */
+static int event_is_input(const SDL_Event *e)
+{
+    switch (e->type) {
+    case SDL_KEYDOWN:
+    case SDL_KEYUP:
+    case SDL_TEXTINPUT:
+    case SDL_TEXTEDITING:
+    case SDL_MOUSEMOTION:
+    case SDL_MOUSEBUTTONDOWN:
+    case SDL_MOUSEBUTTONUP:
+    case SDL_MOUSEWHEEL:
+    case SDL_JOYAXISMOTION:
+    case SDL_JOYHATMOTION:
+    case SDL_JOYBUTTONDOWN:
+    case SDL_JOYBUTTONUP:
+    case SDL_CONTROLLERAXISMOTION:
+    case SDL_CONTROLLERBUTTONDOWN:
+    case SDL_CONTROLLERBUTTONUP:
+    case SDL_FINGERDOWN:
+    case SDL_FINGERUP:
+    case SDL_FINGERMOTION:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 int menu_process_event(const SDL_Event *e)
 {
     if (!s_ctx) return 0;
     ImGui_ImplSDL2_ProcessEvent(e);
     if (!s_visible) return 0;
-    ImGuiIO *io = igGetIO_Nil();
-    return (io->WantCaptureMouse || io->WantCaptureKeyboard) ? 1 : 0;
+    /* An open menu is modal: it takes *all* input, not just what a hovered or
+     * focused widget wants. Deferring to WantCaptureMouse/Keyboard let clicks
+     * and keys land on the panel and fly the camera at the same time. */
+    return event_is_input(e);
+}
+
+int menu_wants_text_input(void)
+{
+    if (!s_ctx || !s_visible) return 0;
+    return igGetIO_Nil()->WantTextInput ? 1 : 0;
 }
 
 void menu_set_visible(int visible) { s_visible = visible ? 1 : 0; }
@@ -677,6 +716,197 @@ static void menu_render_inspect(void)
 /* Global application settings (g_settings). Most changes take effect live;
  * num_stars and the overlay fonts own GL/TTF resources so they apply via a
  * button. Persisted to settings.json on exit (or "Save now" below). */
+
+/* ── profiler tab ──────────────────────────────────────────────────────────
+ * Live view of the per-stage frame profiler (profiler.h). The stdout dump has
+ * the same content, but a spike you can only read after quitting is a spike you
+ * cannot reproduce — this shows it while you fly into whatever caused it. */
+static void menu_render_profiler(void)
+{
+    int on = profiler_enabled();
+    if (igCheckbox("Enable profiler", (bool *)&on)) profiler_set_enabled(on);
+    igSameLine(0, 12);
+    igTextDisabled("(also --profile on the command line)");
+    if (!on) {
+        igSpacing();
+        igTextDisabled("Profiling is off - stage timers are skipped entirely,");
+        igTextDisabled("so an unprofiled frame pays nothing but a branch.");
+        return;
+    }
+
+    ProfilerSnapshot snap;
+    profiler_get_snapshot(&snap);
+
+    /* ---- bottleneck banner: name the suspect, do not just list numbers ---- */
+    const ProfilerStageStats *swap = &snap.stages[PROFILER_STAGE_SWAP];
+    const ProfilerStageStats *rend = &snap.stages[PROFILER_STAGE_RENDER];
+    const ProfilerStageStats *phys = &snap.stages[PROFILER_STAGE_PHYSICS];
+    const ProfilerStageStats *coll = &snap.stages[PROFILER_STAGE_COLLISION];
+    if (swap->pct_cpu > 45.0) {
+        igTextColored((ImVec4_c){0.35f, 0.85f, 1.0f, 1.0f},
+                      "GPU bound - waiting on present (%.1f ms swap)", snap.gpu_wait_ms);
+    } else if (rend->pct_cpu > 45.0) {
+        igTextColored((ImVec4_c){1.0f, 0.65f, 0.2f, 1.0f},
+                      "Render bound (%.1f ms) - see the zone list below", rend->avg_ms);
+    } else if (phys->pct_cpu > 25.0) {
+        igTextColored((ImVec4_c){0.5f, 0.9f, 0.4f, 1.0f},
+                      "Physics bound (%.1f ms) - active-region radius or timestep", phys->avg_ms);
+    } else if (coll->pct_cpu > 15.0) {
+        igTextColored((ImVec4_c){1.0f, 0.5f, 0.5f, 1.0f},
+                      "Collision bound (%.1f ms) - broadphase, not resolution", coll->avg_ms);
+    } else {
+        igTextColored((ImVec4_c){0.4f, 0.95f, 0.5f, 1.0f},
+                      "Balanced (CPU %.1f ms, %.0f fps)", snap.cpu_ms, snap.fps);
+    }
+
+    igSpacing();
+
+    /* ---- stacked frame bar ---- */
+    igTextUnformatted("Frame breakdown:", NULL);
+    ImVec2_c p0    = igGetCursorScreenPos();
+    ImVec2_c avail = igGetContentRegionAvail();
+    float bw = avail.x < 60.0f ? 60.0f : avail.x, bh = 20.0f;
+    ImDrawList *dl = igGetWindowDrawList();
+    ImVec2_c p1 = (ImVec2_c){p0.x + bw, p0.y + bh};
+    ImDrawList_AddRectFilled(dl, p0, p1, 0xFF1E1814, 4.0f, 0);
+    if (snap.frame_ms > 0.001) {
+        float x = p0.x;
+        for (int i = 1; i < PROFILER_STAGE_COUNT; i++) {
+            double d = snap.stages[i].current_ms;
+            if (d <= 0.0001) continue;
+            float w = (float)(d / snap.frame_ms) * bw;
+            if (w < 1.0f) w = 1.0f;
+            if (x + w > p1.x) w = p1.x - x;
+            if (w <= 0.0f) break;
+            ImDrawList_AddRectFilled(dl, (ImVec2_c){x, p0.y}, (ImVec2_c){x + w, p0.y + bh},
+                                     snap.stages[i].color_abgr, 0.0f, 0);
+            x += w;
+        }
+    }
+    ImDrawList_AddRect(dl, p0, p1, 0xFF5F5046, 4.0f, 1.0f, 0);
+    igDummy((ImVec2_c){bw, bh + 4.0f});
+
+    /* ---- stage table ---- */
+    if (igBeginTable("##prof_stages", 5,
+                     ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                     ImGuiTableFlags_SizingStretchProp, (ImVec2_c){0, 0}, 0.0f)) {
+        igTableSetupColumn("Stage", ImGuiTableColumnFlags_WidthStretch, 2.0f, 0);
+        igTableSetupColumn("Cur",   ImGuiTableColumnFlags_WidthFixed, 46.0f, 0);
+        igTableSetupColumn("Avg",   ImGuiTableColumnFlags_WidthFixed, 46.0f, 0);
+        igTableSetupColumn("Max",   ImGuiTableColumnFlags_WidthFixed, 46.0f, 0);
+        igTableSetupColumn("%",     ImGuiTableColumnFlags_WidthFixed, 46.0f, 0);
+        igTableHeadersRow();
+        double claimed = 0.0;
+        for (int i = 1; i < PROFILER_STAGE_COUNT; i++) {
+            const ProfilerStageStats *st = &snap.stages[i];
+            claimed += st->avg_ms;
+            igTableNextRow(0, 0.0f);
+            igTableNextColumn();
+            ImVec2_c c = igGetCursorScreenPos();
+            ImDrawList_AddRectFilled(dl, (ImVec2_c){c.x, c.y + 4.0f},
+                                     (ImVec2_c){c.x + 8.0f, c.y + 12.0f},
+                                     st->color_abgr, 2.0f, 0);
+            igSetCursorPosX(igGetCursorPosX() + 14.0f);
+            igTextUnformatted(st->name, NULL);
+            igTableNextColumn(); igText("%.2f", st->current_ms);
+            igTableNextColumn(); igText("%.2f", st->avg_ms);
+            igTableNextColumn(); igText("%.2f", st->max_ms);
+            igTableNextColumn(); igText("%.1f%%", st->pct_cpu);
+        }
+        /* Unclaimed frame time. A big number here means a stage is missing,
+         * not that the frame is idle - uninstrumented work hid a 25% collision
+         * cost once already. */
+        double unacc = snap.frame_ms - claimed;
+        if (unacc < 0.0) unacc = 0.0;
+        igTableNextRow(0, 0.0f);
+        igTableNextColumn();
+        igTextColored((ImVec4_c){0.85f, 0.75f, 0.4f, 1.0f}, "(unaccounted)");
+        igTableNextColumn(); igTextUnformatted("", NULL);
+        igTableNextColumn(); igTextColored((ImVec4_c){0.85f, 0.75f, 0.4f, 1.0f}, "%.2f", unacc);
+        igTableNextColumn(); igTextUnformatted("", NULL);
+        igTableNextColumn();
+        igTextColored((ImVec4_c){0.85f, 0.75f, 0.4f, 1.0f}, "%.1f%%",
+                      snap.frame_ms > 0.0 ? unacc / snap.frame_ms * 100.0 : 0.0);
+        igEndTable();
+    }
+
+    /* ---- zones: the render pass breakdown ---- */
+    igSpacing();
+    if (igTreeNode_Str("Zones (render passes)")) {
+        profiler_zone_sort();
+        int n = profiler_zone_count();
+        if (n == 0) {
+            igTextDisabled("No zones recorded yet.");
+        } else if (igBeginTable("##prof_zones", 3,
+                                ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                                ImGuiTableFlags_SizingStretchProp, (ImVec2_c){0, 0}, 0.0f)) {
+            igTableSetupColumn("Zone", ImGuiTableColumnFlags_WidthStretch, 2.0f, 0);
+            igTableSetupColumn("Avg",  ImGuiTableColumnFlags_WidthFixed, 60.0f, 0);
+            igTableSetupColumn("Max",  ImGuiTableColumnFlags_WidthFixed, 60.0f, 0);
+            igTableHeadersRow();
+            for (int i = 0; i < n; i++) {
+                const char *zn = NULL; double za = 0.0, zm = 0.0;
+                if (!profiler_zone_get(i, &zn, &za, &zm)) continue;
+                if (za < 0.005 && zm < 0.05) continue;
+                igTableNextRow(0, 0.0f);
+                igTableNextColumn(); igTextUnformatted(zn, NULL);
+                igTableNextColumn(); igText("%.3f", za);
+                igTableNextColumn(); igText("%.3f", zm);
+            }
+            igEndTable();
+        }
+        igTreePop();
+    }
+
+    /* ---- per-system work ---- */
+    igSpacing();
+    if (igTreeNode_Str("Per-system work")) {
+        igText("Physics  : avg %.3f ms (min %.3f, max %.3f) [%d stepped]",
+               snap.worker.sys_avg_ms, snap.worker.sys_min_ms,
+               snap.worker.sys_max_ms, snap.worker.sys_count);
+        igText("Collision: avg %.3f ms (min %.3f, max %.3f) [%d stepped]",
+               snap.worker.col_avg_ms, snap.worker.col_min_ms,
+               snap.worker.col_max_ms, snap.worker.col_count);
+        igTreePop();
+    }
+
+    /* ---- spikes ---- */
+    igSpacing();
+    if (igTreeNode_Str("Frame spikes")) {
+        if (snap.spike_count == 0) {
+            igTextDisabled("No frames above %.1f ms.", snap.spike_threshold_ms);
+        } else {
+            if (igButton("Clear", (ImVec2_c){80, 0})) profiler_clear_spikes();
+            igSameLine(0, 10);
+            igTextDisabled("(%d recorded)", snap.spike_count);
+            for (int i = 0; i < snap.spike_count && i < 16; i++) {
+                int idx = (snap.spike_head - 1 - i + PROFILER_MAX_SPIKES) % PROFILER_MAX_SPIKES;
+                const ProfilerSpike *sp = &snap.spikes[idx];
+                igTextColored((ImVec4_c){1.0f, 0.45f, 0.45f, 1.0f},
+                              "[%5.1fs] %5.1f ms", sp->timestamp, sp->frame_ms);
+                igSameLine(0, 8);
+                igTextUnformatted(sp->description, NULL);
+            }
+        }
+        igTreePop();
+    }
+
+    /* ---- controls ---- */
+    igSpacing();
+    igSeparator();
+    int paused = profiler_is_paused();
+    if (igCheckbox("Pause", (bool *)&paused))
+        profiler_set_paused(paused);
+    igSameLine(0, 14);
+    if (igButton("Reset min/max", (ImVec2_c){104, 0})) profiler_reset_stats();
+    igSameLine(0, 14);
+    if (igButton("Dump to terminal", (ImVec2_c){118, 0})) profiler_dump_stdout();
+
+    float thr = profiler_get_spike_threshold();
+    if (igSliderFloat("Spike threshold", &thr, 5.0f, 60.0f, "%.1f ms", 0))
+        profiler_set_spike_threshold(thr);
+}
+
 static void menu_render_settings(void)
 {
     igTextDisabled("Global settings — apply to every universe.\n"
@@ -1308,12 +1538,20 @@ int menu_render(int current_preset, int *laws_changed, const char **out_load_pat
             igEndTabItem();
            }
 
+           if (igBeginTabItem("Profiler", NULL, 0)) {
+            igSpacing();
+            menu_render_profiler();
+            igEndTabItem();
+           }
+
+
+
            igEndTabBar();
           }
 
             igSpacing();
             igSeparator();
-            igTextDisabled("Press  U  to close   -   drag the title bar to move");
+            igTextDisabled("Press  U  or  Esc  to close   -   drag the title bar to move");
         }
         igEnd();
         s_visible = open ? 1 : 0;   /* honour the window's close button */
@@ -1329,6 +1567,7 @@ int menu_render(int current_preset, int *laws_changed, const char **out_load_pat
 void menu_init(SDL_Window *win, SDL_GLContext gl) { (void)win; (void)gl; }
 void menu_shutdown(void) {}
 int  menu_process_event(const SDL_Event *e) { (void)e; return 0; }
+int  menu_wants_text_input(void) { return 0; }
 void menu_set_visible(int visible) { (void)visible; }
 int  menu_visible(void) { return 0; }
 void menu_toggle(void) {}

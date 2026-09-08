@@ -1304,14 +1304,41 @@ essentials:
   `MAX_BODIES` arrays as a slot *cache* keyed by cache slot, evicting slots as
   bodies leave the active region — so any of the ~16k systems gets labelled as
   you approach.
-- **Caveat (B2-collision, still TODO)**: `collision.c` still uses fixed
-  `[MAX_BODIES]` tables covering the first 128 body *indices*, not the 128
-  nearest the camera — collisions don't yet follow you across the galaxy. Its
-  per-pair state (`s_pair_next[MAX_BODIES][MAX_BODIES]` cooldowns, rollback
-  snapshots) is index-keyed and must survive across frames, so the labels-style
-  slot-cache remap doesn't apply; it needs sparse per-pair tables first.
-  **Do not just raise `MAX_BODIES`** — `collision.c` has
-  `[MAX_BODIES][MAX_BODIES]` *stack* arrays that would explode.
+- **Collision follows the camera (B2-collision ✅)**: `collision.c` no longer has
+  any fixed `MAX_BODIES` state. Per-body tables (`s_radius_fx`, `s_absorbed_by`,
+  `s_system_dirty`, `s_system_hot`, and the rollback snapshots) are heap-grown to
+  `g_nbodies` — they are O(N) and cost ~1.6 MB at 16k bodies. The two structures
+  that were genuinely quadratic were replaced:
+  - **Pair cooldowns** live in `paircache.c`, a sparse open-addressed map keyed
+    on the unordered pair holding an absolute expiry. The dense
+    `s_pair_next[N][N]` it replaces would be 2 GB at galaxy scale and almost
+    entirely zero, since only a handful of pairs are in cooldown at any instant.
+  - **System membership** is CSR (`s_mem_start` offsets + `s_mem_list`), rebuilt
+    on demand rather than every frame — membership is topology, not geometry.
+    `collision_step_system()` now walks one system's members instead of scanning
+    every body with a `body_root_star() != root` filter, which was ~128M rejected
+    iterations per system per frame at galaxy scale.
+
+  No camera code was needed: only systems inside the active region are
+  integrated, so only those can develop an encounter and set `s_system_dirty`.
+  Removing the index cap makes collision follow the viewer for free.
+
+  Two details are load-bearing and easy to undo by accident:
+  - `resolved` marks are **generation-stamped**, not cleared. An O(N) clear is
+    fine once per frame but `collision_step_system()` runs once per system per
+    outer step, so clearing there is O(systems x bodies) of pure memset — it cost
+    ~2 fps at 16k bodies before being stamped.
+  - The cross-system candidate list comes from `physics_active_systems()`, not
+    from every root in the universe. The old `[MAX_BODIES]` array was silently
+    capping that list at 128; listing all ~9.7k systems makes each dirty system
+    rescan all of them.
+
+  **Cost**: collisions now resolve for every body rather than the first 128
+  indices, for ~8% overall frame time on the benchmark tour and up to ~40% in the
+  densest near-field views ("Leaving Sol"). The remaining hot spots are the
+  per-frame O(N) sweeps in `collision_step` (radius-effect ageing, system-hot
+  decay, dirty scan, radius init) which were O(128) before; each wants a compact
+  active list rather than a full scan.
 
 ---
 

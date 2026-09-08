@@ -16,9 +16,15 @@ void menu_init(SDL_Window *win, SDL_GLContext gl);
 /* Destroy backends + context. */
 void menu_shutdown(void);
 
-/* Feed one SDL event to ImGui. Returns 1 if ImGui wants to consume it (so the
- * caller should not treat it as game input), 0 otherwise. */
+/* Feed one SDL event to ImGui. Returns 1 if ImGui consumed it (so the caller
+ * should not treat it as game input), 0 otherwise. While the menu is open it
+ * consumes every input event — keyboard, text, mouse, wheel, pad and touch —
+ * regardless of what is hovered; window and system events still pass through. */
 int  menu_process_event(const SDL_Event *e);
+
+/* 1 while an ImGui text field has keyboard focus. The caller uses this to know
+ * when a keystroke is being typed into the panel rather than aimed at it. */
+int  menu_wants_text_input(void);
 
 /* Show/hide the picker window, and query visibility. */
 void menu_set_visible(int visible);

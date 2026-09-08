@@ -16,11 +16,14 @@
  *   § API       — public query functions
  */
 #include "collision.h"
+#include "paircache.h"
 #include "body.h"
 #include "field_graph.h"
 #include "labels.h"
 #include "laws.h"
 #include "physics.h"
+#include "camera.h"
+#include "settings.h"
 #include "rings.h"
 #include "supernova.h"
 #include "trails.h"
@@ -129,28 +132,357 @@ typedef struct {
 
 static ImpactEvent s_impacts[MAX_IMPACTS];
 static PersistentScar s_perm_scars[MAX_PERSISTENT_SCARS];
-static RadiusTransition s_radius_fx[MAX_BODIES];
 static MergeEvent s_merges[MAX_MERGES];
-static int s_absorbed_by[MAX_BODIES];
 static ImpactParticleState s_particles[MAX_COLLISION_PARTICLES];
-static double s_pair_next[MAX_BODIES][MAX_BODIES];
-static unsigned char s_system_dirty[MAX_BODIES];
-static double s_system_hot[MAX_BODIES];
 static unsigned int s_particle_rng = 0x1234abcdu;
 static unsigned int s_perm_scar_stamp = 1u;
-static double s_pos_before[MAX_BODIES][3];
-static double s_vel_before[MAX_BODIES][3];
 static int s_pos_before_valid = 0;
 
-/* Collision tables (s_pair_next, s_pos_before, ...) are fixed [MAX_BODIES], so
- * collision is processed for at most the first MAX_BODIES bodies.  cnb() is the
- * effective body count used as the bound for every loop and index guard; for a
- * universe of <= MAX_BODIES bodies it equals g_nbodies (no behaviour change).
- * The camera-driven active set (a later phase) selects which bodies these slots
- * represent so collisions follow the viewer in a galaxy-scale universe. */
-static inline int cnb(void)
+/* ── per-body state ────────────────────────────────────────────────────────
+ * All O(N), all indexed by body index, all grown on the heap to g_nbodies —
+ * the same pattern physics.c's CSR member pools and render.c's scratch buffers
+ * use. These were fixed [MAX_BODIES] (128) arrays, which capped collision to
+ * the first 128 body *indices* rather than the 128 nearest the camera: in a
+ * ~16k-body galaxy, collisions simply did not happen for almost every body,
+ * and did not follow the viewer.
+ *
+ * Growing them is cheap because they are linear, not quadratic: at 16k bodies
+ * the whole set below is ~1.6 MB. The quadratic table that made "just raise
+ * MAX_BODIES" impossible was the pair cooldown, which now lives in
+ * paircache.c as a sparse map. */
+static RadiusTransition *s_radius_fx   = NULL;   /* [cap]    */
+static int              *s_absorbed_by = NULL;   /* [cap]    */
+static unsigned char    *s_system_dirty= NULL;   /* [cap]    */
+static double           *s_system_hot  = NULL;   /* [cap]    */
+static double          (*s_pos_before)[3] = NULL;/* [cap][3] */
+static double          (*s_vel_before)[3] = NULL;/* [cap][3] */
+static int               s_cap = 0;              /* slots allocated */
+
+/* Simulated seconds since collision_reset(). The pair cooldowns are absolute
+ * times on this clock (see paircache.h). */
+static double s_clock = 0.0;
+
+static inline int cnb(void);   /* live body count; defined below */
+
+/* ── system membership, CSR ────────────────────────────────────────────────
+ * Which bodies belong to which root star. This was members[MAX_BODIES]
+ * [MAX_BODIES] — a dense root x member matrix, 1 GB at galaxy scale and 99.9%
+ * empty, since a star system holds a handful of bodies out of thousands.
+ *
+ * Compressed sparse row instead: s_mem_list holds every body grouped by root,
+ * and s_mem_start[r]..s_mem_start[r+1] delimits root r's slice. Memory is O(N).
+ * Bodies are appended in ascending index order, so each slice stays sorted —
+ * the pair loops below rely on that for their `bi > ai` half-matrix walk.
+ *
+ * Membership is topology, not geometry: it changes only when a body is added,
+ * dies, or is re-parented, so it is cached and rebuilt on demand rather than
+ * every frame. */
+static int *s_mem_start = NULL;   /* [cap + 1] */
+static int *s_mem_list  = NULL;   /* [cap]     */
+static int *s_mem_fill  = NULL;   /* [cap] scratch fill cursor */
+static double        *s_sys_radius   = NULL;  /* [cap] */
+/* "Already resolved this pass" marks. Stamped rather than cleared: clearing an
+ * N-entry array per call was fine when N was 128 on the stack, but
+ * collision_step_system() runs once per system per outer step — thousands of
+ * times a frame — so an O(N) clear there is O(systems x bodies) of pure memset.
+ * A body is resolved iff its stamp equals the current generation, so starting a
+ * new pass is one increment. */
+static unsigned int *s_resolved     = NULL;  /* [cap] generation stamps */
+static unsigned int  s_resolve_gen  = 0;
+static int           *s_active_roots = NULL;  /* [cap] */
+static unsigned int  *s_sysrad_stamp = NULL;  /* [cap] see sysrad() */
+static double        *s_shell_lo     = NULL;  /* [cap] see shell_of() */
+static double        *s_shell_hi     = NULL;  /* [cap] */
+static unsigned int  *s_shell_stamp  = NULL;  /* [cap] */
+static unsigned int   s_shell_gen    = 0;
+static unsigned int   s_sysrad_gen   = 0;
+static int s_scratch_cap = 0;
+static int s_mem_valid   = 0;
+static int s_mem_n       = 0;     /* body count the CSR was built for */
+
+static void invalidate_membership(void) { s_mem_valid = 0; }
+
+static int ensure_scratch(int n)
 {
-    return g_nbodies < MAX_BODIES ? g_nbodies : MAX_BODIES;
+    if (n <= s_scratch_cap) return 1;
+    int cap = s_scratch_cap ? s_scratch_cap : 128;
+    while (cap < n) cap *= 2;
+
+    int *ms = realloc(s_mem_start, (size_t)(cap + 1) * sizeof(int));
+    int *ml = realloc(s_mem_list,  (size_t)cap * sizeof(int));
+    int *mf = realloc(s_mem_fill,  (size_t)cap * sizeof(int));
+    double *sr = realloc(s_sys_radius, (size_t)cap * sizeof(double));
+    unsigned int  *rv = realloc(s_resolved, (size_t)cap * sizeof(unsigned int));
+    int *ar = realloc(s_active_roots, (size_t)cap * sizeof(int));
+    unsigned int *ss = realloc(s_sysrad_stamp, (size_t)cap * sizeof(unsigned int));
+    double *slo = realloc(s_shell_lo, (size_t)cap * sizeof(double));
+    double *shi = realloc(s_shell_hi, (size_t)cap * sizeof(double));
+    unsigned int *sst = realloc(s_shell_stamp, (size_t)cap * sizeof(unsigned int));
+    if (ms) s_mem_start = ms;
+    if (ml) s_mem_list  = ml;
+    if (mf) s_mem_fill  = mf;
+    if (sr) s_sys_radius = sr;
+    if (rv) s_resolved   = rv;
+    if (ar) s_active_roots = ar;
+    if (ss) s_sysrad_stamp  = ss;
+    if (slo) s_shell_lo    = slo;
+    if (shi) s_shell_hi    = shi;
+    if (sst) s_shell_stamp = sst;
+    if (!ms || !ml || !mf || !sr || !rv || !ar || !ss || !slo || !shi || !sst) return 0;
+    memset(s_shell_stamp + s_scratch_cap, 0,
+           (size_t)(cap - s_scratch_cap) * sizeof(unsigned int));
+    memset(s_sysrad_stamp + s_scratch_cap, 0,
+           (size_t)(cap - s_scratch_cap) * sizeof(unsigned int));
+
+    s_scratch_cap = cap;
+    invalidate_membership();
+    return 1;
+}
+
+/* Rebuild the CSR if stale. Two passes: count members per root, prefix-sum into
+ * offsets, then place each body. O(N). */
+static int ensure_membership(void)
+{
+    int n = cnb();
+    if (n <= 0) return 0;
+    if (!ensure_scratch(n)) return 0;
+    if (s_mem_valid && s_mem_n == n) return 1;
+
+    for (int i = 0; i <= n; i++) s_mem_start[i] = 0;
+
+    for (int i = 0; i < n; i++) {
+        if (!g_bodies[i].alive) continue;
+        int root = body_root_star(i);
+        if (root < 0 || root >= n) continue;
+        s_mem_start[root + 1]++;
+    }
+    for (int i = 0; i < n; i++) s_mem_start[i + 1] += s_mem_start[i];
+    for (int i = 0; i < n; i++) s_mem_fill[i] = s_mem_start[i];
+
+    for (int i = 0; i < n; i++) {
+        if (!g_bodies[i].alive) continue;
+        int root = body_root_star(i);
+        if (root < 0 || root >= n) continue;
+        s_mem_list[s_mem_fill[root]++] = i;
+    }
+
+    s_mem_valid = 1;
+    s_mem_n = n;
+    return 1;
+}
+
+static inline int mem_count(int root) { return s_mem_start[root + 1] - s_mem_start[root]; }
+static inline int mem_at(int root, int k) { return s_mem_list[s_mem_start[root] + k]; }
+
+/* Begin a new resolve pass. Wrapping to 0 would alias stale marks, so on
+ * wrap the table is cleared once and the generation restarts at 1. */
+static void resolve_pass_begin(void)
+{
+    if (++s_resolve_gen == 0) {
+        if (s_resolved && s_scratch_cap > 0)
+            memset(s_resolved, 0, (size_t)s_scratch_cap * sizeof(unsigned int));
+        s_resolve_gen = 1;
+    }
+}
+static inline int  is_resolved(int i)  { return s_resolved[i] == s_resolve_gen; }
+static inline void set_resolved(int i) { s_resolved[i] = s_resolve_gen; }
+
+/* ── live sets ─────────────────────────────────────────────────────────────
+ * The per-frame sweeps this replaces each walked every body to find the few
+ * that had anything to do: an impact radius still shrinking, a system still
+ * hot, a system still dirty. At 128 entries that was free; at 16k it is four
+ * full scans a frame to service a handful of live items.
+ *
+ * A live set is an *accelerator*, not the truth. The flags (`.active`,
+ * s_system_hot > 0, s_system_dirty) stay authoritative; the list is a superset
+ * that may hold stale entries, and iteration skips and compacts them. That
+ * asymmetry is deliberate — a missed list insertion would silently drop an
+ * effect, so every producer appends, and only the consumer removes. */
+typedef struct { int *idx; unsigned char *in; int n, cap; } LiveSet;
+
+static LiveSet s_fx_live;      /* bodies with an active radius transition */
+static LiveSet s_hot_live;     /* roots with s_system_hot > 0            */
+static LiveSet s_dirty_live;   /* roots with s_system_dirty              */
+
+static void live_add(LiveSet *L, int i, int need_cap)
+{
+    if (i < 0) return;
+    if (need_cap > L->cap) {
+        int cap = L->cap ? L->cap : 64;
+        while (cap < need_cap) cap *= 2;
+        int *ix = realloc(L->idx, (size_t)cap * sizeof(int));
+        unsigned char *in = realloc(L->in, (size_t)cap * sizeof(unsigned char));
+        if (ix) L->idx = ix;
+        if (in) L->in  = in;
+        if (!ix || !in) return;
+        memset(L->in + L->cap, 0, (size_t)(cap - L->cap) * sizeof(unsigned char));
+        L->cap = cap;
+    }
+    if (i >= L->cap || L->in[i]) return;
+    L->in[i] = 1;
+    L->idx[L->n++] = i;
+}
+
+static void live_clear(LiveSet *L)
+{
+    for (int k = 0; k < L->n; k++) L->in[L->idx[k]] = 0;
+    L->n = 0;
+}
+
+
+/* Drop entry k (swap with the last). Caller must not advance its cursor. */
+static void live_drop(LiveSet *L, int k)
+{
+    L->in[L->idx[k]] = 0;
+    L->idx[k] = L->idx[--L->n];
+}
+
+/* ── lazy system radii ─────────────────────────────────────────────────────
+ * The bounding radius of a system is geometry: it changes every step. It was
+ * initialised for every body in the universe each frame and computed for every
+ * root, when only the handful of roots actually tested need it. Stamped and
+ * computed on demand instead. */
+static double current_contact_radius(int body_idx);   /* defined below */
+
+/* ── orbital shells (stage 2) ──────────────────────────────────────────────
+ * A body bound to its root stays inside a radial shell [periapsis, apoapsis].
+ * Two bodies orbiting the same root can only ever touch if their shells
+ * overlap — Mercury and Neptune have no future in which they collide, and no
+ * amount of swept-sphere arithmetic per frame will discover that. The shell is
+ * O(1) to compute from the osculating elements and rejects the pair before any
+ * of the expensive work.
+ *
+ * Conservatism is the whole point, so the shell is widened three ways:
+ *   - by the body's contact radius, since contact is surface-to-surface;
+ *   - by |v| * dt, bounding how far this step's motion can carry it;
+ *   - unconditionally, for an unbound (hyperbolic, a <= 0) orbit, which has no
+ *     apoapsis and is never rejected.
+ * Elements are osculating, so they drift under perturbation — but they are
+ * recomputed from live state every step, and the widening covers one step of
+ * motion, which is exactly the interval the caller is testing. */
+static void shell_of(int i, int root, double dt, double *lo, double *hi)
+{
+    if (i < 0 || i >= s_scratch_cap) { *lo = 0.0; *hi = 1e300; return; }
+    if (s_shell_stamp[i] == s_shell_gen) { *lo = s_shell_lo[i]; *hi = s_shell_hi[i]; return; }
+
+    double r[3], v[3];
+    for (int k = 0; k < 3; k++) {
+        r[k] = g_bodies[i].pos[k] - g_bodies[root].pos[k];
+        v[k] = g_bodies[i].vel[k] - g_bodies[root].vel[k];
+    }
+    double rm = sqrt(r[0]*r[0] + r[1]*r[1] + r[2]*r[2]);
+    double v2 = v[0]*v[0] + v[1]*v[1] + v[2]*v[2];
+    double vm = sqrt(v2);
+    double mu = g_laws.G * (g_bodies[root].mass + g_bodies[i].mass);
+    double pad = current_contact_radius(i) + vm * (dt > 0.0 ? dt : 0.0);
+
+    double slo = 0.0, shi = 1e300;
+    if (rm > 0.0 && mu > 0.0) {
+        double inv_a = 2.0 / rm - v2 / mu;
+        if (inv_a > 0.0) {                    /* bound: a > 0, has an apoapsis */
+            double a = 1.0 / inv_a;
+            double rv = r[0]*v[0] + r[1]*v[1] + r[2]*v[2];
+            double ex[3];
+            for (int k = 0; k < 3; k++)
+                ex[k] = ((v2 - mu/rm) * r[k] - rv * v[k]) / mu;
+            double e = sqrt(ex[0]*ex[0] + ex[1]*ex[1] + ex[2]*ex[2]);
+            if (e < 1.0) {
+                slo = a * (1.0 - e) - pad;
+                shi = a * (1.0 + e) + pad;
+                if (slo < 0.0) slo = 0.0;
+            }
+        }
+    }
+    /* A non-inverse-square force law has no Kepler ellipse to speak of, so the
+     * shell must not be trusted; the universe's laws are editable at runtime. */
+    if (g_laws.force_exp != 2.0 || g_laws.lambda != 0.0) { slo = 0.0; shi = 1e300; }
+
+    s_shell_lo[i] = slo; s_shell_hi[i] = shi; s_shell_stamp[i] = s_shell_gen;
+    *lo = slo; *hi = shi;
+}
+
+/* 1 if a and b (same root) could possibly touch this step. */
+static int shells_may_touch(int a, int b, int root, double dt)
+{
+    double alo, ahi, blo, bhi;
+    shell_of(a, root, dt, &alo, &ahi);
+    shell_of(b, root, dt, &blo, &bhi);
+    return !(ahi < blo || bhi < alo);
+}
+
+static double sysrad(int root)
+{
+    if (root < 0 || root >= s_scratch_cap) return SYSTEM_MARGIN_AU * AU;
+    if (s_sysrad_stamp[root] == s_sysrad_gen) return s_sys_radius[root];
+
+    double r = SYSTEM_MARGIN_AU * AU;
+    int nm = mem_count(root);
+    for (int k = 0; k < nm; k++) {
+        int i = mem_at(root, k);
+        if (!g_bodies[i].alive) continue;
+        double dx = g_bodies[i].pos[0] - g_bodies[root].pos[0];
+        double dy = g_bodies[i].pos[1] - g_bodies[root].pos[1];
+        double dz = g_bodies[i].pos[2] - g_bodies[root].pos[2];
+        double d = sqrt(dx*dx + dy*dy + dz*dz) + current_contact_radius(i);
+        if (d > r) r = d;
+    }
+    s_sys_radius[root]   = r;
+    s_sysrad_stamp[root] = s_sysrad_gen;
+    return r;
+}
+
+/* Grow the per-body tables to hold at least `n` slots, zeroing the new tail.
+ * Returns 0 if allocation failed, in which case the caller must not index past
+ * s_cap — collision degrades to the bodies it can already track rather than
+ * crashing. */
+static int ensure_cap(int n)
+{
+    if (n <= s_cap) return 1;
+
+    int cap = s_cap ? s_cap : 128;
+    while (cap < n) cap *= 2;
+
+    RadiusTransition *rf = realloc(s_radius_fx,    (size_t)cap * sizeof(*rf));
+    int              *ab = realloc(s_absorbed_by,  (size_t)cap * sizeof(*ab));
+    unsigned char    *sd = realloc(s_system_dirty, (size_t)cap * sizeof(*sd));
+    double           *sh = realloc(s_system_hot,   (size_t)cap * sizeof(*sh));
+    double         (*pb)[3] = realloc(s_pos_before, (size_t)cap * sizeof(*pb));
+    double         (*vb)[3] = realloc(s_vel_before, (size_t)cap * sizeof(*vb));
+
+    /* Keep whatever succeeded; a partial failure must not leak or dangle. */
+    if (rf) s_radius_fx    = rf;
+    if (ab) s_absorbed_by  = ab;
+    if (sd) s_system_dirty = sd;
+    if (sh) s_system_hot   = sh;
+    if (pb) s_pos_before   = pb;
+    if (vb) s_vel_before   = vb;
+    if (!rf || !ab || !sd || !sh || !pb || !vb) return 0;
+
+    memset(s_radius_fx    + s_cap, 0, (size_t)(cap - s_cap) * sizeof(*rf));
+    memset(s_system_dirty + s_cap, 0, (size_t)(cap - s_cap) * sizeof(*sd));
+    memset(s_system_hot   + s_cap, 0, (size_t)(cap - s_cap) * sizeof(*sh));
+    memset(s_pos_before   + s_cap, 0, (size_t)(cap - s_cap) * sizeof(*pb));
+    memset(s_vel_before   + s_cap, 0, (size_t)(cap - s_cap) * sizeof(*vb));
+    for (int i = s_cap; i < cap; i++) s_absorbed_by[i] = -1;
+
+    s_cap = cap;
+    return 1;
+}
+
+/* Effective body count for every collision loop and index guard. The tables are
+ * grown to g_nbodies, so this is simply the live body count — there is no
+ * MAX_BODIES cap any more.
+ *
+ * Collision follows the camera without any camera code: only systems inside the
+ * active region are integrated, so only those can develop an encounter and set
+ * s_system_dirty. Frozen systems are motionless and stay clean, and the dirty
+ * gate in collision_step turns "every body in the galaxy" into "the handful
+ * near the viewer that are actually about to touch". */
+static inline int cnb(void)   /* forward-declared above */
+{
+    int n = g_nbodies;
+    if (n > s_cap && !ensure_cap(n)) return s_cap;   /* OOM: stay in bounds */
+    return n;
 }
 
 static int body_is_merge_target(int idx);
@@ -167,24 +499,32 @@ static void   bh_tidal_pass(int hole, double dt);
 
 static void mark_system_dirty(int root, double hot_duration)
 {
-    if (root < 0 || root >= MAX_BODIES) return;
+    if (root < 0 || root >= cnb()) return;
     s_system_dirty[root] = 1;
+    live_add(&s_dirty_live, root, cnb());
     if (hot_duration > s_system_hot[root]) s_system_hot[root] = hot_duration;
+    if (s_system_hot[root] > 0.0) live_add(&s_hot_live, root, cnb());
 }
 
 void collision_reset(void)
 {
     memset(s_impacts, 0, sizeof(s_impacts));
     memset(s_perm_scars, 0, sizeof(s_perm_scars));
-    memset(s_radius_fx, 0, sizeof(s_radius_fx));
     memset(s_merges, 0, sizeof(s_merges));
-    for (int i = 0; i < MAX_BODIES; i++) s_absorbed_by[i] = -1;
     memset(s_particles, 0, sizeof(s_particles));
-    memset(s_pair_next, 0, sizeof(s_pair_next));
-    memset(s_system_dirty, 0, sizeof(s_system_dirty));
-    memset(s_system_hot, 0, sizeof(s_system_hot));
-    memset(s_pos_before, 0, sizeof(s_pos_before));
-    memset(s_vel_before, 0, sizeof(s_vel_before));
+    paircache_reset();
+    live_clear(&s_fx_live);
+    live_clear(&s_hot_live);
+    live_clear(&s_dirty_live);
+    s_clock = 0.0;
+    if (s_cap > 0) {
+        memset(s_radius_fx,    0, (size_t)s_cap * sizeof(*s_radius_fx));
+        memset(s_system_dirty, 0, (size_t)s_cap * sizeof(*s_system_dirty));
+        memset(s_system_hot,   0, (size_t)s_cap * sizeof(*s_system_hot));
+        memset(s_pos_before,   0, (size_t)s_cap * sizeof(*s_pos_before));
+        memset(s_vel_before,   0, (size_t)s_cap * sizeof(*s_vel_before));
+        for (int i = 0; i < s_cap; i++) s_absorbed_by[i] = -1;
+    }
     s_particle_rng = 0x1234abcdu;
     s_perm_scar_stamp = 1u;
     s_pos_before_valid = 0;
@@ -192,7 +532,7 @@ void collision_reset(void)
 
 void collision_snapshot_positions(void)
 {
-    int n = cnb() < MAX_BODIES ? cnb() : MAX_BODIES;
+    int n = cnb();
     for (int i = 0; i < n; i++) {
         s_pos_before[i][0] = g_bodies[i].pos[0];
         s_pos_before[i][1] = g_bodies[i].pos[1];
@@ -206,12 +546,12 @@ void collision_snapshot_positions(void)
 
 void collision_on_body_added(int body_idx)
 {
-    if (body_idx >= 0 && body_idx < MAX_BODIES) {
+    if (body_idx >= 0 && body_idx < cnb()) {
         memset(&s_radius_fx[body_idx], 0, sizeof(s_radius_fx[body_idx]));
-        for (int i = 0; i < MAX_BODIES; i++) {
-            s_pair_next[body_idx][i] = 0.0;
-            s_pair_next[i][body_idx] = 0.0;
-        }
+        /* A recycled index must not inherit the previous occupant's cooldowns
+         * (this is what clearing the dense row and column used to do). */
+        paircache_forget_body(body_idx);
+        invalidate_membership();
         s_system_dirty[body_idx] = 0;
         s_system_hot[body_idx] = 0.0;
         if (body_idx < cnb()) {
@@ -243,15 +583,23 @@ int collision_system_maybe_has_encounter(int root, double dt)
 {
     if (root < 0 || root >= cnb() || !g_bodies[root].alive) return 0;
     if (dt <= 0.0) return 0;
+    if (!ensure_membership()) return 0;
 
-    for (int i = 0; i < cnb(); i++) {
+    /* Members only. This ran as a double loop over every body in the universe
+     * with a body_root_star() != root filter inside — ~128M rejected iterations
+     * per system per frame at galaxy scale, once per active system. It is
+     * called from main.c's hot/cold classifier, outside collision_step(), which
+     * is how it stayed out of the collision profile. */
+    int nm = mem_count(root);
+    for (int ai = 0; ai < nm; ai++) {
+        int i = mem_at(root, ai);
         if (!body_is_primary(i)) continue;
-        if (body_root_star(i) != root) continue;
-        for (int j = i + 1; j < cnb(); j++) {
+        for (int bj = ai + 1; bj < nm; bj++) {
+            int j = mem_at(root, bj);
             double rx, ry, rz, dist, vx, vy, vz, vr, rsum, gap;
             if (!body_is_primary(j)) continue;
-            if (body_root_star(j) != root) continue;
             if (body_is_merge_impactor(i) || body_is_merge_impactor(j)) continue;
+            if (!shells_may_touch(i, j, root, dt)) continue;
 
             rx = g_bodies[j].pos[0] - g_bodies[i].pos[0];
             ry = g_bodies[j].pos[1] - g_bodies[i].pos[1];
@@ -275,11 +623,11 @@ int collision_system_maybe_has_encounter(int root, double dt)
     }
 
     if (g_bodies[root].is_star) {
-        for (int i = 0; i < cnb(); i++) {
+        for (int k = 0; k < nm; k++) {
+            int i = mem_at(root, k);
             double rx, ry, rz, dist, glow_dist;
             if (i == root) continue;
             if (!g_bodies[i].alive || g_bodies[i].is_star) continue;
-            if (body_root_star(i) != root) continue;
             if (body_is_in_merge(i)) continue;
 
             rx = g_bodies[i].pos[0] - g_bodies[root].pos[0];
@@ -298,7 +646,8 @@ int collision_system_maybe_has_encounter(int root, double dt)
      * anything near (or already being shredded by) the hole. Covers stars too,
      * which the star-glow loop above skips. */
     if (g_bodies[root].is_black_hole) {
-        for (int i = 0; i < cnb(); i++) {
+        for (int k = 0; k < nm; k++) {
+            int i = mem_at(root, k);
             if (!tidal_is_victim(root, i)) continue;
             if (g_bodies[i].tidal_frac > 0.0f) return 1;
             double rx = g_bodies[i].pos[0] - g_bodies[root].pos[0];
@@ -326,17 +675,20 @@ int collision_system_close_approach_subdivide(int root, double dt_outer)
 {
     if (root < 0 || root >= cnb() || !g_bodies[root].alive) return 1;
     if (dt_outer <= 0.0) return 1;
+    if (!ensure_membership()) return 1;
 
     double min_tau = 1e30;
+    int nm = mem_count(root);
 
-    /* Primary–primary pairs */
-    for (int i = 0; i < cnb(); i++) {
+    /* Primary–primary pairs, members only (see maybe_has_encounter). */
+    for (int ai = 0; ai < nm; ai++) {
+        int i = mem_at(root, ai);
         if (!body_is_primary(i)) continue;
-        if (body_root_star(i) != root) continue;
-        for (int j = i + 1; j < cnb(); j++) {
+        for (int bj = ai + 1; bj < nm; bj++) {
+            int j = mem_at(root, bj);
             if (!body_is_primary(j)) continue;
-            if (body_root_star(j) != root) continue;
             if (body_is_merge_impactor(i) || body_is_merge_impactor(j)) continue;
+            if (!shells_may_touch(i, j, root, dt_outer)) continue;
 
             double rx = g_bodies[j].pos[0] - g_bodies[i].pos[0];
             double ry = g_bodies[j].pos[1] - g_bodies[i].pos[1];
@@ -361,10 +713,10 @@ int collision_system_close_approach_subdivide(int root, double dt_outer)
 
     /* Body approaching the star */
     if (g_bodies[root].is_star) {
-        for (int i = 0; i < cnb(); i++) {
+        for (int k = 0; k < nm; k++) {
+            int i = mem_at(root, k);
             if (i == root) continue;
             if (!g_bodies[i].alive || g_bodies[i].is_star) continue;
-            if (body_root_star(i) != root) continue;
             if (body_is_in_merge(i)) continue;
 
             double rx = g_bodies[i].pos[0] - g_bodies[root].pos[0];
@@ -901,8 +1253,9 @@ static double current_visual_radius(int body_idx, double physical_radius)
     RadiusTransition *fx;
     double t;
 
-    if (body_idx < 0 || body_idx >= MAX_BODIES) return physical_radius;
+    if (body_idx < 0 || body_idx >= cnb()) return physical_radius;
     fx = &s_radius_fx[body_idx];
+    live_add(&s_fx_live, body_idx, cnb());
     if (!fx->active || fx->duration <= 0.0) return physical_radius;
 
     t = fx->age / fx->duration;
@@ -1215,8 +1568,9 @@ static void finish_radius_transition(int body_idx)
 {
     RadiusTransition *fx;
 
-    if (body_idx < 0 || body_idx >= MAX_BODIES) return;
+    if (body_idx < 0 || body_idx >= cnb()) return;
     fx = &s_radius_fx[body_idx];
+    live_add(&s_fx_live, body_idx, cnb());
     if (!fx->active) return;
     fx->age = fx->duration;
     fx->active = 0;
@@ -1228,8 +1582,9 @@ static void start_radius_transition(int body_idx, double old_radius,
     RadiusTransition *fx;
     double start_radius;
     int had_active_transition;
-    if (body_idx < 0 || body_idx >= MAX_BODIES) return;
+    if (body_idx < 0 || body_idx >= cnb()) return;
     fx = &s_radius_fx[body_idx];
+    live_add(&s_fx_live, body_idx, cnb());
     had_active_transition = fx->active;
     start_radius = current_visual_radius(body_idx, old_radius);
     fx->active = 1;
@@ -1412,13 +1767,15 @@ static void finalize_absorb_body(int target, int impactor, double rel_speed,
             g_bodies[i].parent = body_root_star(target);
         else
             g_bodies[i].parent = target;
+        invalidate_membership();   /* re-parenting moves a body between systems */
         labels_add_body(i);
     }
 
     rings_on_body_absorbed(target, impactor);
-    if (impactor >= 0 && impactor < MAX_BODIES)
+    if (impactor >= 0 && impactor < cnb())
         s_absorbed_by[impactor] = target;
     b->alive = 0;
+    invalidate_membership();   /* CSR caches root -> members; this changes it */
     b->mass = 0.0;
     a->trail_emitting = 1;
     physics_mark_timestep_dirty();   /* impactor removed — rebuild timestep model */
@@ -2100,7 +2457,7 @@ static int classify_collision(int a, int b, double rel_speed)
     return COLLISION_VIS_CRATER;
 }
 
-static int systems_may_interact(int root_a, int root_b, const double system_radius[MAX_BODIES])
+static int systems_may_interact(int root_a, int root_b)
 {
     double rel_p[3];
     double rel_q[3];
@@ -2114,7 +2471,7 @@ static int systems_may_interact(int root_a, int root_b, const double system_radi
     if (root_a < 0 || root_b < 0) return 0;
     if (!g_bodies[root_a].alive || !g_bodies[root_b].alive) return 0;
 
-    rr = system_radius[root_a] + system_radius[root_b];
+    rr = sysrad(root_a) + sysrad(root_b);
 
     rel_q[0] = g_bodies[root_b].pos[0] - g_bodies[root_a].pos[0];
     rel_q[1] = g_bodies[root_b].pos[1] - g_bodies[root_a].pos[1];
@@ -2377,26 +2734,41 @@ static void absorb_body(int target, int impactor, double rel_speed,
 
 void collision_step_system(int root, double dt)
 {
-    int resolved[MAX_BODIES] = {0};
-
     if (dt <= 0.0) return;
     if (root < 0 || root >= cnb() || !g_bodies[root].alive) return;
+    if (!ensure_membership()) return;
 
-    for (int ai = 0; ai < cnb(); ai++) {
-        int a = ai;
-        if (!body_is_primary(a) || resolved[a] ||
-            body_is_merge_impactor(a) || body_root_star(a) != root)
+    /* Walk this system's members, not every body in the universe. The scan used
+     * to be a full O(N^2) double loop over all bodies with a
+     * body_root_star() != root filter inside — at galaxy scale that is ~128M
+     * rejected iterations per system per frame, for a system of maybe eight
+     * bodies. */
+    int nm = mem_count(root);
+    resolve_pass_begin();
+    /* collision_step_system() runs from the physics loop, outside
+     * collision_step(), so it refreshes the shells it is about to read. */
+    if (++s_shell_gen == 0) {
+        if (s_shell_stamp && s_scratch_cap > 0)
+            memset(s_shell_stamp, 0, (size_t)s_scratch_cap * sizeof(unsigned int));
+        s_shell_gen = 1;
+    }
+
+    for (int ai = 0; ai < nm; ai++) {
+        int a = mem_at(root, ai);
+        if (!body_is_primary(a) || is_resolved(a) || body_is_merge_impactor(a))
             continue;
 
-        for (int bi = ai + 1; bi < cnb(); bi++) {
-            int b = bi;
+        for (int bi = ai + 1; bi < nm; bi++) {
+            int b = mem_at(root, bi);
             double speed = 0.0;
             double hit_t = 0.0;
             int target, impactor;
             int a_is_merge_target, b_is_merge_target, keep_target_open;
 
-            if (!body_is_primary(b) || resolved[b] ||
-                body_is_merge_impactor(b) || body_root_star(b) != root)
+            if (!body_is_primary(b) || is_resolved(b) || body_is_merge_impactor(b))
+                continue;
+
+            if (!shells_may_touch(a, b, root, dt))
                 continue;
 
             if (!swept_spheres_collide(a, b, dt, &speed, &hit_t))
@@ -2414,8 +2786,8 @@ void collision_step_system(int root, double dt)
 
             absorb_body(target, impactor, speed, hit_t, dt);
             keep_target_open = body_is_merge_target(target);
-            if (!keep_target_open) resolved[target] = 1;
-            resolved[impactor] = 1;
+            if (!keep_target_open) set_resolved(target);
+            set_resolved(impactor);
             if (impactor == a) break;
         }
     }
@@ -2426,34 +2798,35 @@ void collision_step_system(int root, double dt)
         bh_tidal_pass(root, dt);
 
     if (g_bodies[root].is_star) {
-        for (int i = 0; i < cnb(); i++) {
+        int nm2 = mem_count(root);
+        for (int k = 0; k < nm2; k++) {
+            int i = mem_at(root, k);
             double speed = 0.0;
             double hit_t = 0.0;
 
             if (i == root) continue;
             if (!g_bodies[i].alive || g_bodies[i].is_star) continue;
-            if (resolved[i] || body_root_star(i) != root) continue;
+            if (is_resolved(i)) continue;
             if (body_is_in_merge(i)) continue;
             if (!swept_spheres_collide(root, i, dt, &speed, &hit_t))
                 continue;
 
             absorb_body_into_star(root, i, speed, hit_t, dt);
-            resolved[i] = 1;
+            set_resolved(i);
         }
     }
 }
 
 void collision_step(double dt)
 {
-    double system_radius[MAX_BODIES];
-    int resolved[MAX_BODIES] = {0};
-    /* 64 KB — kept off the per-frame stack frame; written before it is read
-     * (bounded by member_count), and collision_step is single-threaded. */
-    static int members[MAX_BODIES][MAX_BODIES];
-    int member_count[MAX_BODIES] = {0};
-    int active_roots[MAX_BODIES];
+    /* Heap scratch, bound after ensure_membership() below. These were
+     * [MAX_BODIES] stack arrays, which is what pinned collision to the first
+     * 128 body indices. */
+    int           *active_roots  = NULL;
     int active_root_count = 0;
     int any_dirty = 0;
+
+    s_clock += dt > 0.0 ? dt : 0.0;
 
     update_merge_events(dt);
 
@@ -2492,17 +2865,21 @@ void collision_step(double dt)
             !g_bodies[s_impacts[i].body].alive)
             s_impacts[i].active = 0;
     }
-    for (int i = 0; i < MAX_BODIES; i++) {
-        if (!s_radius_fx[i].active) continue;
-        if (i >= cnb() || !g_bodies[i].alive) {
-            s_radius_fx[i].active = 0;
+    for (int k = 0; k < s_fx_live.n; ) {
+        int i = s_fx_live.idx[k];
+        if (i >= cnb() || !s_radius_fx[i].active || !g_bodies[i].alive) {
+            if (i < cnb()) s_radius_fx[i].active = 0;
+            live_drop(&s_fx_live, k);
             continue;
         }
         s_radius_fx[i].age += dt;
         if (s_radius_fx[i].age >= s_radius_fx[i].duration) {
             s_radius_fx[i].active = 0;
             s_radius_fx[i].age = s_radius_fx[i].duration;
+            live_drop(&s_fx_live, k);
+            continue;
         }
+        k++;
     }
 
     if (dt <= 0.0) return;
@@ -2517,31 +2894,57 @@ void collision_step(double dt)
         }
     }
 
-    for (int i = 0; i < MAX_BODIES; i++) {
-        if (s_system_dirty[i]) { any_dirty = 1; break; }
-    }
+    for (int k = 0; k < s_dirty_live.n && !any_dirty; k++)
+        if (s_system_dirty[s_dirty_live.idx[k]]) any_dirty = 1;
     if (!any_dirty) return;
 
-    for (int i = 0; i < MAX_BODIES; i++) {
-        system_radius[i] = SYSTEM_MARGIN_AU * AU;
+    if (!ensure_membership()) return;
+    active_roots = s_active_roots;
+    resolve_pass_begin();
+
+    /* System radii are geometry — they change every step — but only the few
+     * roots actually tested need one, so they are stamped and computed on
+     * demand by sysrad(). Bumping the generation invalidates them all in O(1),
+     * replacing what was a full initialise-every-body pass plus an eager
+     * compute for every root in the active region. */
+    if (++s_sysrad_gen == 0) {
+        if (s_sysrad_stamp && s_scratch_cap > 0)
+            memset(s_sysrad_stamp, 0, (size_t)s_scratch_cap * sizeof(unsigned int));
+        s_sysrad_gen = 1;
     }
-    for (int i = 0; i < cnb(); i++) {
-        if (!g_bodies[i].alive) continue;
-        int root = body_root_star(i);
-        if (root < 0 || root >= cnb()) continue;
-        if (member_count[root] == 0 && active_root_count < MAX_BODIES)
-            active_roots[active_root_count++] = root;
-        if (member_count[root] < MAX_BODIES)
-            members[root][member_count[root]++] = i;
-        double dx = g_bodies[i].pos[0] - g_bodies[root].pos[0];
-        double dy = g_bodies[i].pos[1] - g_bodies[root].pos[1];
-        double dz = g_bodies[i].pos[2] - g_bodies[root].pos[2];
-        double d = sqrt(dx*dx + dy*dy + dz*dz) + current_contact_radius(i);
-        if (d > system_radius[root]) system_radius[root] = d;
+    if (++s_shell_gen == 0) {
+        if (s_shell_stamp && s_scratch_cap > 0)
+            memset(s_shell_stamp, 0, (size_t)s_scratch_cap * sizeof(unsigned int));
+        s_shell_gen = 1;
     }
 
-    for (int root = 0; root < cnb(); root++) {
-        if (!s_system_dirty[root]) continue;
+    /* Candidate roots for cross-system checks. Listing every root in the
+     * universe here would be correct but quadratic in practice: each dirty
+     * system then rescans all ~9.7k systems, and the old [MAX_BODIES] array was
+     * silently capping that list at 128. Only systems inside the active region
+     * are integrated, so only those can be dirty or be hit by a dirty
+     * neighbour — ask physics for exactly that set. */
+    {
+        double cam_m[3] = { g_cam.pos[0] * AU, g_cam.pos[1] * AU, g_cam.pos[2] * AU };
+        const int *sys = NULL;
+        int nsys = physics_active_systems(cam_m, g_settings.active_radius_ly * LY, &sys);
+        for (int k = 0; k < nsys && active_root_count < cnb(); k++) {
+            int root = physics_system_root(sys[k]);
+            if (root < 0 || root >= cnb()) continue;
+            if (mem_count(root) == 0) continue;
+            active_roots[active_root_count++] = root;
+        }
+    }
+
+    /* Expired cooldowns are reclaimed once per step so the sparse pair table
+     * tracks "pairs in cooldown now", not "pairs ever in cooldown". */
+    paircache_sweep(s_clock);
+
+    int dirty_n = s_dirty_live.n;   /* mark_system_dirty() appends during this
+                                     * loop; only walk what was already queued */
+    for (int dk = 0; dk < dirty_n && dk < s_dirty_live.n; dk++) {
+        int root = s_dirty_live.idx[dk];
+        if (root >= cnb() || !s_system_dirty[root]) continue;
         if (!g_bodies[root].alive) {
             s_system_dirty[root] = 0;
             s_system_hot[root] = 0.0;
@@ -2557,39 +2960,47 @@ void collision_step(double dt)
             if (other_root < 0 || other_root >= cnb()) continue;
             if (!g_bodies[other_root].alive) continue;
             if (other_root < root && s_system_dirty[other_root]) continue;
-            if (!systems_may_interact(root, other_root, system_radius)) continue;
+            if (!systems_may_interact(root, other_root)) continue;
 
-            na = member_count[root];
-            nb = member_count[other_root];
+            na = mem_count(root);
+            nb = mem_count(other_root);
             for (int ai = 0; ai < na && !root_had_collision; ai++) {
-                int a = members[root][ai];
-                if (!g_bodies[a].alive || g_bodies[a].is_star || resolved[a] || body_is_merge_impactor(a))
+                int a = mem_at(root, ai);
+                if (!g_bodies[a].alive || g_bodies[a].is_star || is_resolved(a) || body_is_merge_impactor(a))
                     continue;
                 for (int bi = 0; bi < nb; bi++) {
-                    int b = members[other_root][bi];
+                    int b = mem_at(other_root, bi);
                     int lo, hi;
                     double speed = 0.0;
                     double hit_t = 0.0;
 
                     if (same_root && bi <= ai) continue;
                     if (a == b) continue;
-                    if (!g_bodies[b].alive || g_bodies[b].is_star || resolved[b] || body_is_merge_impactor(b)) continue;
+                    if (!g_bodies[b].alive || g_bodies[b].is_star || is_resolved(b) || body_is_merge_impactor(b)) continue;
 
                     lo = a < b ? a : b;
                     hi = a < b ? b : a;
 
                     if (s_system_hot[root] > 0.0) {
-                        s_pair_next[lo][hi] = HOT_PAIR_DT;
-                    } else {
-                        s_pair_next[lo][hi] -= dt;
-                        if (s_pair_next[lo][hi] > 0.0) continue;
+                        paircache_arm(lo, hi, s_clock, HOT_PAIR_DT);
+                    } else if (paircache_remaining(lo, hi, s_clock) > 0.0) {
+                        continue;
+                    }
+
+                    /* Same-root only: shells are measured from their own root,
+                     * so comparing two systems' shells would need the root
+                     * separation folded in — systems_may_interact() already
+                     * covers that case at system granularity. */
+                    if (same_root && !shells_may_touch(a, b, root, dt)) {
+                        paircache_arm(lo, hi, s_clock, pair_check_dt(a, b));
+                        continue;
                     }
 
                     {
                         int hit = swept_spheres_collide(a, b, dt, &speed, &hit_t);
                         if (!hit) {
                             double pdt = pair_check_dt(a, b);
-                            s_pair_next[lo][hi] = pdt;
+                            paircache_arm(lo, hi, s_clock, pdt);
                             if (!same_root) {
                                 /* Cross-system approaching pair: keep both roots
                                  * dirty so the pair continues to be evaluated
@@ -2617,9 +3028,9 @@ void collision_step(double dt)
                         absorb_body(target, impactor, speed, hit_t, dt);
                         keep_target_open = body_is_merge_target(target);
                         if (!keep_target_open)
-                            resolved[target] = 1;
-                        resolved[impactor] = 1;
-                        s_pair_next[lo][hi] = HOT_PAIR_DT;
+                            set_resolved(target);
+                        set_resolved(impactor);
+                        paircache_arm(lo, hi, s_clock, HOT_PAIR_DT);
                         if (!keep_target_open) {
                             root_had_collision = 1;
                             break;
@@ -2645,7 +3056,7 @@ void collision_step(double dt)
 
             if (root_b < 0 || root_b >= cnb()) continue;
             if (!g_bodies[root_b].alive || !g_bodies[root_b].is_star) continue;
-            if (!systems_may_interact(root_a, root_b, system_radius)) continue;
+            if (!systems_may_interact(root_a, root_b)) continue;
             if (!swept_spheres_collide(root_a, root_b, dt, &speed, &hit_t))
                 continue;
 
@@ -2653,11 +3064,16 @@ void collision_step(double dt)
         }
     }
 
-    for (int i = 0; i < MAX_BODIES; i++) {
-        if (s_system_hot[i] > 0.0) {
-            s_system_hot[i] -= dt;
-            if (s_system_hot[i] < 0.0) s_system_hot[i] = 0.0;
+    for (int k = 0; k < s_hot_live.n; ) {
+        int i = s_hot_live.idx[k];
+        if (i >= cnb() || s_system_hot[i] <= 0.0) { live_drop(&s_hot_live, k); continue; }
+        s_system_hot[i] -= dt;
+        if (s_system_hot[i] <= 0.0) {
+            s_system_hot[i] = 0.0;
+            live_drop(&s_hot_live, k);
+            continue;
         }
+        k++;
     }
 }
 
@@ -2824,9 +3240,11 @@ int collision_body_has_active_merge(int body_idx)
     return body_is_in_merge(body_idx);
 }
 
+int collision_dirty_system_count(void) { return s_dirty_live.n; }
+
 int collision_body_absorbed_by(int body_idx)
 {
-    if (body_idx < 0 || body_idx >= MAX_BODIES) return -1;
+    if (body_idx < 0 || body_idx >= cnb()) return -1;
     return s_absorbed_by[body_idx];
 }
 
@@ -2840,7 +3258,7 @@ int collision_body_needs_dense_trail(int body_idx)
         return 1;
 
     root = body_root_star(body_idx);
-    if (root < 0 || root >= MAX_BODIES)
+    if (root < 0 || root >= cnb())
         return 0;
 
     return s_system_hot[root] > 0.0;
