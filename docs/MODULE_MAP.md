@@ -8,7 +8,7 @@ them as *approximate anchors*, then confirm with a quick `grep -n '<name>'`.
 **Regenerate after large edits** (from repo root):
 
 ```bash
-for f in render collision rings physics main universe; do
+for f in render/render sim/collision fx/rings sim/physics main core/universe; do
   echo "== src/$f.c =="; grep -nE '^(static +)?[A-Za-z_][A-Za-z0-9_ *]*[ *][a-z_][A-Za-z0-9_]*\(' src/$f.c \
     | grep -vE ';\s*$' | grep -vE '\b(if|for|while|switch|return|sizeof|else)\b'
 done
@@ -16,7 +16,7 @@ done
 
 ---
 
-## src/render.c (~3807 ln) — scale-continuous renderer
+## src/render/render.c (~3807 ln) — scale-continuous renderer
 | Line | Function | What |
 |-----|----------|------|
 | 441  | `clusters_render` | cluster/hybrid LOD aggregate draw |
@@ -31,7 +31,7 @@ done
 | 2009 | `render_frame` | **main per-frame draw** (huge) |
 | 3749 | `render_shutdown` | teardown |
 
-## src/collision.c (~2889 ln) — merges, craters, BH tidal disruption
+## src/sim/collision.c (~2889 ln) — merges, craters, BH tidal disruption
 | Line | Function | What |
 |-----|----------|------|
 | 175  | `collision_reset` | reset collision state |
@@ -50,7 +50,7 @@ done
 | 2732 | `collision_body_heat_glow` | render hook: heat color |
 | 2849 | `collision_particles` | render hook: particle export |
 
-## src/rings.c (~2193 ln) — ring particle discs
+## src/fx/rings.c (~2193 ln) — ring particle discs
 | Line | Function | What |
 |-----|----------|------|
 | 187–188 | `s_seed` / `s_randf` | **damage RNG — serial collision path only, never cold path** |
@@ -65,7 +65,7 @@ done
 | 2038 | `rings_render` | draw all discs |
 | 2052 | `rings_on_collision` | collision hook |
 
-## src/physics.c (~1931 ln) — RESPA integrator + trails
+## src/sim/physics.c (~1931 ln) — RESPA integrator + trails
 | Line | Function | What |
 |-----|----------|------|
 | 396  | `refresh_system_timesteps` | adaptive dt per system |
@@ -96,7 +96,7 @@ done
 | 1192 | `print_usage` | CLI flags |
 | 1228 | `main` | entry, arg parse, main loop |
 
-## src/universe.c (~1697 ln) — loader, add-body, catalogs
+## src/core/universe.c (~1697 ln) — loader, add-body, catalogs
 | Line | Function | What |
 |-----|----------|------|
 | 257  | `dedupe_body_names` | unique-name pass |

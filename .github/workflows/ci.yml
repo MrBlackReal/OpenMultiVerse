@@ -1,0 +1,119 @@
+name: CI
+
+# Build every commit, on every branch, and every pull request.
+on:
+  push:
+    # "**" (not "*") so branches with slashes — feat/blackhole — are included.
+    # Naming a branch filter and no tag filter means tag pushes never trigger
+    # this workflow, so release.yml stays the only thing that runs on v* tags.
+    branches: ["**"]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# A newer push to the same branch/PR supersedes the run in flight.
+concurrency:
+  group: ci-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Linux: the full matrix of build configurations ─────────────────────────
+  linux:
+    name: Linux (gcc)
+    runs-on: ubuntu-latest
+    # A pull request from a branch in this same repo was already built by its
+    # push event — only build the PR event for forks, which push never sees.
+    if: >-
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive     # extern/cimgui — required by the IMGUI=1 build
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsdl2-dev libsdl2-ttf-dev libsdl2-mixer-dev libglew-dev
+
+      # Every source directory must be reachable from the Makefile's explicit
+      # SRCDIRS list. A new layer under src/ that nobody added there would
+      # otherwise just silently not be compiled.
+      - name: Check every source is in the build
+        run: |
+          set -euo pipefail
+          comm -23 <(find src -name '*.c' | sort) <(make -s print-srcs | tr ' ' '\n' | sort) > orphans.txt
+          if [ -s orphans.txt ]; then
+            echo "::error::these .c files are not in the build — add their directory to SRCDIRS in the Makefile"
+            cat orphans.txt
+            exit 1
+          fi
+          echo "all $(find src -name '*.c' | wc -l) sources are in the build"
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          # The project keeps builds warning-clean (CLAUDE.md); enforce that here
+          # rather than with -Werror, so a newer gcc's new warnings surface as a
+          # readable CI failure instead of breaking everyone's local build.
+          build () {
+            local label="$1"; shift
+            echo "::group::make $*"
+            make "$@" 2>&1 | tee build.log
+            echo "::endgroup::"
+            if grep -q 'warning:' build.log; then
+              echo "::error::$label build emitted warnings"
+              grep 'warning:' build.log | head -50
+              exit 1
+            fi
+          }
+          build "default"     -j"$(nproc)"
+          make clean                                  # object files are incompatible
+          build "IMGUI=1"     IMGUI=1 -j"$(nproc)"    #   across the IMGUI toggle
+          build "catalogtool" catalogtool
+
+  # ── Windows: the configuration the release actually ships ──────────────────
+  windows:
+    name: Windows (MinGW-w64)
+    runs-on: windows-latest
+    if: >-
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          cache: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-make
+            mingw-w64-x86_64-SDL2
+            mingw-w64-x86_64-SDL2_ttf
+            mingw-w64-x86_64-SDL2_mixer
+            mingw-w64-x86_64-glew
+
+      # Mirrors the release build. IMGUI=1 coverage lives on the Linux job:
+      # the menu is platform-independent C, and doubling this job costs the most
+      # expensive runner minutes for the least new signal.
+      - name: Build
+        run: |
+          set -euo pipefail
+          mingw32-make -j2 2>&1 | tee build.log
+          if grep -q 'warning:' build.log; then
+            echo "::error::Windows build emitted warnings"
+            grep 'warning:' build.log | head -50
+            exit 1
+          fi
+
+      - name: Build catalogtool
+        run: mingw32-make catalogtool

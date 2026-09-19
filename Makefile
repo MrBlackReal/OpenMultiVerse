@@ -15,15 +15,31 @@ CXX     = g++
 TARGET  = verse
 
 SRCDIR  = src
-SRCS    = $(wildcard $(SRCDIR)/*.c)
+
+# Sources live in role-based subdirectories (see ARCHITECTURE.md §2). The list is
+# explicit rather than a `find`: it documents the layout, stays portable to
+# MSYS2 make, and makes adding a new layer a deliberate one-line edit.
+#   core/   state, units, data model      sim/    physics, collision, lifecycle
+#   field/  CosmicField/Radiance/graph    render/ GL pipeline
+#   fx/     particle systems              ui/     menus, HUD, build mode
+#   util/   audio, profiler, benchmark
+SRCDIRS = $(SRCDIR) \
+          $(SRCDIR)/core $(SRCDIR)/sim $(SRCDIR)/field \
+          $(SRCDIR)/render $(SRCDIR)/fx $(SRCDIR)/ui $(SRCDIR)/util
+
+SRCS    = $(foreach d,$(SRCDIRS),$(wildcard $(d)/*.c))
 OBJS    = $(SRCS:.c=.o)
 
+# Every source directory is on the include path, so headers keep being included
+# by bare name (`#include "body.h"`) regardless of which layer they live in.
+INCS    = $(addprefix -I,$(SRCDIRS))
+
 # -MMD -MP emits a .d file per object listing the headers it #includes, so
-# editing a header (e.g. src/body.h) forces every dependent .c to recompile.
+# editing a header (e.g. src/core/body.h) forces every dependent .c to recompile.
 # Without this, make's default rule only tracks the .c -> .o edge and a struct
 # layout change in a header silently leaves stale objects compiled against the
 # old layout — a memory-corruption / infinite-loop footgun.
-CFLAGS  = -Wall -Wextra -O2 -std=c99 -I$(SRCDIR) -fopenmp -MMD -MP
+CFLAGS  = -Wall -Wextra -O2 -std=c99 $(INCS) -fopenmp -MMD -MP
 
 IMGUI      ?= 0
 CIMGUI_DIR  = extern/cimgui
@@ -101,14 +117,15 @@ all: $(TARGET)$(EXT)
 $(TARGET)$(EXT): $(OBJS) $(RC_OBJ)
 	$(LINK) -o $@ $^ $(LDFLAGS)
 
-# Offline catalog converter — standalone, no SDL/OpenGL. Shares src/catalog.c
+# Offline catalog converter — standalone, no SDL/OpenGL. Shares src/core/catalog.c
 # with the simulator.
-catalogtool$(EXT): tools/catalogtool.c $(SRCDIR)/catalog.c
-	$(CC) -Wall -Wextra -O2 -std=c99 -I$(SRCDIR) -o $@ $^ -lm
+catalogtool$(EXT): tools/catalogtool.c $(SRCDIR)/core/catalog.c
+	$(CC) -Wall -Wextra -O2 -std=c99 $(INCS) -o $@ $^ -lm
 
 resource.o: resource.rc
 	$(RC) resource.rc -O coff -o resource.o
 
+# `%` spans '/', so this one rule covers src/main.c and every src/<layer>/*.c.
 $(SRCDIR)/%.o: $(SRCDIR)/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
@@ -116,12 +133,19 @@ $(SRCDIR)/%.o: $(SRCDIR)/%.c
 %.o: %.cpp
 	$(CXX) $(IMGUI_CXXFLAGS) -c -o $@ $<
 
+# CI guard (see .github/workflows/ci.yml): print the sources make will actually
+# compile, so a new layer directory under src/ that was never added to SRCDIRS
+# is caught instead of silently not being built.
+print-srcs:
+	@echo $(SRCS)
+
 clean:
-	rm -f $(SRCDIR)/*.o $(SRCDIR)/*.d $(TARGET) $(TARGET).exe resource.o catalogtool catalogtool.exe
+	rm -f $(foreach d,$(SRCDIRS),$(d)/*.o $(d)/*.d) \
+	      $(TARGET) $(TARGET).exe resource.o catalogtool catalogtool.exe
 	rm -f $(CIMGUI_DIR)/*.o $(CIMGUI_DIR)/imgui/*.o $(CIMGUI_DIR)/imgui/backends/*.o
 
 # Pull in the auto-generated header dependencies (.d files from -MMD). The leading
 # '-' suppresses errors on the first build before any .d files exist.
 -include $(OBJS:.o=.d)
 
-.PHONY: all clean
+.PHONY: all clean print-srcs

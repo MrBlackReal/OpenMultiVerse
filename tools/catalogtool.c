@@ -1,6 +1,6 @@
 /*
  * catalogtool — offline converter from real astronomical catalogs to universe
- * JSON. Shares the conversion core with the simulator (src/catalog.c).
+ * JSON. Shares the conversion core with the simulator (src/core/catalog.c).
  *
  * Build:  make catalogtool
  * Usage:  ./catalogtool <exoplanets|horizons|gaia|blackholes> <in.csv> <out.json> [max]

@@ -142,7 +142,7 @@ How did you verify the change? What did you check for regressions?
 - Are the physics/rendering changes correct?
 - Does it follow the existing code style (snake_case, `g_` globals, C99)?
 - Is content data-driven — new bodies/laws in universe JSON (`assets/universe.json` /
-  `assets/universes/*.json`, registered in `src/presets.c`) rather than hardcoded?
+  `assets/universes/*.json`, registered in `src/core/presets.c`) rather than hardcoded?
 - Does it handle the `alive = 0` body lifecycle correctly (indices are stable;
   dead slots get reused — never assume `g_nbodies` is the live count)?
 - Does it stay correct at galaxy scale — no new O(N²) per-frame work, and does it

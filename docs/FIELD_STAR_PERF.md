@@ -13,7 +13,7 @@ reflect real-GPU frame rate (see "Open item: frame rate").
 
 ## 1. What shipped
 
-- **Compact binary star catalog** (`StarBin`, `src/catalog.h`): `catalogtool
+- **Compact binary star catalog** (`StarBin`, `src/core/catalog.h`): `catalogtool
   gaia-bin` emits a fixed-record `.bin`; a preset references it via an optional
   top-level `"star_catalog"` path; `universe.c load_star_catalog()` streams the
   stars into `g_bodies[]` at load with 0.1 ly positional de-dup against the JSON
@@ -160,9 +160,9 @@ The built-in "brightness correction based on star count" already exists: the
 - Rebuild the catalog: `make catalogtool && ./catalogtool gaia-bin <gaia.csv>
   assets/catalogs/gaia_stars.bin` (the `.csv` is a Gaia DR3 100 pc export with
   columns `source_id,ra,dec,parallax,pmra,pmdec,radial_velocity,teff`).
-- Touched (this perf pass): `src/render.c`, `src/physics.{c,h}`, `src/main.c`,
-  `src/rings.c`, `src/cosmic_field.c`, `src/field_graph.c`, `src/trails.c`,
-  `src/body.c`, `src/radiance_field.c`, `src/labels.c`, `src/inspect.c`,
+- Touched (this perf pass): `src/render/render.c`, `src/physics.{c,h}`, `src/main.c`,
+  `src/fx/rings.c`, `src/field/cosmic_field.c`, `src/field/field_graph.c`, `src/render/trails.c`,
+  `src/core/body.c`, `src/field/radiance_field.c`, `src/render/labels.c`, `src/ui/inspect.c`,
   `src/universe.{c,h}`, `assets/shaders/star_field.vert`.
 - **Not yet committed.** Suggested split: (a) compact binary catalog + loader,
   (b) static field-star render path + per-frame scan fixes.

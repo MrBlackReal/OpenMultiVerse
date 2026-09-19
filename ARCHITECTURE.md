@@ -85,7 +85,7 @@ OpenMultiVerse/
 ├── extern/cimgui/          Dear ImGui C binding submodule (only used by IMGUI=1)
 ├── assets/
 │   ├── universe.json
-│   ├── universes/          Selectable presets (registered in src/presets.c)
+│   ├── universes/          Selectable presets (registered in src/core/presets.c)
 │   ├── catalogs/           Real catalog CSVs (full ones gitignored)
 │   ├── bright_star_catalog.csv
 │   ├── soundtrack.ogg
@@ -107,36 +107,65 @@ OpenMultiVerse/
 │       ├── nebula.vert / nebula.frag            (volumetric raymarched nebulae)
 │       ├── star_dot.vert                        (per-point sized star dots)
 │       └── post_quad.vert + bloom_bright/blur/composite.frag   (HDR bloom)
-└── src/
-    ├── main.c              App init, event loop, per-frame scheduling
-    ├── common.h            Shared includes, constants, global window size
-    ├── math3d.h            Header-only vector/matrix helpers
-    ├── gl_utils.c/.h       Shader and buffer helper functions
-    ├── json.c/.h           Minimal JSON parser with comments/trailing commas
-    ├── laws.c/.h           Per-universe physical laws (g_laws) + pair-force factor
-    ├── presets.c/.h        Registry of selectable universe JSON files
-    ├── catalog.c/.h        Real-catalog → universe JSON conversion (no SDL/GL)
-    ├── body.c/.h           Body array, Keplerian conversion, body helpers
-    ├── universe.c/.h       JSON loader (incl. "laws" block), runtime body alloc/reuse
-    ├── physics.c/.h        RESPA gravity and trail sampling engine
-    ├── lifecycle.c/.h      Stellar evolution state machine (phases + death events)
-    ├── collision.c/.h      Collision detection, merges, scars, debris
-    ├── supernova.c/.h      Star-star collision aftermath + lifecycle detonation
-    ├── camera.c/.h         Global free-look camera state
-    ├── render.c/.h         Main scene compositor
-    ├── post.c/.h           Offscreen HDR target + bloom post-processing
-    ├── nebula.c/.h         World-space volumetric nebulae
-    ├── trails.c/.h         GL upload/draw layer for trail buffers
-    ├── labels.c/.h         SDL_ttf label textures and overlap avoidance
-    ├── starfield.c/.h      Catalog-backed skybox stars
-    ├── rings.c/.h          Keplerian ring particle systems
-    ├── asteroids.c/.h      Gravity-integrated asteroid belt particles
-    ├── build.c/.h          Runtime sandbox body placement
-    ├── inspect.c/.h        Inspection and orbit-camera mode
-    ├── menu.c/.h           Dear ImGui multiverse menu (USE_IMGUI; stubs otherwise)
-    ├── ui.c/.h             HUD and pause menu overlay
-    ├── ui_theme.c/.h       Shared font lookup and UI accent constants
-    └── audio.c/.h          SDL_mixer soundtrack wrapper
+└── src/                    Role-based layers; every dir is on the include path,
+    │                       so headers are included by bare name ("body.h").
+    ├── main.c              App init, event loop, per-frame scheduling, headless
+    │
+    ├── core/               State, units, and the data model
+    │   ├── common.h            Shared includes, constants, global window size
+    │   ├── math3d.h            Header-only vector/matrix helpers
+    │   ├── body.c/.h           Body array, Keplerian conversion, body helpers
+    │   ├── universe.c/.h       JSON/BodyBin loader, runtime body alloc/reuse
+    │   ├── laws.c/.h           Per-universe physical laws (g_laws) + force factor
+    │   ├── settings.c/.h       Cross-universe app settings, persisted to settings.json
+    │   ├── presets.c/.h        Registry of selectable universe JSON files
+    │   ├── json.c/.h           Minimal JSON parser with comments/trailing commas
+    │   ├── catalog.c/.h        Real-catalog → universe conversion (no SDL/GL)
+    │   └── camera.c/.h         Global free-look camera state
+    │
+    ├── sim/                Physics, collision, and body evolution
+    │   ├── physics.c/.h        RESPA gravity and trail sampling engine
+    │   ├── collision.c/.h      Collision detection, merges, scars, debris, tidal
+    │   ├── paircache.c/.h      Sparse (body,body) collision-cooldown map
+    │   ├── lifecycle.c/.h      Stellar evolution state machine (phases + deaths)
+    │   ├── orbit_predict.c/.h  Forward-integrated predicted-future orbit lines
+    │   ├── starsys.c/.h        Procedural star → live system promotion
+    │   ├── accretion.c/.h      Black-hole accretion disc / Eddington gas model
+    │   └── spectral.c/.h       Stellar spectral classification (T_eff source of truth)
+    │
+    ├── field/              Phase-A field abstractions (shared, queryable)
+    │   ├── cosmic_field.c/.h   Density/clumpiness field + cluster extraction
+    │   ├── radiance_field.c/.h Emitter field, multi-light shading, chromaticity
+    │   └── field_graph.c/.h    Graph over bodies, fields, and events
+    │
+    ├── render/             The GL pipeline
+    │   ├── render.c/.h         Main scale-continuous scene compositor
+    │   ├── post.c/.h           Offscreen HDR target + bloom post-processing
+    │   ├── gl_utils.c/.h       Shader and buffer helper functions
+    │   ├── galaxy.c/.h         Volumetric galaxies + procedural resolved stars
+    │   ├── starfield.c/.h      Catalog-backed skybox stars
+    │   ├── nebula.c/.h         World-space volumetric nebulae
+    │   ├── labels.c/.h         SDL_ttf label textures and overlap avoidance
+    │   └── trails.c/.h         GL upload/draw layer for trail buffers
+    │
+    ├── fx/                 Particle / event visual systems
+    │   ├── rings.c/.h          Keplerian ring particle systems
+    │   ├── asteroids.c/.h      Gravity-integrated asteroid belt particles
+    │   ├── comet.c/.h          Comet coma and dust/ion tails
+    │   └── supernova.c/.h      Star-star collision aftermath + lifecycle detonation
+    │
+    ├── ui/                 Menus, HUD, and interaction modes
+    │   ├── ui.c/.h             HUD and pause menu overlay
+    │   ├── ui_theme.c/.h       Shared font lookup and UI accent constants
+    │   ├── menu.c/.h           Dear ImGui multiverse menu (USE_IMGUI; stubs otherwise)
+    │   ├── inspect.c/.h        Inspection and orbit-camera mode
+    │   ├── build.c/.h          Runtime sandbox body placement
+    │   └── loading.c/.h        Full-screen loading / universe-switch overlay
+    │
+    └── util/               Support services
+        ├── audio.c/.h          SDL_mixer soundtrack wrapper
+        ├── profiler.c/.h       Per-stage frame profiler with spike attribution
+        └── benchmark.c/.h      Scripted cinematic flythrough + FPS benchmark
 ```
 
 ---
@@ -162,7 +191,7 @@ silently leaves stale objects — a memory-corruption footgun).
 |---|---|
 | `make` | Default build. `menu.c` compiles to inert stubs; no C++/cimgui needed. |
 | `git submodule update --init --recursive` then `make IMGUI=1` | Adds the Dear ImGui multiverse menu (defines `USE_IMGUI`, compiles `extern/cimgui` + Dear ImGui C++ TUs, links `libstdc++`). |
-| `make catalogtool` | Standalone offline catalog converter (no SDL/GL); reuses `src/catalog.c`. |
+| `make catalogtool` | Standalone offline catalog converter (no SDL/GL); reuses `src/core/catalog.c`. |
 
 **`make clean` is required when toggling `IMGUI`** — the Makefile tracks file
 timestamps, not the flag value, so switching without a clean links stale objects.
@@ -1458,8 +1487,8 @@ floating-origin trick described above.)
 Depth and blending:
 
 - Spheres and all world passes use logarithmic depth in shaders, normalised
-  against a single shared range: `RENDER_DEPTH_FAR` (`src/common.h`, currently
-  1e10 AU ≈ 158 kly). `gl_shader_load()` (`src/gl_utils.c`) splices `#define
+  against a single shared range: `RENDER_DEPTH_FAR` (`src/core/common.h`, currently
+  1e10 AU ≈ 158 kly). `gl_shader_load()` (`src/render/gl_utils.c`) splices `#define
   DEPTH_FAR <value>` after each shader's `#version` line, so every depth-writing
   pass — including `bh.frag`/`torus.frag` (now log, previously standard
   `0.5+0.5·z/w`) and the additive `jet.frag`/`agncore.frag` depth *tests* —
@@ -1630,19 +1659,19 @@ Edit `assets/universe.json` (or a file under `assets/universes/`).
 
 ### Add a universe to the multiverse menu
 
-Edit `src/presets.c` — add a `{name, path, blurb}` entry pointing at a JSON file
+Edit `src/core/presets.c` — add a `{name, path, blurb}` entry pointing at a JSON file
 under `assets/universes/`. It then appears in the `U` menu picker automatically.
 
 ### Add or change a physical law
 
-Edit `src/laws.h` (struct field + `LAWS_DEFAULT_*`), `src/laws.c` (`laws_reset`),
-and `src/universe.c` (parse + save in the `"laws"` block). Apply the field in the
-force kernel in `src/physics.c`; if it affects stability, update timestep
-selection. Expose it on a slider in `src/menu.c` if useful.
+Edit `src/core/laws.h` (struct field + `LAWS_DEFAULT_*`), `src/core/laws.c` (`laws_reset`),
+and `src/core/universe.c` (parse + save in the `"laws"` block). Apply the field in the
+force kernel in `src/sim/physics.c`; if it affects stability, update timestep
+selection. Expose it on a slider in `src/ui/menu.c` if useful.
 
 ### Add a new build preset
 
-Edit `src/build.c`.
+Edit `src/ui/build.c`.
 
 - Add a `BuildPreset` entry.
 - Add color/rotation behavior if the existing visual type enum is not enough.
@@ -1652,7 +1681,7 @@ Edit `src/build.c`.
 
 Edit:
 
-- `src/render.c`, `get_planet_type()`
+- `src/render/render.c`, `get_planet_type()`
 - `assets/shaders/phong.frag`
 
 Keep the integer type mapping synchronized between CPU and shader.
@@ -1662,7 +1691,7 @@ Keep the integer type mapping synchronized between CPU and shader.
 Edit:
 
 - `assets/shaders/phong.frag` or a new shader.
-- Uniform lookup/upload in `src/render.c`.
+- Uniform lookup/upload in `src/render/render.c`.
 - Any state producer module, if the effect depends on simulation state.
 
 Follow the collision/supernova pattern: simulation modules expose compact render
@@ -1670,7 +1699,7 @@ data; `render.c` owns GL resources and shader calls.
 
 ### Add a new HUD or menu element
 
-Edit `src/ui.c`.
+Edit `src/ui/ui.c`.
 
 - Add text cache entries for text.
 - Use the existing `ui.vert/frag` path.
@@ -1678,7 +1707,7 @@ Edit `src/ui.c`.
 
 ### Add a new physics force
 
-Edit `src/physics.c`.
+Edit `src/sim/physics.c`.
 
 - Decide whether the force is fast or slow.
 - Add it to the matching acceleration computation.
@@ -1689,9 +1718,9 @@ Edit `src/physics.c`.
 
 Edit:
 
-- `src/collision.h` for a new `CollisionVisualKind`.
-- `src/collision.c` for event creation/lifetime.
-- `src/render.c` for uniform upload if new data is required.
+- `src/sim/collision.h` for a new `CollisionVisualKind`.
+- `src/sim/collision.c` for event creation/lifetime.
+- `src/render/render.c` for uniform upload if new data is required.
 - `assets/shaders/phong.frag` for visual interpretation.
 
 ### Add a new shader
@@ -1705,7 +1734,7 @@ Edit:
 
 ### Add a new platform font path
 
-Edit `src/ui_theme.c` and append the path to `s_ui_font_paths` before `NULL`.
+Edit `src/ui/ui_theme.c` and append the path to `s_ui_font_paths` before `NULL`.
 
 ### Change coordinate conventions
 

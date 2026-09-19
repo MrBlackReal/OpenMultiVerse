@@ -97,3 +97,7 @@ CLAUDE.md
 docs/*.txt
 docs/PERF_HANDOFF.md
 assets/PS_2026.07.03_09.35.26.csv
+
+# CI step scratch output (see .github/workflows/ci.yml)
+build.log
+orphans.txt

@@ -77,7 +77,7 @@ The upshot: the cost of a frame tracks *what's near you*, not the size of the ca
 
 ### The laws are data
 
-Every universe is a JSON file with an optional `"laws"` block (`src/laws.h`/`laws.c`): the gravitational constant `G`, a Plummer `softening` length, a `force_exp` exponent (2 = inverse-square; try 3), a cosmological `lambda` (dark-energy-like outward push), a `pn_factor` (post-Newtonian perihelion precession), the speed of light `c_light`, and `gravity_isolation`. Omit any field and it falls back to the Newtonian default, so existing universes keep working. Bodies, rings, and asteroid belts are data too — the built-in JSON parser even accepts `//` comments and trailing commas. (Bulk star fields are the one exception: they load from a compact binary catalog the JSON references — see [Real astronomical data](#real-astronomical-data).)
+Every universe is a JSON file with an optional `"laws"` block (`src/core/laws.h`/`laws.c`): the gravitational constant `G`, a Plummer `softening` length, a `force_exp` exponent (2 = inverse-square; try 3), a cosmological `lambda` (dark-energy-like outward push), a `pn_factor` (post-Newtonian perihelion precession), the speed of light `c_light`, and `gravity_isolation`. Omit any field and it falls back to the Newtonian default, so existing universes keep working. Bodies, rings, and asteroid belts are data too — the built-in JSON parser even accepts `//` comments and trailing commas. (Bulk star fields are the one exception: they load from a compact binary catalog the JSON references — see [Real astronomical data](#real-astronomical-data).)
 
 ---
 

@@ -793,7 +793,7 @@ sped up — evolution runs on its own clock.
 
 ## 2.2 Supernova and remnant system
 
-**Status:** ✅ — `src/supernova.c`
+**Status:** ✅ — `src/fx/supernova.c`
 
 ### Features
 
