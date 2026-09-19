@@ -25,7 +25,14 @@ static char *read_file(const char *path) {
     rewind(f);
     char *buf = (char *)malloc(sz + 1);
     if (!buf) { fclose(f); return NULL; }
-    fread(buf, 1, sz, f);
+    /* A short read means a truncated shader, which would fail to compile with a
+     * confusing message — report it here instead. (fread is warn_unused_result
+     * under _FORTIFY_SOURCE, so the return value must be consumed regardless.) */
+    size_t got = fread(buf, 1, (size_t)sz, f);
+    if (got != (size_t)sz) {
+        fprintf(stderr, "[GL] short read on '%s' (%zu of %ld bytes)\n", path, got, sz);
+        free(buf); fclose(f); return NULL;
+    }
     buf[sz] = '\0';
     fclose(f);
     return buf;

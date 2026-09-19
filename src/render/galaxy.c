@@ -130,7 +130,7 @@ static int    s_enabled = 1;
 /* J2000 equatorial RA/Dec -> ecliptic GL unit vector (matches starfield.c). */
 static void equatorial_to_gl(double ra_deg, double dec_deg, double out[3])
 {
-    const double deg = M_PI / 180.0;
+    const double deg = PI / 180.0;
     const double eps = 23.4392911 * deg;
     double ce = cos(eps), se = sin(eps);
     double ra = ra_deg * deg, dec = dec_deg * deg;
@@ -175,7 +175,7 @@ void galaxy_init(void)
     s_u_scene_depth     = glGetUniformLocation(s_shader, "u_scene_depth");
     s_u_use_scene_depth = glGetUniformLocation(s_shader, "u_use_scene_depth");
 
-    const double arcmin = (M_PI / 180.0) / 60.0;
+    const double arcmin = (PI / 180.0) / 60.0;
     for (int i = 0; i < GALAXY_COUNT; i++) {
         double dir[3];
         equatorial_to_gl(GALAXIES[i].ra_deg, GALAXIES[i].dec_deg, dir);
@@ -224,7 +224,7 @@ void galaxy_init(void)
             double px = perp[0]*cp + crx*sp;
             double py = perp[1]*cp + cry*sp;
             double pz = perp[2]*cp + crz*sp;
-            double th = GALAXIES[i].incl_deg * M_PI / 180.0;
+            double th = GALAXIES[i].incl_deg * PI / 180.0;
             s_gal[i].axis[0] = (float)(dir[0]*cos(th) + px*sin(th));
             s_gal[i].axis[1] = (float)(dir[1]*cos(th) + py*sin(th));
             s_gal[i].axis[2] = (float)(dir[2]*cos(th) + pz*sin(th));

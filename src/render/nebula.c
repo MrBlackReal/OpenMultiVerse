@@ -107,7 +107,7 @@ static int    s_enabled = 1;
 /* J2000 equatorial RA/Dec -> ecliptic GL unit vector (matches starfield.c). */
 static void equatorial_to_gl(double ra_deg, double dec_deg, double out[3])
 {
-    const double deg = M_PI / 180.0;
+    const double deg = PI / 180.0;
     const double eps = 23.4392911 * deg;
     double ce = cos(eps), se = sin(eps);
     double ra = ra_deg * deg, dec = dec_deg * deg;
@@ -148,7 +148,7 @@ void nebula_init(void)
     s_u_boost      = glGetUniformLocation(s_shader, "u_boost");
     s_u_boost_col  = glGetUniformLocation(s_shader, "u_boost_col");
 
-    const double arcmin = (M_PI / 180.0) / 60.0;
+    const double arcmin = (PI / 180.0) / 60.0;
     for (int i = 0; i < NEBULA_COUNT; i++) {
         double dir[3];
         equatorial_to_gl(NEBULAE[i].ra_deg, NEBULAE[i].dec_deg, dir);

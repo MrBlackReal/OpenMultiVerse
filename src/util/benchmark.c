@@ -211,7 +211,7 @@ static void wp_push_body(int bi, double mult, const char *label,
      * object, so make it checkable from the log. */
     fprintf(stdout, "[Benchmark]   stage '%s': %s, r=%.3g AU, %.1fx out, "
                     "subtends %.1f deg\n",
-            label, b->name, r, mult, 2.0 * atan2(1.0, mult) * 180.0 / M_PI);
+            label, b->name, r, mult, 2.0 * atan2(1.0, mult) * 180.0 / PI);
     wp_push(pos, c, label, travel, hold);
 }
 

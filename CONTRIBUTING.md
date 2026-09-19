@@ -104,7 +104,22 @@ Other approaches you thought about and why you ruled them out.
    not the flag, so a dirty switch links stale objects.
 2. Test the change at multiple simulation speeds and zoom levels. There are no
    automated tests; visual/physics changes are verified by running the app.
-3. Open a PR against `main` with the following format:
+3. CI (`.github/workflows/ci.yml`) builds every push and PR on Linux (default,
+   `IMGUI=1`, and `catalogtool`) and Windows, and **fails on any compiler
+   warning**. Note that CI is often stricter than a local build: `sdl2-config`
+   adds `-D_GNU_SOURCE` on some distributions but not others, so POSIX functions
+   that compile for you may be undeclared under plain `-std=c99` there. To
+   reproduce CI's flags locally:
+
+   ```bash
+   make clean
+   make SDL_CFLAGS="$(pkg-config --cflags sdl2 | sed 's/-D_GNU_SOURCE=1//') -D_FORTIFY_SOURCE=2"
+   ```
+
+   Prefer the SDL equivalent (`SDL_setenv`) or the project's own constants
+   (`PI` in `common.h`) over libc functions and macros that need a feature-test
+   macro to be visible.
+4. Open a PR against `main` with the following format:
 
 **Title:** `[type] Short description` — e.g. `[feat] Add Galilean moons for Jupiter`
 

@@ -1325,8 +1325,11 @@ int main(int argc, char **argv) {
     }
     if (shot_frames < 1) shot_frames = 1;
     if (headless) {
-        setenv("SDL_VIDEODRIVER", "offscreen", 1);  /* EGL surfaceless, no window */
-        setenv("SDL_AUDIODRIVER", "dummy", 1);
+        /* SDL_setenv, not POSIX setenv: the latter needs a feature-test macro
+         * (_DEFAULT_SOURCE/_GNU_SOURCE) that -std=c99 does not set, and which
+         * only some distributions' sdl2-config happens to add to CFLAGS. */
+        SDL_setenv("SDL_VIDEODRIVER", "offscreen", 1);  /* EGL surfaceless, no window */
+        SDL_setenv("SDL_AUDIODRIVER", "dummy", 1);
     }
 
     /* Global settings first — every later macro (FOV, NUM_STARS, …) reads
