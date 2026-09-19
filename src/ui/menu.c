@@ -1,8 +1,9 @@
 /*
  * menu.c — Dear ImGui (cimgui) universe picker + live-laws overlay.
  *
- * Active only when built with USE_IMGUI (make IMGUI=1). Otherwise the functions
- * below are no-op stubs so the rest of the program is unaffected.
+ * Active when built with USE_IMGUI, which the default build defines. Under
+ * `make IMGUI=0` the functions below are no-op stubs instead, so the rest of
+ * the program is unaffected.
  */
 #include "menu.h"
 #include "profiler.h"

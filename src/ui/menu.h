@@ -1,10 +1,10 @@
 /*
  * menu.h — Dear ImGui (cimgui) universe picker + live-laws overlay.
  *
- * This is an optional feature compiled only when the build defines USE_IMGUI
- * (i.e. `make IMGUI=1`, which also pulls in the extern/cimgui submodule).  When
- * USE_IMGUI is not defined every function below is a no-op stub, so main.c can
- * call them unconditionally and the default build needs no C++ / cimgui.
+ * Compiled whenever the build defines USE_IMGUI, which the default build does
+ * (it pulls in the extern/cimgui submodule).  Under `make IMGUI=0` every
+ * function below is a no-op stub instead, so main.c can call them
+ * unconditionally and that variant needs no C++ / cimgui.
  */
 #pragma once
 #include "common.h"

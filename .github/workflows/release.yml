@@ -18,6 +18,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # `make` defaults to IMGUI=1, so the released build needs cimgui.
+          submodules: recursive
 
       - uses: msys2/setup-msys2@v2
         with:
@@ -49,6 +52,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # `make` defaults to IMGUI=1, so the released build needs cimgui.
+          submodules: recursive
 
       - name: Install dependencies
         run: |

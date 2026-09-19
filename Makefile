@@ -4,11 +4,14 @@
 # Linux:   make
 # Windows: mingw32-make  (MSYS2 / MinGW-w64)
 #
-# Optional Dear ImGui multiverse menu (needs the extern/cimgui submodule):
+# The Dear ImGui multiverse menu is built BY DEFAULT. It needs the extern/cimgui
+# submodule and a C++ compiler:
 #   git submodule update --init --recursive
-#   make IMGUI=1
-# Without IMGUI=1 the menu code compiles to inert stubs and no C++/cimgui is
-# required — the default build is unchanged.
+#   make
+# To build without it (no C++/cimgui/g++ needed — menu.c compiles to inert stubs):
+#   make IMGUI=0
+# `make clean` is REQUIRED when toggling IMGUI either way: the object files are
+# compiled against different struct layouts and linking stale ones corrupts memory.
 
 CC      = gcc
 CXX     = g++
@@ -41,7 +44,7 @@ INCS    = $(addprefix -I,$(SRCDIRS))
 # old layout — a memory-corruption / infinite-loop footgun.
 CFLAGS  = -Wall -Wextra -O2 -std=c99 $(INCS) -fopenmp -MMD -MP
 
-IMGUI      ?= 0
+IMGUI      ?= 1
 CIMGUI_DIR  = extern/cimgui
 LINK        = $(CC)
 
@@ -80,6 +83,13 @@ endif
 
 # ---- Optional Dear ImGui (cimgui) -----------------------------------
 ifeq ($(IMGUI),1)
+    # The submodule is now required for a default build, so fail with something
+    # actionable instead of a hundred "cimgui.h: No such file" errors.
+    ifeq ($(wildcard $(CIMGUI_DIR)/cimgui.h),)
+        $(error extern/cimgui is missing. Run: git submodule update --init --recursive \
+                — or build without the menu: make IMGUI=0)
+    endif
+
     # C side: expose USE_IMGUI + the cimgui C API headers to menu.c.
     CFLAGS += -DUSE_IMGUI -DCIMGUI_DEFINE_ENUMS_AND_STRUCTS \
               -DCIMGUI_USE_SDL2 -DCIMGUI_USE_OPENGL3 \
@@ -121,6 +131,14 @@ $(TARGET)$(EXT): $(OBJS) $(RC_OBJ)
 # with the simulator.
 catalogtool$(EXT): tools/catalogtool.c $(SRCDIR)/core/catalog.c
 	$(CC) -Wall -Wextra -O2 -std=c99 $(INCS) -o $@ $^ -lm
+
+# On Windows the real target is catalogtool.exe, so a plain `make catalogtool`
+# would fail with "No rule to make target". Alias it. (Guarded by EXT being
+# non-empty: on Linux the alias and the real target are the same name.)
+ifneq ($(EXT),)
+.PHONY: catalogtool
+catalogtool: catalogtool$(EXT)
+endif
 
 resource.o: resource.rc
 	$(RC) resource.rc -O coff -o resource.o

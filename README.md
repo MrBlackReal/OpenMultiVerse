@@ -101,8 +101,8 @@ Omitted fields fall back to Newtonian defaults, so existing files keep working.
 Bundled example universes live in `assets/universes/`: **Strong Gravity**,
 **Inverse-Cube Forces**, **Expanding Cosmos**, **Relativistic Precession**, plus
 a **Black Hole** / **Quasar** / **Blazar** family and the galaxy-scale **Known
-Universe**. Build with `IMGUI=1` (below) and press <kbd>U</kbd> in-app to pick a
-universe or drag the live law sliders and watch the dynamics change.
+Universe**. Press <kbd>U</kbd> in-app to pick a universe or drag the live law
+sliders and watch the dynamics change.
 
 **Save / load.** The same menu can snapshot the running universe — current laws
 plus every body's exact position and velocity — to a JSON file, and load it back
@@ -202,7 +202,7 @@ the JSON, the field stars in the binary catalog it references.
 | Active galactic nuclei — quasars, blazars, relativistic jets, tidal disruption | ✓ |
 | Volumetric nebulae & the Milky Way disc; HDR bloom | ✓ |
 | Data-driven physical laws — per-universe G, softening, force law, Λ, post-Newtonian, isolation | ✓ |
-| Multiverse menu — universe picker + live law sliders (optional `IMGUI=1` build) | ✓ |
+| Multiverse menu — universe picker + live law sliders (press <kbd>U</kbd>) | ✓ |
 | Real-data import — NASA Exoplanet / JPL Horizons / Gaia, in-app and via `catalogtool` | ✓ |
 | Build mode & inspection mode — spawn bodies, highlight and orbit targets | ✓ |
 | Save / load — snapshot & restore exact universe state | ✓ |
@@ -212,8 +212,8 @@ the JSON, the field stars in the binary catalog it references.
 ## Installation
 
 > **No prebuilt binaries are published yet.** OpenMultiVerse currently builds from
-> source (below) — it's a quick `make` on Linux, and the multiverse menu is an
-> optional `IMGUI=1` build. Packaged releases may come later.
+> source (below) — it's a quick `make` on Linux, multiverse menu included.
+> Packaged releases may come later.
 
 ---
 
@@ -222,8 +222,9 @@ the JSON, the field stars in the binary catalog it references.
 **Linux**
 ```bash
 sudo apt install build-essential libsdl2-dev libsdl2-ttf-dev libsdl2-mixer-dev libglew-dev
+git submodule update --init --recursive   # fetch extern/cimgui + Dear ImGui
 make
-./verse
+./verse                                   # press U for the multiverse menu
 ```
 (On Arch/CachyOS: `sudo pacman -S sdl2 sdl2_ttf sdl2_mixer glew`.)
 
@@ -232,25 +233,24 @@ make
 pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-make \
           mingw-w64-x86_64-SDL2 mingw-w64-x86_64-SDL2_ttf \
           mingw-w64-x86_64-SDL2_mixer mingw-w64-x86_64-glew
+git submodule update --init --recursive
 mingw32-make
 ./verse.exe
 ```
 
-**Optional — the ImGui multiverse menu**
-
 The universe picker and live law sliders are built on [cimgui](https://github.com/cimgui/cimgui)
-(a C binding for Dear ImGui) and are compiled only on request:
+(a C binding for Dear ImGui), which is why the default build needs the submodule
+and a C++ compiler (it links `libstdc++`).
+
+**Building without the menu**
 
 ```bash
-git submodule update --init --recursive   # fetch extern/cimgui + Dear ImGui
-make IMGUI=1                               # links libstdc++; needs g++
-./verse                                    # press U for the multiverse menu
+make IMGUI=0    # no cimgui, no C++ toolchain needed
 ```
 
-Without `IMGUI=1` the menu code compiles to inert stubs and the simulator builds
-exactly as before (no C++ toolchain or cimgui required). Universes can still be
-selected by editing the path the app loads. Toggling `IMGUI` on or off requires a
-`make clean` first.
+`menu.c` then compiles to inert stubs and universes are selected by editing the
+path the app loads. Toggling `IMGUI` either way requires a `make clean` first —
+the object files are incompatible across the switch.
 
 **Headless rendering.** The screenshots in this README were rendered offscreen on
 the GPU — no window needed — via `tools/shot.sh out.png --preset <universe> --cam

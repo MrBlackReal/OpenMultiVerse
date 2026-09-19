@@ -98,14 +98,16 @@ Other approaches you thought about and why you ruled them out.
 
 ## 5. Submitting a Pull Request
 
-1. Make sure the project builds without warnings (`-Wall -Wextra`). Build both the
-   default (`make`) and, if you touched menu/UI code, the ImGui build (`make IMGUI=1`).
-   Run `make clean` when switching `IMGUI` on/off — the Makefile keys off timestamps,
-   not the flag, so a dirty switch links stale objects.
+1. Make sure the project builds without warnings (`-Wall -Wextra`). The default
+   `make` includes the ImGui menu and needs the cimgui submodule
+   (`git submodule update --init --recursive`); also build the menu-less variant
+   (`make IMGUI=0`) if you touched menu/UI code, since that stub path has to keep
+   compiling. Run `make clean` when switching `IMGUI` either way — the Makefile
+   keys off timestamps, not the flag, so a dirty switch links stale objects.
 2. Test the change at multiple simulation speeds and zoom levels. There are no
    automated tests; visual/physics changes are verified by running the app.
 3. CI (`.github/workflows/ci.yml`) builds every push and PR on Linux (default,
-   `IMGUI=1`, and `catalogtool`) and Windows, and **fails on any compiler
+   `IMGUI=0`, and `catalogtool`) and Windows, and **fails on any compiler
    warning**. Note that CI is often stricter than a local build: `sdl2-config`
    adds `-D_GNU_SOURCE` on some distributions but not others, so POSIX functions
    that compile for you may be undeclared under plain `-std=c99` there. To

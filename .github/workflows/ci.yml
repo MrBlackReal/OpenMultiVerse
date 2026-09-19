@@ -70,10 +70,13 @@ jobs:
               exit 1
             fi
           }
-          build "default"     -j"$(nproc)"
+          # The default build now includes the ImGui menu (IMGUI=1).
+          build "default (IMGUI=1)" -j"$(nproc)"
           make clean                                  # object files are incompatible
-          build "IMGUI=1"     IMGUI=1 -j"$(nproc)"    #   across the IMGUI toggle
-          build "catalogtool" catalogtool
+          # The menu-less variant still ships in menu.c's stub path, so keep
+          # compiling it — nothing else would catch that path rotting.
+          build "IMGUI=0"          IMGUI=0 -j"$(nproc)"
+          build "catalogtool"      catalogtool
 
   # ── Windows: the configuration the release actually ships ──────────────────
   windows:
@@ -88,6 +91,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive   # the default build is IMGUI=1, which needs cimgui
 
       - uses: msys2/setup-msys2@v2
         with:
@@ -102,9 +107,9 @@ jobs:
             mingw-w64-x86_64-SDL2_mixer
             mingw-w64-x86_64-glew
 
-      # Mirrors the release build. IMGUI=1 coverage lives on the Linux job:
-      # the menu is platform-independent C, and doubling this job costs the most
-      # expensive runner minutes for the least new signal.
+      # Mirrors the release build: the default, which is now IMGUI=1 and so also
+      # exercises the C++ link on MinGW. The IMGUI=0 stub variant is covered on
+      # the Linux job rather than doubling the most expensive runner.
       - name: Build
         run: |
           set -euo pipefail

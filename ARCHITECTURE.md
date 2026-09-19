@@ -52,7 +52,7 @@ Primary technologies:
 | Physics | 2R-RESPA split integrator with per-star-system timestep limits |
 | Physical laws | Per-universe `g_laws` (G, softening, force exponent, Λ, PN, gravity isolation, timestep model) |
 | App settings | Global, cross-universe `g_settings` (FOV, starfield, warm-up/active radii, fades, controls, overlay, trails); persisted to `settings.json` |
-| Optional menu | Dear ImGui via the `extern/cimgui` submodule (`make IMGUI=1`); inert stubs otherwise |
+| Menu | Dear ImGui via the `extern/cimgui` submodule, built by default; `make IMGUI=0` swaps in inert stubs |
 | Data | `assets/universe.json` + `assets/universes/*.json` presets; real catalogs via `catalog.c` |
 | Parallelism | OpenMP for warmup across independent star systems |
 
@@ -82,7 +82,7 @@ OpenMultiVerse/
 ├── CONTRIBUTING.md
 ├── docs/                   In-progress + planned work (UNIFIED_ROADMAP_REFINED.md)
 ├── tools/                  catalogtool.c (offline) + build_known_universe.py
-├── extern/cimgui/          Dear ImGui C binding submodule (only used by IMGUI=1)
+├── extern/cimgui/          Dear ImGui C binding submodule (required unless IMGUI=0)
 ├── assets/
 │   ├── universe.json
 │   ├── universes/          Selectable presets (registered in src/core/presets.c)
@@ -189,8 +189,8 @@ silently leaves stale objects — a memory-corruption footgun).
 
 | Command | Result |
 |---|---|
-| `make` | Default build. `menu.c` compiles to inert stubs; no C++/cimgui needed. |
-| `git submodule update --init --recursive` then `make IMGUI=1` | Adds the Dear ImGui multiverse menu (defines `USE_IMGUI`, compiles `extern/cimgui` + Dear ImGui C++ TUs, links `libstdc++`). |
+| `git submodule update --init --recursive` then `make` | Default build. Includes the Dear ImGui multiverse menu (defines `USE_IMGUI`, compiles `extern/cimgui` + Dear ImGui C++ TUs, links `libstdc++`), so it needs the submodule and a C++ compiler. A missing submodule fails fast with an actionable `$(error)`. |
+| `make IMGUI=0` | Menu-less build. `menu.c` compiles to inert stubs; no C++/cimgui needed. |
 | `make catalogtool` | Standalone offline catalog converter (no SDL/GL); reuses `src/core/catalog.c`. |
 
 **`make clean` is required when toggling `IMGUI`** — the Makefile tracks file
@@ -1032,9 +1032,9 @@ clears the log via `field_graph_reset()` (`main.c reset_universe_state()`).
 
 ### `menu.c` / `menu.h`
 
-The Dear ImGui (cimgui) multiverse overlay, compiled only under `USE_IMGUI`
-(`make IMGUI=1`); every function is a no-op stub otherwise, so `main.c` calls
-them unconditionally. `menu_render()` runs one ImGui frame after the world draws
+The Dear ImGui (cimgui) multiverse overlay, compiled under `USE_IMGUI`, which the
+default build defines; under `make IMGUI=0` every function is a no-op stub
+instead, so `main.c` calls them unconditionally either way. `menu_render()` runs one ImGui frame after the world draws
 and before swap, returning a preset index to switch to (or -1), signalling law
 changes, and optionally a JSON path to load (e.g. a just-imported catalog). It
 also hosts the per-star Inspect panel that drives `lifecycle.c`. `menu_process_event()`

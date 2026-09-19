@@ -1,0 +1,25 @@
+# Editor/LSP configuration (clangd). The build gets these paths from SRCDIRS in
+# the Makefile; clangd has no way to know them, so without this it reports
+# "'common.h' file not found" on every file outside src/core.
+#
+# Keep this list in sync with SRCDIRS in the Makefile.
+CompileFlags:
+  Add:
+    - -Isrc
+    - -Isrc/core
+    - -Isrc/sim
+    - -Isrc/field
+    - -Isrc/render
+    - -Isrc/fx
+    - -Isrc/ui
+    - -Isrc/util
+    - -I/usr/include/SDL2
+    - -D_REENTRANT
+    # The default build defines this; without it clangd greys out all of menu.c
+    # and reports the ImGui calls as errors.
+    - -DUSE_IMGUI
+    - -DCIMGUI_DEFINE_ENUMS_AND_STRUCTS
+    - -Iextern/cimgui
+    - -Iextern/cimgui/generator/output
+    - -std=c99
+  Compiler: gcc
