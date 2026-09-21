@@ -49,6 +49,24 @@ void settings_reset(void)
     g_settings.tonemap_exposure = 0.76f;
     g_settings.auto_exposure        = 0;
     g_settings.chromatic_aberration = 0.0f;
+
+    /* Cinematic look defaults: a neutral, unstyled starting point. Depth of
+     * field and the grade are opt-in (0), because both are strong looks and
+     * the renderer should not apply one you did not ask for. The 180° shutter
+     * is the standard cinematic convention and costs nothing until film-out
+     * actually samples across it. */
+    g_settings.cine_live_samples = 4;
+    g_settings.cine_aperture     = 0.0f;
+    g_settings.cine_focus_au     = 0.0f;
+    g_settings.cine_focus_auto   = 1;
+    g_settings.cine_shutter      = 180.0f;
+    g_settings.cine_contrast     = 1.0f;
+    g_settings.cine_saturation   = 1.0f;
+    g_settings.cine_lift         = 0.0f;
+    g_settings.cine_warmth       = 0.0f;
+    g_settings.cine_grain        = 0.0f;
+    g_settings.cine_letterbox    = 0.0f;
+    g_settings.cine_quality      = 2.0f;
     g_settings.vignette             = 0.0f;
     g_settings.lens_spikes          = 0.0f;
     g_settings.lens_flare           = 0.25f;
@@ -175,6 +193,18 @@ void settings_load(void)
     g_settings.tonemap_exposure = (float)json_num(json_get(root, "tonemap_exposure"), g_settings.tonemap_exposure);
     g_settings.auto_exposure        = (int)json_num(json_get(root, "auto_exposure"),            g_settings.auto_exposure);
     g_settings.chromatic_aberration = (float)json_num(json_get(root, "chromatic_aberration"),   g_settings.chromatic_aberration);
+    g_settings.cine_live_samples = (int)  json_num(json_get(root, "cine_live_samples"), g_settings.cine_live_samples);
+    g_settings.cine_aperture     = (float)json_num(json_get(root, "cine_aperture"),     g_settings.cine_aperture);
+    g_settings.cine_focus_au     = (float)json_num(json_get(root, "cine_focus_au"),     g_settings.cine_focus_au);
+    g_settings.cine_focus_auto   = (int)  json_num(json_get(root, "cine_focus_auto"),   g_settings.cine_focus_auto);
+    g_settings.cine_shutter      = (float)json_num(json_get(root, "cine_shutter"),      g_settings.cine_shutter);
+    g_settings.cine_contrast     = (float)json_num(json_get(root, "cine_contrast"),     g_settings.cine_contrast);
+    g_settings.cine_saturation   = (float)json_num(json_get(root, "cine_saturation"),   g_settings.cine_saturation);
+    g_settings.cine_lift         = (float)json_num(json_get(root, "cine_lift"),         g_settings.cine_lift);
+    g_settings.cine_warmth       = (float)json_num(json_get(root, "cine_warmth"),       g_settings.cine_warmth);
+    g_settings.cine_grain        = (float)json_num(json_get(root, "cine_grain"),        g_settings.cine_grain);
+    g_settings.cine_letterbox    = (float)json_num(json_get(root, "cine_letterbox"),    g_settings.cine_letterbox);
+    g_settings.cine_quality      = (float)json_num(json_get(root, "cine_quality"),      g_settings.cine_quality);
     g_settings.vignette             = (float)json_num(json_get(root, "vignette"),               g_settings.vignette);
     g_settings.lens_spikes          = (float)json_num(json_get(root, "lens_spikes"),            g_settings.lens_spikes);
     g_settings.lens_flare           = (float)json_num(json_get(root, "lens_flare"),             g_settings.lens_flare);
@@ -285,6 +315,18 @@ int settings_save(void)
             g_settings.tonemap_mode, (double)g_settings.tonemap_exposure);
     fprintf(f, "  \"auto_exposure\": %d, \"chromatic_aberration\": %.6g,\n",
             g_settings.auto_exposure, (double)g_settings.chromatic_aberration);
+    fprintf(f, "  \"cine_live_samples\": %d, \"cine_aperture\": %.6g,\n",
+            g_settings.cine_live_samples, (double)g_settings.cine_aperture);
+    fprintf(f, "  \"cine_focus_au\": %.6g, \"cine_focus_auto\": %d,\n",
+            (double)g_settings.cine_focus_au, g_settings.cine_focus_auto);
+    fprintf(f, "  \"cine_shutter\": %.6g, \"cine_contrast\": %.6g,\n",
+            (double)g_settings.cine_shutter, (double)g_settings.cine_contrast);
+    fprintf(f, "  \"cine_saturation\": %.6g, \"cine_lift\": %.6g,\n",
+            (double)g_settings.cine_saturation, (double)g_settings.cine_lift);
+    fprintf(f, "  \"cine_warmth\": %.6g, \"cine_grain\": %.6g,\n",
+            (double)g_settings.cine_warmth, (double)g_settings.cine_grain);
+    fprintf(f, "  \"cine_letterbox\": %.6g, \"cine_quality\": %.6g,\n",
+            (double)g_settings.cine_letterbox, (double)g_settings.cine_quality);
     fprintf(f, "  \"vignette\": %.6g, \"lens_spikes\": %.6g, \"lens_flare\": %.6g, \"relativistic\": %.6g,\n",
             (double)g_settings.vignette, (double)g_settings.lens_spikes,
             (double)g_settings.lens_flare,

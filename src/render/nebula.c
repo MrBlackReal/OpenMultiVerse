@@ -26,6 +26,7 @@
  * major-axis sizes (SIMBAD / NED, J2000).
  */
 #include "nebula.h"
+#include "cinematic.h"
 #include "gl_utils.h"
 #include "common.h"
 #include "radiance_field.h"
@@ -239,7 +240,11 @@ void nebula_render(const float vp_camrel[16],
 
         /* Adaptive step count + cheap culling for the far billboard case. The
          * near/inside (fullscreen) case keeps the full step budget. */
-        int steps = s_base_steps;
+        /* Film-out can afford detail a live frame cannot: more march steps
+         * means less banding in the FBM cloud (CINEMATIC.md §8.4). Scaling the
+         * base BEFORE the on-screen-size falloff keeps the distance LOD. */
+        int base_steps = (int)(s_base_steps * cinematic_quality_scale());
+        int steps = base_steps;
         if (!fullscreen) {
             float eye_z = center[0]*cam_fwd[0] + center[1]*cam_fwd[1]
                         + center[2]*cam_fwd[2];
@@ -249,7 +254,7 @@ void nebula_render(const float vp_camrel[16],
             /* Fewer steps the smaller it is on screen. */
             float f = proj_px / (half_h * 0.5f);
             if (f > 1.0f) f = 1.0f;
-            steps = (int)(s_base_steps * f);
+            steps = (int)(base_steps * f);
             if (steps < 6) steps = 6;
         }
 

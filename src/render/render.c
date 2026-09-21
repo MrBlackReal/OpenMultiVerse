@@ -771,7 +771,7 @@ static void draw_ring_2d(const float rel[3], float dr,
     r_px = dr * 1.3f * (WIN_H * 0.5f) / (D * half_fov_tan());
     if (r_px < 12.0f) r_px = 12.0f;
 
-    phase = (float)SDL_GetTicks() * 0.00055f;
+    phase = (float)(g_render_time * 0.55);
     step  = 2.0f * (float)PI / (float)N_DASHES;
 
     for (int d = 0; d < N_DASHES; d++) {
@@ -2098,7 +2098,7 @@ void render_frame(const float view[16], const float proj[16],
     glUniform3f(s_sp_cam_right,  cam_right[0], cam_right[1], cam_right[2]);
     glUniform3f(s_sp_cam_up,     cam_up[0],    cam_up[1],    cam_up[2]);
     glUniform3f(s_sp_cam_fwd,    cam_fwd[0],   cam_fwd[1],   cam_fwd[2]);
-    glUniform1f(s_sp_time,       (float)SDL_GetTicks() * 0.001f);
+    glUniform1f(s_sp_time,       (float)g_render_time);
 
     glBindVertexArray(s_sphere_vao);
 
@@ -2467,7 +2467,7 @@ void render_frame(const float view[16], const float proj[16],
         glUniform3f(s_at_cam_right, cam_right[0], cam_right[1], cam_right[2]);
         glUniform3f(s_at_cam_up,    cam_up[0],    cam_up[1],    cam_up[2]);
         glUniform3f(s_at_cam_fwd,   cam_fwd[0],   cam_fwd[1],   cam_fwd[2]);
-        float at_now = (float)SDL_GetTicks() * 0.001f;
+        float at_now = (float)g_render_time;
         glUniform1f(s_at_time, at_now);
         /* Real-clock frame dt for the aurora-activity low-pass below. */
         static float s_at_prev = -1.0f;
@@ -2645,7 +2645,7 @@ void render_frame(const float view[16], const float proj[16],
 
         galaxy_render(vp_camrel, cam_right, cam_up, cam_fwd, g_cam.pos,
                       tanf(FOV * 0.5f * (float)(PI / 180.0)), aspect,
-                      gal_w, gal_h, (float)SDL_GetTicks() * 0.001f,
+                      gal_w, gal_h, (float)g_render_time,
                       use_halfres ? gal_depth : 0);
 
         if (use_halfres) {
@@ -2675,7 +2675,7 @@ void render_frame(const float view[16], const float proj[16],
      * the painted neighbourhood skybox fades out. Always full-res (cheap
      * points, correct depth test against opaque geometry). */
     galaxy_render_stars(vp_camrel, g_cam.pos, 1.0f - sf_fade,
-                        (float)SDL_GetTicks() * 0.001f);
+                        (float)g_render_time);
 
     if (zt_name) profiler_zone_add(zt_name, profiler_now_ms() - zt0);
     zt_name = "Nebulae (vol)"; zt0 = profiler_now_ms();
@@ -3208,7 +3208,7 @@ void render_frame(const float view[16], const float proj[16],
     if (dot_count > 0) {
         glUseProgram(s_dot_shader);
         glUniformMatrix4fv(s_dot_vp, 1, GL_FALSE, vp_camrel);
-        glUniform1f(s_dot_time,    (float)SDL_GetTicks() * 0.001f);
+        glUniform1f(s_dot_time,    (float)g_render_time);
         glUniform1f(s_dot_twinkle, (float)g_settings.star_twinkle);
         glBindVertexArray(s_dot_vao);
         glBindBuffer(GL_ARRAY_BUFFER, s_dot_vbo);
@@ -3260,7 +3260,7 @@ void render_frame(const float view[16], const float proj[16],
                     (float)(g_cam.pos[2] - s_field_ref[2]));
         glUniform1f(s_field_near,    near_dist);
         glUniform1f(s_field_horizon, (float)g_settings.farfield_horizon_au);
-        glUniform1f(s_field_time,    (float)SDL_GetTicks() * 0.001f);
+        glUniform1f(s_field_time,    (float)g_render_time);
         glUniform1f(s_field_twinkle, (float)g_settings.star_twinkle);
         glBindVertexArray(s_field_vao);
         glEnable(GL_DEPTH_TEST);
@@ -3309,7 +3309,7 @@ void render_frame(const float view[16], const float proj[16],
         glUniform3f(s_gl_up,    cam_up[0],    cam_up[1],    cam_up[2]);
         glUniform1f(s_gl_spike,  (float)g_settings.lens_spikes);
         glUniform1f(s_gl_corona, (float)g_settings.star_corona);
-        glUniform1f(s_gl_time,   (float)SDL_GetTicks() * 0.001f);
+        glUniform1f(s_gl_time,   (float)g_render_time);
 
         glEnable(GL_BLEND);
         glBlendFunc(GL_ONE, GL_ONE);   /* purely additive */
@@ -3382,7 +3382,7 @@ void render_frame(const float view[16], const float proj[16],
      * comet.c owns the pass; activity comes from the RadianceField, so this
      * costs nothing in comet-less universes (one flag test per body). */
     comet_render(vp_camrel, cam_right, cam_up, cam_fwd, g_cam.pos,
-                 (float)SDL_GetTicks() * 0.001f);
+                 (float)g_render_time);
 
     if (zt_name) profiler_zone_add(zt_name, profiler_now_ms() - zt0);
     zt_name = "Black holes"; zt0 = profiler_now_ms();
@@ -3443,7 +3443,7 @@ void render_frame(const float view[16], const float proj[16],
         glUniformMatrix4fv(s_bh_vp, 1, GL_FALSE, vp_camrel);
         glUniform3f(s_bh_right, cam_right[0], cam_right[1], cam_right[2]);
         glUniform3f(s_bh_up,    cam_up[0],    cam_up[1],    cam_up[2]);
-        glUniform1f(s_bh_time,  (float)SDL_GetTicks() * 0.001f);
+        glUniform1f(s_bh_time,  (float)g_render_time);
         glUniform1i(s_bh_scene, 0);
 
         glEnable(GL_BLEND);
@@ -3539,7 +3539,7 @@ void render_frame(const float view[16], const float proj[16],
     if (s_jet_shader) {
         glUseProgram(s_jet_shader);
         glUniformMatrix4fv(s_jet_vp, 1, GL_FALSE, vp_camrel);
-        glUniform1f(s_jet_time, (float)SDL_GetTicks() * 0.001f);
+        glUniform1f(s_jet_time, (float)g_render_time);
 
         glEnable(GL_BLEND);
         glBlendFunc(GL_ONE, GL_ONE);          /* additive glow */
@@ -3612,7 +3612,7 @@ void render_frame(const float view[16], const float proj[16],
         glUniform3f(s_torus_up,    cam_up[0],    cam_up[1],    cam_up[2]);
         glUniform1f(s_torus_rmaj,  RMAJ);
         glUniform1f(s_torus_rmin,  RMIN);
-        glUniform1f(s_torus_time,  (float)SDL_GetTicks() * 0.001f);
+        glUniform1f(s_torus_time,  (float)g_render_time);
 
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);

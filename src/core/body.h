@@ -148,6 +148,16 @@ void body_update_cam_proximity(void);
 /* Index of the star body nearest to the camera, from g_cam_prox. */
 int nearest_star_idx(void);
 
+/* Find a living, non-field body by name (case-insensitive); -1 if there is no
+ * match. The bulk field-star range is skipped in O(1): those are frozen
+ * scenery and are never a camera subject, and scanning ~260k of them per frame
+ * would be a top per-frame cost.
+ *
+ * Callers should resolve names per frame rather than caching the index — a
+ * body can be absorbed mid-shot, and g_nbodies' dead slots get reused, so a
+ * stale index can silently come back pointing at a different body. */
+int body_find_named(const char *name);
+
 /* Walk parent links to find the owning root star for a body. */
 int body_root_star(int i);
 

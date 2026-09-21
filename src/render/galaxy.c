@@ -11,6 +11,7 @@
  * Data: SIMBAD/NED J2000 positions, distances, major-axis sizes, inclinations.
  */
 #include "galaxy.h"
+#include "cinematic.h"
 #include "starsys.h"     /* suppressed cells: promoted stars are real bodies */
 #include "gl_utils.h"
 #include "common.h"
@@ -335,7 +336,9 @@ void galaxy_render(const float vp_camrel[16],
 
         int fullscreen = needs_fullscreen(center, cam_fwd, radf);
 
-        int steps = s_base_steps;
+        /* See nebula.c: film-out buys extra march steps (CINEMATIC.md §8.4). */
+        int base_steps = (int)(s_base_steps * cinematic_quality_scale());
+        int steps = base_steps;
         if (!fullscreen) {
             float eye_z = center[0]*cam_fwd[0] + center[1]*cam_fwd[1]
                         + center[2]*cam_fwd[2];
@@ -344,7 +347,7 @@ void galaxy_render(const float vp_camrel[16],
             if (proj_px < 0.7f) continue;                /* sub-pixel: skip */
             float f = proj_px / (half_h * 0.5f);
             if (f > 1.0f) f = 1.0f;
-            steps = (int)(s_base_steps * f);
+            steps = (int)(base_steps * f);
             if (steps < 8) steps = 8;
         }
 

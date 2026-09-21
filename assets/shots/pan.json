@@ -1,0 +1,4 @@
+{ "name": "fast pan", "keys": [
+  { "t": 0.0, "pos": [-0.1375, 0.0002, 0.9696], "yaw": 120, "pitch": 0, "fov": 30, "ease": "linear" },
+  { "t": 1.0, "pos": [-0.1375, 0.0002, 0.9696], "yaw": 160, "pitch": 0, "fov": 30, "ease": "linear" }
+] }

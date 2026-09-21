@@ -122,6 +122,25 @@ typedef struct {
     double present_dt;         /* min seconds between overlay presents         */
     float  accent_r, accent_g, accent_b;
 
+    /* ---- cinematic renderer (CINEMATIC.md §8) -------------------------
+     * The look layer, as opposed to the film-out *job* (resolution, fps,
+     * duration, output path) which lives in g_cine. These are here because
+     * live --cinematic is the tuning surface: the ImGui Look panel edits them
+     * by eye and settings.json persists them, so what you dial in is what
+     * films. CLI flags override them at startup, as --fov/--exposure do. */
+    int    cine_live_samples;  /* accumulation sub-frames in live mode        */
+    float  cine_aperture;      /* f-number; 0 = depth of field off            */
+    float  cine_focus_au;      /* manual focus distance (AU)                  */
+    int    cine_focus_auto;    /* 1 = focus on the nearest body each frame    */
+    float  cine_shutter;       /* shutter angle in degrees; 0 = no motion blur*/
+    float  cine_contrast;      /* grade: contrast about the 0.18 pivot        */
+    float  cine_saturation;    /* grade: 0 = mono, 1 = unchanged              */
+    float  cine_lift;          /* grade: raise shadows (film black level)     */
+    float  cine_warmth;        /* grade: colour temperature, -1 cool +1 warm  */
+    float  cine_grain;         /* film grain amount; 0 = off                  */
+    float  cine_letterbox;     /* target aspect (2.39 = scope); 0 = off       */
+    float  cine_quality;       /* film-out raymarch step multiplier (1 = same)*/
+
     /* ---- trail sampling geometry ------------------------------------- */
     double trail_min_segment_len, trail_max_segment_len;
     double trail_base_segment_len, trail_satellite_segment_len;

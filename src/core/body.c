@@ -22,6 +22,7 @@
 #include "universe.h"   /* g_field_star_begin/end */
 #include "physics.h"    /* physics_active_bodies (near field stars) */
 #include <math.h>
+#include <strings.h>   /* strcasecmp — body_find_named */
 
 Body *g_bodies     = NULL;
 int   g_nbodies    = 0;
@@ -208,6 +209,20 @@ static inline void prox_consider(int i, int *star, double *star_d2,
  * readout and adaptive-warp governor still react to an approached field star. */
 #define CAM_PROX_NEAR_LY 20.0
 #define CAM_PROX_NEAR_MAX 4096
+
+int body_find_named(const char *name)
+{
+    if (!name || !name[0]) return -1;
+    for (int i = 0; i < g_nbodies; i++) {
+        if (i >= g_field_star_begin && i < g_field_star_end) {
+            i = g_field_star_end - 1;      /* skip the frozen bulk in one step */
+            continue;
+        }
+        if (g_bodies[i].alive && strcasecmp(g_bodies[i].name, name) == 0)
+            return i;
+    }
+    return -1;
+}
 
 void body_update_cam_proximity(void)
 {

@@ -51,8 +51,28 @@ void main() {
     vec2  dc     = v_uv - u_rel_center;               /* vector from heading    */
     float head_r = length(dc) * 1.41421356;          /* 0 at heading .. ~1 far */
     vec2 suv = v_uv;
-    if (u_rel_beta > 0.0)
-        suv = v_uv + dc * (u_rel_beta * 0.55 * (1.0 - rel_r));
+    if (u_rel_beta > 0.0) {
+        vec2 shift = dc * (u_rel_beta * 0.55 * (1.0 - rel_r));
+
+        /* The taper above is measured from the SCREEN CENTRE while the shift is
+         * measured from the HEADING POINT, and the two coincide only when
+         * travelling straight down the look axis. Whenever they differ — i.e.
+         * whenever the camera is actually manoeuvring — the taper does not
+         * reach zero before the frame edge, suv lands outside [0,1], and
+         * CLAMP_TO_EDGE smears the border texels into a visible blurred frame
+         * around the picture.
+         *
+         * Scale the shift back by whatever factor keeps the sample inside the
+         * texture. The aberration then weakens near the edge instead of
+         * sampling off it, which is the intended look and costs a multiply. */
+        vec2 lo = -v_uv, hi = vec2(1.0) - v_uv;
+        float k = 1.0;
+        if (shift.x >  hi.x) k = min(k, hi.x / shift.x);
+        if (shift.x <  lo.x) k = min(k, lo.x / shift.x);
+        if (shift.y >  hi.y) k = min(k, hi.y / shift.y);
+        if (shift.y <  lo.y) k = min(k, lo.y / shift.y);
+        suv = v_uv + shift * clamp(k, 0.0, 1.0);
+    }
 
     /* Chromatic aberration: split the channels radially, growing toward the
      * edges (r^2), so the centre stays sharp. */

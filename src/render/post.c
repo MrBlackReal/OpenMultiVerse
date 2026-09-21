@@ -35,6 +35,21 @@ static float  s_rel_beta  = 0.0f;    /* relativistic optics 0..1 (set per frame)
 static float  s_rel_cx    = 0.5f;    /* heading point in UV (velocity vector)   */
 static float  s_rel_cy    = 0.5f;
 
+/* Final-composite target. 0 = the default framebuffer (normal path); the
+ * cinematic renderer points this at its sub-frame FBO so each accumulation
+ * sample lands in a texture instead of the back buffer. Everything downstream
+ * of the composite (the flare overlay) follows it automatically. */
+static GLuint s_target = 0;
+
+/* Auto-exposure hold. The adaptation eases s_adapted toward the target once
+ * per post_end(), which under accumulation sampling is once per SUB-frame —
+ * so it would converge N times too fast and wobble within a single output
+ * frame, i.e. the brightness would vary across the samples being averaged.
+ * The cinematic renderer holds it for every sub-frame after the first, so the
+ * whole output frame shares one exposure and the adaptation rate stays
+ * per-frame as it always was. */
+static int s_ae_hold = 0;
+
 /* Lens flare (set per frame by render.c; intensity 0 = pass skipped). */
 static float  s_flare_x = 0.0f, s_flare_y = 0.0f;   /* light NDC          */
 static float  s_flare_depth = 1.0f;                 /* light log depth    */
@@ -265,6 +280,16 @@ unsigned int post_grab_scene(void)
     return s_grab_tex;
 }
 
+void post_set_target(unsigned int fbo)
+{
+    s_target = (GLuint)fbo;
+}
+
+void post_set_autoexposure_hold(int hold)
+{
+    s_ae_hold = hold ? 1 : 0;
+}
+
 void post_get_bloom(int *enabled, float *threshold, float *intensity)
 {
     if (enabled)   *enabled   = s_enabled;
@@ -333,6 +358,8 @@ static float auto_exposure_factor(void)
     int max_dim = s_w > s_h ? s_w : s_h;
     if (max_dim < 1) return 1.0f;
     int last = (int)floorf(log2f((float)max_dim));   /* 1x1 mip level */
+
+    if (s_ae_hold) return s_adapted;   /* reuse this output frame's value */
 
     glBindTexture(GL_TEXTURE_2D, s_scene_tex);
     glGenerateMipmap(GL_TEXTURE_2D);
@@ -432,8 +459,9 @@ void post_end(void)
         level_final[l] = src_tex;
     }
 
-    /* 3. Composite scene + the three glow scales to the default framebuffer. */
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    /* 3. Composite scene + the three glow scales to the output target (the
+     * default framebuffer unless the cinematic renderer redirected it). */
+    glBindFramebuffer(GL_FRAMEBUFFER, s_target);
     glViewport(0, 0, WIN_W, WIN_H);
     glUseProgram(s_sh_comp);
     glActiveTexture(GL_TEXTURE0);
@@ -458,8 +486,8 @@ void post_end(void)
 
     /* 4. Lens flare: additive LDR overlay on top of the tonemapped image (a
      * lens artifact happens after the "film").  The scene depth texture is
-     * sampled for occlusion — legal here because the default framebuffer is
-     * bound, so it is no longer a render-target attachment.  Skipped entirely
+     * sampled for occlusion — legal here because the composite target is
+     * bound, so the depth texture is no longer a render-target attachment.  Skipped entirely
      * at zero intensity: the composite above stays byte-identical. */
     if (s_sh_flare && s_flare_i > 1e-4f) {
         glEnable(GL_BLEND);

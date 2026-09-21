@@ -1,0 +1,45 @@
+// Showcase — 30s, the reference render for the cinematic camera system.
+//
+//   ./verse --cinematic --output showcase.mp4 --shot-script assets/shots/showcase.json \
+//           --res 1920x1080 --fps 24 --samples 24 --letterbox --grain 0.02 \
+//           --relativistic 0
+//
+// Authoring notes, each one learned the hard way:
+//
+//  * EVERY key is placed relative to the SUN, along the galactic pole. An
+//    earlier draft placed the far keys relative to the galactic CENTRE, which
+//    teleported the camera from 22 AU off the Sun to 63 light years from
+//    Sgr A* — inside the core, which blew the frame out to white. One origin
+//    per continuous move.
+//  * Keys are spaced GEOMETRICALLY once the camera leaves the system.
+//    Catmull-Rom takes a key's tangent from its neighbours, so adjacent
+//    segments of wildly different length make the spline overshoot.
+//  * Rising along the pole from the Sun arrives face-on to the disc with no
+//    separate move; the Sun's 26 kly offset stops mattering billions of AU out.
+//  * SHUTTER closes for the fast legs. At these speeds a star crosses the
+//    frame within one frame interval, and a 180-degree shutter renders that as
+//    N discrete ghosts ("double vision") rather than a streak — no practical
+//    sample count fixes it. Closing the shutter shortens the streak instead.
+//  * PACING: the galactic interior is a featureless haze, so the climb through
+//    it is compressed and the spiral reveal lands at ~21s and is then held for
+//    the last third. The eye wants to rest on the payoff, not on the transit.
+//  * timescale drops to 1 at galactic scale: nothing visibly animates out
+//    there, and sim time costs real render time (motion blur re-runs the
+//    integrator once per accumulation sample).
+{
+  "name": "Showcase",
+  "keys": [
+    { "t": 0.0, "anchor": "Earth", "offset": [0.00030400, 0.00011400, 0.00019760], "look_at": "Earth", "fov": 34, "focus": "Earth", "aperture": 2.2, "timescale": 1, "shutter": 180, "ease": "inout" },
+    { "t": 4.0, "anchor": "Earth", "offset": [0.00049600, 0.00018600, 0.00032240], "look_at": "Earth", "fov": 35, "focus": "Earth", "aperture": 3.0, "timescale": 4, "shutter": 180, "ease": "inout" },
+    { "t": 7.0, "anchor": "Earth", "offset": [0.00084000, 0.00031500, 0.00054600], "look_at": "Earth", "fov": 37, "focus": "Earth", "aperture": 6.0, "timescale": 4, "shutter": 180, "ease": "inout" },
+    { "t": 10.0, "anchor": "Sun", "offset": [-1.21474, 0.695997, -0.000485621], "look_at": "Sun", "fov": 42, "aperture": 0, "timescale": 25, "shutter": 180, "ease": "inout" },
+    { "t": 13.0, "anchor": "Sun", "offset": [-15.6181, 8.94854, -0.00624369], "look_at": "Sun", "fov": 48, "aperture": 0, "timescale": 45, "shutter": 140, "ease": "inout" },
+    { "t": 15.0, "pos": [-7809.02, 4474.27, -3.12464], "yaw": -93.1604, "pitch": -5.5357, "fov": 50, "aperture": 0, "timescale": 30, "shutter": 60, "ease": "inout" },
+    { "t": 17.0, "pos": [-1.90887e+06, 1.09371e+06, -763.121], "yaw": -93.0939, "pitch": -5.5738, "fov": 50, "aperture": 0, "timescale": 10, "shutter": 30, "ease": "inout" },
+    { "t": 19.0, "pos": [-1.21474e+08, 6.95997e+07, -48562.1], "yaw": -88.9045, "pitch": -7.9491, "fov": 50, "aperture": 0, "timescale": 3, "shutter": 30, "ease": "inout" },
+    { "t": 21.0, "pos": [-1.38827e+09, 7.95425e+08, -554995], "yaw": -51.5271, "pitch": -24.5727, "fov": 50, "aperture": 0, "timescale": 1, "shutter": 60, "ease": "inout" },
+    { "t": 24.0, "pos": [-2.95008e+09, 1.69028e+09, -1.17936e+06], "yaw": -29.7241, "pitch": -29.3112, "fov": 50, "aperture": 0, "timescale": 1, "shutter": 120, "ease": "inout" },
+    { "t": 27.0, "pos": [-4.33835e+09, 2.4857e+09, -1.73436e+06], "yaw": -21.0184, "pitch": -30.1587, "fov": 50, "aperture": 0, "timescale": 1, "shutter": 150, "ease": "inout" },
+    { "t": 30.0, "pos": [-5.55309e+09, 3.1817e+09, -2.21998e+06], "yaw": -16.6311, "pitch": -30.3651, "fov": 48, "aperture": 0, "timescale": 1, "shutter": 180, "ease": "out" }
+  ]
+}

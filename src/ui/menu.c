@@ -23,6 +23,8 @@
 #include "field_graph.h"
 #include "spectral.h"
 #include "physics.h"
+#include "cinematic.h"
+#include "cinema_cam.h"
 #include <math.h>
 #include <string.h>
 #include <strings.h>
@@ -972,6 +974,214 @@ static void menu_render_settings(void)
         igSliderFloat("Mouse sens min", &g_settings.mouse_sens_min, 0.01f, 1.0f, "%.2f", 0);
         igSliderFloat("Mouse sens max", &g_settings.mouse_sens_max, 0.1f, 5.0f, "%.2f", 0);
         igPopItemWidth();
+    }
+
+    igSpacing();
+    if (igCollapsingHeader_TreeNodeFlags("Cinematic (look)", 0)) {
+        /* These are the film-out look controls (CINEMATIC.md §8). They live in
+         * g_settings and persist, because live --cinematic is the tuning
+         * surface: what you dial in here is what films. */
+        if (!cinematic_active())
+            igTextDisabled("Renderer inactive — start with --cinematic to see\n"
+                           "these applied. They still persist and still film.");
+
+        igPushItemWidth(igGetContentRegionAvail().x * w);
+
+        igSeparatorText("Sampling");
+        if (igSliderInt("Samples (live)", &g_settings.cine_live_samples, 1, 64,
+                        "%d", ImGuiSliderFlags_Logarithmic))
+            cinematic_set_samples(g_settings.cine_live_samples);
+        igSetItemTooltip("Accumulation sub-frames per frame. Drives antialiasing,\n"
+                         "depth of field and motion blur together.\n"
+                         "Cost is linear: 32 samples is 32x the render time.\n"
+                         "Film-out uses --samples instead (default 32).");
+        igSliderFloat("Film quality", &g_settings.cine_quality, 1.0f, 8.0f, "%.1fx", 0);
+        igSetItemTooltip("Raymarch step multiplier for nebulae and galaxies,\n"
+                         "applied during film-out only. Less banding, slower.");
+
+        igSeparatorText("Lens");
+        igSliderFloat("Aperture", &g_settings.cine_aperture, 0.0f, 22.0f,
+                      g_settings.cine_aperture <= 0.0f ? "off" : "f/%.1f", 0);
+        igSetItemTooltip("Depth of field. 0 = off; lower f-number = shallower.\n"
+                         "Scaled to the focus distance, not a literal 35mm\n"
+                         "aperture (which would blur nothing at AU scale).");
+        igCheckbox("Auto-focus nearest", (bool *)&g_settings.cine_focus_auto);
+        igSetItemTooltip("Focus on the nearest body each frame. Turn off to use\n"
+                         "the manual distance below. --focus <name> overrides both.");
+        if (!g_settings.cine_focus_auto)
+            igSliderFloat("Focus distance", &g_settings.cine_focus_au, 0.0001f, 1000.0f,
+                          "%.4f AU", ImGuiSliderFlags_Logarithmic);
+        {
+            double f = cinematic_focus_distance();
+            if (f > 0.0) igTextDisabled("Focused at %.5g AU", f);
+            else         igTextDisabled("Depth of field off.");
+        }
+        igSliderFloat("Shutter", &g_settings.cine_shutter, 0.0f, 360.0f, "%.0f deg", 0);
+        igSetItemTooltip("Motion blur length. 180 is the film convention;\n"
+                         "0 disables it. Note blur re-runs the simulation once\n"
+                         "per sample, so it costs sim time as well as render time.");
+
+        igSeparatorText("Grade");
+        igSliderFloat("Contrast",   &g_settings.cine_contrast,   0.5f, 2.0f, "%.2f", 0);
+        igSliderFloat("Saturation", &g_settings.cine_saturation, 0.0f, 2.0f, "%.2f", 0);
+        igSliderFloat("Lift",       &g_settings.cine_lift,       0.0f, 0.2f, "%.3f", 0);
+        igSetItemTooltip("Raise the black level, the way film never sits at zero.");
+        igSliderFloat("Warmth",     &g_settings.cine_warmth,    -1.0f, 1.0f, "%.2f", 0);
+        igSliderFloat("Grain",      &g_settings.cine_grain,      0.0f, 0.25f, "%.3f", 0);
+        igSetItemTooltip("Film grain, weighted to the midtones so it stays out\n"
+                         "of empty space.");
+        {
+            /* Letterbox as named formats: an arbitrary aspect slider invites
+             * values nobody shoots. */
+            static const float AR[]  = { 0.0f, 1.85f, 2.00f, 2.35f, 2.39f };
+            int cur = 0;
+            for (int i = 1; i < 5; i++)
+                if (fabsf(g_settings.cine_letterbox - AR[i]) < 0.01f) cur = i;
+            if (igCombo_Str("Letterbox", &cur,
+                            "Off\0" "1.85:1\0" "2.00:1\0" "2.35:1\0" "2.39:1 (scope)\0", -1))
+                g_settings.cine_letterbox = AR[cur];
+        }
+        igPopItemWidth();
+
+        if (igButton("Reset look to defaults", (ImVec2_c){ -1.0f, 0.0f })) {
+            g_settings.cine_aperture   = 0.0f;
+            g_settings.cine_focus_auto = 1;
+            g_settings.cine_shutter    = 180.0f;
+            g_settings.cine_contrast   = 1.0f;
+            g_settings.cine_saturation = 1.0f;
+            g_settings.cine_lift       = 0.0f;
+            g_settings.cine_warmth     = 0.0f;
+            g_settings.cine_grain      = 0.0f;
+            g_settings.cine_letterbox  = 0.0f;
+        }
+    }
+
+    igSpacing();
+    if (igCollapsingHeader_TreeNodeFlags("Cinematic (shot)", 0)) {
+        /* Keyframed camera shots (CINEMATIC.md §9.3/§9.4). Authoring is
+         * deliberately available in the NORMAL app, not only under
+         * --cinematic: you fly to a framing you like and pin it with K. */
+        static char s_shot_path[256] = "assets/shots/untitled.json";
+        int nk = cinema_shot_key_count();
+
+        igTextDisabled("%s — %d key%s, %.2fs", cinema_shot_name(), nk,
+                       nk == 1 ? "" : "s", cinema_shot_duration());
+        igTextDisabled("Press K in the world to pin the current pose "
+                       "(Shift+K removes the last).");
+
+        igPushItemWidth(igGetContentRegionAvail().x * w);
+        igInputText("Path", s_shot_path, sizeof s_shot_path, 0, NULL, NULL);
+        igPopItemWidth();
+        if (igButton("Load", (ImVec2_c){ 90.0f, 0.0f })) cinema_shot_load(s_shot_path);
+        igSameLine(0.0f, 8.0f);
+        if (igButton("Save", (ImVec2_c){ 90.0f, 0.0f })) cinema_shot_save(s_shot_path);
+        igSameLine(0.0f, 8.0f);
+        if (igButton("Add key here", (ImVec2_c){ 120.0f, 0.0f }))
+            cinema_shot_add_key_here(5.0);
+        igSameLine(0.0f, 8.0f);
+        if (igButton("Clear", (ImVec2_c){ 70.0f, 0.0f })) cinema_shot_clear();
+
+        if (cinema_shot_active()) {
+            igSeparatorText("Playback");
+            if (cinema_shot_playing()) {
+                if (igButton("Stop", (ImVec2_c){ 90.0f, 0.0f })) cinema_shot_stop();
+            } else {
+                if (igButton("Play", (ImVec2_c){ 90.0f, 0.0f })) cinema_shot_play(0.0);
+            }
+            igSameLine(0.0f, 8.0f);
+            igTextDisabled("playing drives the camera; Stop restores your settings");
+            {
+                /* Scrubbing previews without running the clock, so you can park
+                 * on a moment and judge the framing. */
+                float t = (float)cinema_shot_time();
+                igPushItemWidth(igGetContentRegionAvail().x * w);
+                if (igSliderFloat("Scrub", &t, 0.0f,
+                                  (float)cinema_shot_duration(), "%.2f s", 0)) {
+                    cinema_shot_set_time((double)t);
+                    cinema_shot_eval((double)t);
+                }
+                igPopItemWidth();
+            }
+        }
+
+        if (nk > 0) {
+            igSeparatorText("Keys");
+            CineKey *keys = cinema_shot_keys();
+            int resort = 0;
+            for (int i = 0; i < nk; i++) {
+                CineKey *k = &keys[i];
+                igPushID_Int(i);
+                char hdr[128];
+                snprintf(hdr, sizeof hdr, "%d — t=%.2fs%s%s", i, k->t,
+                         k->anchor[0]  ? "  anchor:" : "",
+                         k->anchor[0]  ? k->anchor   : "");
+                if (igCollapsingHeader_TreeNodeFlags(hdr, 0)) {
+                    igPushItemWidth(igGetContentRegionAvail().x * w);
+                    float tt = (float)k->t;
+                    if (igInputFloat("Time (s)", &tt, 0.1f, 1.0f, "%.2f", 0)) {
+                        k->t = tt < 0.0f ? 0.0 : (double)tt;
+                        resort = 1;
+                    }
+                    /* Position is double (AU) and can be astronomically large,
+                     * so it is edited as text rather than through a float
+                     * widget that would quantise it. */
+                    {
+                        char buf[128];
+                        snprintf(buf, sizeof buf, "%.10g, %.10g, %.10g",
+                                 k->pos[0], k->pos[1], k->pos[2]);
+                        if (igInputText(k->anchor[0] ? "Offset (AU)" : "Position (AU)",
+                                        buf, sizeof buf,
+                                        ImGuiInputTextFlags_EnterReturnsTrue, NULL, NULL))
+                            sscanf(buf, "%lf , %lf , %lf",
+                                   &k->pos[0], &k->pos[1], &k->pos[2]);
+                    }
+                    igInputText("Anchor body",  k->anchor,     sizeof k->anchor,  0, NULL, NULL);
+                    igInputText("Look at body", k->look_at,    sizeof k->look_at, 0, NULL, NULL);
+                    if (!k->look_at[0]) {
+                        igSliderFloat("Yaw",   &k->yaw,   -180.0f, 180.0f, "%.2f deg", 0);
+                        igSliderFloat("Pitch", &k->pitch,  -89.0f,  89.0f, "%.2f deg", 0);
+                    }
+                    igSliderFloat("FOV", &k->fov, 0.0f, 110.0f,
+                                  k->fov <= 0.0f ? "inherit" : "%.0f deg", 0);
+                    igSliderFloat("Aperture", &k->aperture, -1.0f, 22.0f,
+                                  k->aperture < 0.0f ? "inherit" : "f/%.1f", 0);
+                    igInputText("Focus body", k->focus_name, sizeof k->focus_name, 0, NULL, NULL);
+                    if (!k->focus_name[0])
+                        igSliderFloat("Focus dist", &k->focus_au, 0.0f, 1000.0f,
+                                      k->focus_au <= 0.0f ? "inherit" : "%.4f AU",
+                                      ImGuiSliderFlags_Logarithmic);
+                    {
+                        float ts = (float)k->timescale;
+                        if (igSliderFloat("Timescale", &ts, -1.0f, 3.0e7f,
+                                          ts < 0.0f ? "inherit" : "%.0f x",
+                                          ImGuiSliderFlags_Logarithmic))
+                            k->timescale = (double)ts;
+                    }
+                    {
+                        int e = (int)k->ease;
+                        if (igCombo_Str("Ease", &e,
+                                        "linear\0" "in\0" "out\0" "inout\0" "hold\0", -1))
+                            k->ease = (CineEase)e;
+                    }
+                    igPopItemWidth();
+                    if (igButton("Go to this key", (ImVec2_c){ 140.0f, 0.0f }))
+                        cinema_shot_goto_key(i);
+                    igSameLine(0.0f, 8.0f);
+                    if (igButton("Re-pin here", (ImVec2_c){ 120.0f, 0.0f })) {
+                        /* Overwrite this key's pose with the live camera —
+                         * the usual way to nudge a framing you did not like. */
+                        k->pos[0] = g_cam.pos[0];
+                        k->pos[1] = g_cam.pos[1];
+                        k->pos[2] = g_cam.pos[2];
+                        k->yaw    = g_cam.yaw;
+                        k->pitch  = g_cam.pitch;
+                        k->anchor[0] = 0;
+                    }
+                }
+                igPopID();
+            }
+            if (resort) cinema_shot_sort();
+        }
     }
 
     igSpacing();

@@ -1,0 +1,33 @@
+// Sol departure — the reference shot for the cinematic camera system.
+// Exercises every feature of the format: anchored and absolute keys, look_at
+// tracking, eased segments, and keyframed fov / focus / aperture / timescale.
+//
+//   ./verse --cinematic --output out.mp4 --shot-script assets/shots/sol_departure.json
+//
+// The shot's own length sets the film duration unless --duration says otherwise.
+{
+  "name": "Sol departure",
+  "keys": [
+    // Close on Earth, real time, shallow focus so the background goes soft.
+    { "t": 0.0,  "anchor": "Earth", "offset": [0.00040, 0.00020, 0.00040],
+      "look_at": "Earth", "fov": 30, "focus": "Earth", "aperture": 2.8,
+      "timescale": 1, "ease": "inout" },
+
+    // Ease off the planet and stop the lens down, so the system behind it
+    // comes into focus as Earth shrinks. The clock starts winding forward.
+    { "t": 4.0,  "anchor": "Earth", "offset": [0.0022, 0.0011, 0.0022],
+      "look_at": "Earth", "fov": 34, "focus": "Earth", "aperture": 9,
+      "timescale": 60000, "ease": "inout" },
+
+    // Swing out to a system view, now anchored on the Sun and running fast
+    // enough that the inner planets visibly sweep their orbits.
+    { "t": 9.0,  "anchor": "Sun", "offset": [1.5, 2.5, 6.0],
+      "look_at": "Sun", "fov": 45, "aperture": 0,
+      "timescale": 3000000, "ease": "inout" },
+
+    // Leave. An absolute position, so the departure is from the system itself
+    // rather than relative to anything moving inside it.
+    { "t": 14.0, "pos": [0, 24, 58], "look_at": "Sun", "fov": 52,
+      "timescale": 3000000, "ease": "out" }
+  ]
+}

@@ -41,6 +41,19 @@ unsigned int post_scene_fbo(void);
  * is only valid until the next post_grab_scene()/post_end(). */
 unsigned int post_grab_scene(void);
 
+/* Redirect the final composite (and the lens-flare overlay that follows it)
+ * to `fbo` instead of the default framebuffer; 0 restores the normal path.
+ * The cinematic renderer uses this to capture each accumulation sub-frame into
+ * a texture. Persists until changed, so callers must reset it. */
+void post_set_target(unsigned int fbo);
+
+/* Freeze auto-exposure adaptation at its current value. Accumulation sampling
+ * calls post_end() once per sub-frame; without this the exposure would adapt N
+ * times per output frame and drift across the very samples being averaged.
+ * The cinematic renderer holds from the second sub-frame onward, so one output
+ * frame is rendered at one exposure. */
+void post_set_autoexposure_hold(int hold);
+
 void post_get_bloom(int *enabled, float *threshold, float *intensity);
 void post_set_bloom(int enabled, float threshold, float intensity);
 

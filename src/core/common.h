@@ -29,6 +29,13 @@
 extern int g_win_w;
 extern int g_win_h;
 extern int g_hud_hidden;   /* 1 = suppress the 2D HUD overlay + body labels */
+
+/* Monotonic animation clock in seconds, advanced by main.c once per frame.
+ * Everything that animates on real time (corona shimmer, galaxy rotation,
+ * jet/torus phases, twinkle) reads this rather than SDL_GetTicks, because
+ * cinematic film-out advances it by exactly 1/fps per frame — a wall-clock
+ * phase would make an otherwise deterministic render irreproducible. */
+extern double g_render_time;
 #define WIN_W  g_win_w
 #define WIN_H  g_win_h
 /*
