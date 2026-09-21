@@ -25,7 +25,7 @@ out vec3 v_world;
  * far beyond the raymarched core — out to where the true deflection falls
  * below a pixel — so the background warp fades out physically instead of
  * cutting off at the quad edge. */
-const float BILL_SCALE = 2000.0;
+const float BILL_SCALE = 20000.0;
 
 void main() {
     vec2 off   = a_uv * 2.0 - 1.0;          /* -1 .. +1 */

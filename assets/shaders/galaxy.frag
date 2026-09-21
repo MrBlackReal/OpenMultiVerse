@@ -327,5 +327,9 @@ void main() {
     eye_depth = clamp(eye_depth, 0.0, FAR * 0.9995);
     gl_FragDepth = log2(eye_depth + 1.0) / log2(FAR + 1.0);
 
+    /* Star veil (render.c): emission drowns in a nearby star's glare, as in
+     * nebula.frag. Applied here rather than in the half-res composite so the
+     * direct path (the black-hole lensing environment) is veiled identically. */
+    accumC *= veil_vis(rd, max(max(accumC.r, accumC.g), accumC.b) * VEIL_DIFFUSE);
     frag_color = vec4(accumC, accumA);
 }

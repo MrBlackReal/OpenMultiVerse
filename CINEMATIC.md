@@ -1,6 +1,6 @@
 # Cinematic Renderer — Design Specification
 
-Status: **phases 1-3 implemented and verified; phase 4 in progress; phase 5 specified.** This
+Status: **phases 1-5 implemented and verified.** This
 document is the agreed design for the `--cinematic` feature set. It is the authority for this work; when it
 disagrees with `docs/UNIFIED_ROADMAP_REFINED.md` §6 (Layer 6 — Camera &
 Cinematic System), this document wins, and Layer 6 should be considered
@@ -155,6 +155,7 @@ block (currently around `main.c:1272`).
 | `--letterbox [AR]` | off | Crop to aspect (default `2.39`) with bars, and bake the film grade |
 | `--no-audio` | — | Do not mux the soundtrack |
 | `--audio PATH` | `assets/soundtrack.ogg` | Alternate audio track |
+| `--no-orbits` | off | No orbit trails or orbit prediction: not drawn, and not computed (the per-step trail tick, snapshots and roll-backs, and the predictor all return at once, warm-up included) |
 
 ### 3.6 Flag interactions
 
@@ -433,6 +434,69 @@ tonemap: lift/gamma/gain (or a 3D LUT), film grain, optional halation on the
 brightest highlights, and letterbox crop. Off by default; `--letterbox` turns on
 bars + grade together since they are one stylistic choice.
 
+### 8.3a Star veil — glare from a nearby star
+
+A camera exposed for a nearby star cannot record the stars behind it: the Sun
+from Earth is ~25 magnitudes brighter than Sirius, which is why Apollo photos
+show a black sky. The background layers are tuned for visibility rather than
+scaled physically, so beside a blazing sun they used to stay at full strength.
+
+The first version was a uniform exposure cut, which dimmed the whole sky
+evenly. That produced a black sky with a sun pasted into it and read as
+unrealistic. The shipped model is **glare**, and one formula
+(`src/render/star_veil.h`) runs in C and, through the `gl_utils.c` shader
+prelude, in GLSL:
+
+```
+glare(theta) = E_psf * 100/theta^2  +  E_floor * 0.14      theta in degrees
+visible      = smoothstep(-1, 1.5, log2(lum / glare))
+haze(theta)  = E_psf * 100/theta^2                          added in post
+E_psf        = 0.01 * (irradiance/Earth)        * frame weight * eclipse
+E_floor      = 300  * (irradiance/Earth)^0.5    * frame weight * eclipse
+```
+
+- **Two scales, two jobs.** `E_psf` is the star's glare point-spread and
+  follows its *linear* brightness. With a 1/θ² PSF, the angle at which the
+  glare reaches any given level then shrinks as 1/d, exactly like the disc:
+  the Sun's glow is huge from Mercury and a small bright point from Neptune,
+  matching a planet-by-planet reference. `E_floor` is the overall exposure
+  cut, on a square-root scale so the washout eases off smoothly as you leave a
+  system: a black sky from Mercury to Saturn, only the brightest stars and the
+  Milky Way core at Neptune, the Milky Way back by ~100 AU, nearly nothing by
+  1500 AU.
+- **Local.** The sky drowns nearest the star first, and a star just outside
+  the frame washes out the edge it is about to enter.
+- **By brightness.** Each source is tested against the glare at its own
+  position, so faint stars go first while bright stars, and the Milky Way far
+  from the star, hold on. Diffuse layers (galaxy, nebula) are tested four stops
+  brighter than they are drawn, because the star sprites are overbright for
+  visibility and a like-for-like test drowned the Milky Way far too early.
+- **The glare you see is the glare that hides.** The visible haze and the
+  mask's local term are one quantity, so a source is only hidden where glare of
+  comparable brightness is on screen, and no black hole can form around a star.
+  Two earlier versions broke this and are worth remembering: one saturated the
+  haze as a camera stopping down would, which kept the Sun's glow the same size
+  from Mars to Neptune; one scaled the mask far above the drawn haze, which cut
+  a black disc around the Sun at Uranus and Neptune.
+- **Frame weight and eclipses.** Full when the star is in frame, fading out
+  30° past the edge (stray light, as behind a lens hood), none from behind. A
+  planet covering the disc removes its glare, so stars come out during totality.
+- **Exempt.** The dominant star's own system (planets, belts, companion) is
+  what the exposure is set for, and is never veiled.
+- **Capped at ~10x Earth's sunlight.** Past that a camera stops down rather than
+  letting glare grow without bound; uncapped, 60 AU from an accreting black
+  hole put the haze in the thousands and the frame went solid white.
+- **Black holes cast no point glare.** Their light comes from an extended
+  accretion disc, and the centre is the shadow; a point PSF there buried the
+  shadow and photon ring under a white blob. They still set the exposure.
+
+Layers covered: skybox starfield, dynamic star dots and other stars' coronae
+(on the CPU, which is how the exemption works), field stars, cluster glows,
+galaxy volumes (volume composite) and nebulae. It has **no setting, slider or
+flag**, deliberately: a real camera has no glare knob, the glare simply is.
+Tuning lives in the constants in `star_veil.h` and `STAR_VEIL_SCALE` /
+`STAR_VEIL_PSF` in `render.c`. It applies in the normal app too, not only cinematic mode.
+
 ### 8.4 Quality wins in film-out
 
 Two of the four turned out to be free, and are **done**:
@@ -453,6 +517,34 @@ The other two are **not free and are deferred**, with reasons:
   shader-variant or `#define`-injection mechanism first.
 - `BLOOM_LEVELS` (`post.c:50`) sizes fixed arrays and a 3-component weight
   uniform. Raising it is a real refactor of `post.c`, not a constant bump.
+
+### 8.4a Earth surface imagery
+
+Earth is textured with real satellite imagery rather than the procedural
+recipe: NASA *Blue Marble Next Generation* (day, 5400x2700) and *Black Marble
+2016* (night lights, 3600x1800), both public domain; source and credits in
+`assets/textures/earth/README.md`. Loaded by `src/render/earth_tex.c` through
+a vendored `stb_image.h` (`extern/stb/`), stored as sRGB with mipmaps and
+anisotropic filtering, and applied in `phong.frag` to the body named "Earth"
+only (Earth-like exoplanets keep the procedural recipe).
+
+- The imagery replaces the procedural continents, and a land/sea mask derived
+  from it (ocean is dark and blue-dominant) drives the ocean glint. Procedural
+  relief and mountain snow are off for textured Earth: fake mountains in the
+  wrong places look worse than none, and the imagery already shows real snow.
+- City lights come from Black Marble, keeping only the warm light above its
+  faint blue moonlit base.
+- The longitude seam uses a second, shifted parameterisation's gradients where
+  they are smaller (Tarini's method), so mip selection never jumps there.
+- Clouds stay procedural and animated, but are sparser and feathered over the
+  imagery (hard-edged, they read as white blotches on a dark planet), and a
+  day-side Rayleigh haze thickens toward the limb. Without it true-colour
+  oceans looked nearly black; with it the disc reads as the familiar blue
+  marble.
+- Resolution is the user's choice: `earth_day_texture` / `earth_night_texture`
+  in `settings.json` may point at higher-resolution NASA releases, and
+  `earth_texture_max_px` (the "Earth texture" menu control) caps the loaded
+  width. A missing file falls back to procedural Earth.
 
 ### 8.5 Explicitly out of scope
 
@@ -509,9 +601,20 @@ to match `Camera.pos`.
 }
 ```
 
-- Position interpolates as a **Catmull-Rom spline** through the keys (C1
-  continuous, passes through every key); the terminal keys are duplicated to
-  give the end segments their control points.
+- Position interpolates as a **centripetal Catmull-Rom spline** through the
+  keys (C1 continuous, passes through every key). Knots are spaced by the
+  square root of each segment's length. The earlier uniform spline took each
+  key's tangent from its neighbours regardless of their distance, so a key
+  between a 0.01 AU segment and a 1e9 AU one overshot and the camera made a
+  visible U-turn at every change of scale; the centripetal form cannot cusp or
+  loop, whatever the ratio. Timing is unchanged (u is still the normalised
+  segment time). Missing end neighbours are reflected, so a shot starts and
+  ends moving along its first and last segments.
+- **`subject`** (optional) names what a key presents, for the `--cinematic-info`
+  title card: a body, nebula or galaxy by its catalogue name (`"Lagoon (M8)"`,
+  `"Milky Way"`). Without it the title comes from `look_at`, else `anchor`; a
+  key with none of the three (a transit aimed by yaw/pitch) shows no title, so
+  cards appear on arrival rather than while the destination is still a dot.
 - Direction: each key contributes a look direction evaluated **from the current
   interpolated position**, and the two are slerped. When both keys look at the
   same body this makes the subject *exactly* centred for the whole segment,
@@ -532,6 +635,13 @@ to match `Camera.pos`.
   opposite of the intent. A segment with a zero at either end holds the near
   key's value and switches at the key. (Found by watching the sample shot do
   precisely this.)
+- **Unset fields inherit within a move.** `fov`, `aperture`, `focus`,
+  `timescale` and `shutter` are optional. Leaving one out takes the value of the
+  nearest earlier key that sets it, stopping at a `cut`. With nothing to
+  inherit, the value from before the shot began is used. It used to mean
+  "leave whatever the last evaluated frame set", which made a frame depend on
+  evaluation history and produced the black AGN legs (§13, phase 4).
+  `"aperture": 0` is the explicit way to switch DOF off for a move.
 - An `anchor` key is resolved *per frame* against the body's current position,
   so a shot anchored to a moving planet follows it. Names resolve through
   `body_find_named()` every frame rather than being cached as indices — a body
@@ -775,14 +885,15 @@ Measured:
   shot intact; `make IMGUI=0` builds and films; the plain `--shot` path is
   unaffected; warning-clean.
 
-### Phase 4 — Tour and director
+### Phase 4 — Tour and director ✅ done
 
 Procedural tour generation from universe contents; event scoring and
 interruption; resume logic. `--tour` / `--director` to isolate either.
 
 **Done when:** `./verse --preset assets/universes/known_universe.json
 --cinematic --output tour.mp4 --duration 120` yields a watchable film with zero
-authoring. — **not yet met** (in progress, see below).
+authoring. — **met** (verified at `--draft`: 3600 frames in 153 s; every leg
+frames its subject, from Jupiter to the Milky Way finale).
 
 Status: `src/render/cinema_tour.c/.h` is written and wired into `main.c` (tour
 built when filming without `--shot-script`; `--tour` / `--director` isolate a
@@ -801,42 +912,141 @@ Fixed this pass:
 - `leg_timescale` keyed on physical radius, so no ordinary star ever got the
   "orbits sweep" clock; it now keys on `vis_au`.
 
-**Open bug — the black AGN legs.** In the 120 s known-universe tour, the
-Messier 77 (58.8–67.2 s) and NGC 1275 (75.6–84 s) legs render black, and M87
-(67.2–75.6 s) sits off-centre and cut off at the bottom edge despite `look_at`.
-The rest of the film (Solar System, stars, nebulae, Milky Way finale) frames
-well. What is established so far:
+**Fixed — the black AGN legs.** In the 120 s known-universe tour the Messier
+77 and NGC 1275 legs rendered black and M87 sat off-centre. The cause was not
+the spline: those legs' keys set no `aperture` or `focus`, and
+`cinema_shot_eval` used to *leave unset fields as they were*. So they inherited
+the previous star leg's f/8 focus lock on **KOI-351**, ~1e12 AU away. With
+`R = APERTURE_K · focus / N` that is a lens disc ~4e9 AU wide, and every
+jittered sub-frame threw the camera billions of AU off a subject it was framing
+from 100 AU. The tell was the sample count: black at `--samples 4`, perfect at
+`--samples 1`, where there is no lens jitter. (The earlier "truncating the keys
+fixes it" clue was a red herring; this is the measurement that separates it.)
 
-- It reproduces when the saved tour is replayed as a shot script
-  (`--shot-save` then `--shot-script`), at 4 fps and at 12 fps, with or
-  without the director, so it is in the shot or the renderer, not the director.
-- The M77 body is healthy at that moment: alive, `agn_activity` 1, same
-  position, anchor resolves.
-- The M77 leg's own three keys render correctly in isolation, after a cut from
-  the preceding M17 leg, and after a 58 s hold at M77 at timescale 30 or 0 —
-  so neither sim time, render time nor accretion state is the cause.
-- **Strongest clue:** replaying the tour's keys from 0 up to and including the
-  M77 leg (dropping every key after t = 66.6) renders M77 *correctly*; replaying
-  the complete tour renders it black. So the keys *after* the M77 leg — or the
-  shot's total length — change how the M77 leg evaluates. Start by checking
-  `cinema_shot_eval`'s segment lookup and Catmull-Rom control-point selection
-  around the cut into the M87 key (`cinema_cam.c`, the `kb->cut` / `i3` logic),
-  and whatever reads `cinema_shot_duration()`.
+The fix is in the format's semantics, not the tour. An unset optional field now
+inherits from the nearest earlier key **in the same move** (a cut starts a new
+one), and otherwise falls back to its pre-shot value (§9.2). A frame is a
+function of `t` alone, never of which frames were evaluated before it, which
+also makes scrubbing backwards in the editor honest. `cinema_shot_end` now
+restores a `--focus` lock rather than clearing it.
 
-Not yet exercised: the director has never fired in a test run — the default
-stellar rate produces no events in 120 s. It needs a run with a high
-`--stellar-rate` to confirm a cutaway frames its event and hands back cleanly.
+**Director exercised.** With `--stellar-rate 1e6` the known universe produces a
+supernova (HD 240237) at 50.8 s, and the director cuts to it and hands back
+cleanly to the spine, which keeps its schedule. The first real cutaway showed
+two framing bugs, both now fixed in `build_cutaway`:
 
-### Phase 5 — Presentation
+- The key `timescale` multiplies `g_sim_speed`, which defaults to **1
+  sim-day/s**. At timescale 1 the flash (gone by ~0.4 day) filled the whole
+  cutaway, and the camera, framed on the progenitor's ~12 AU glare, sat
+  inside the ~150 AU flash radius of a red giant, so it went white and then grey
+  fog. A tried ramp of 1e4 s/s was *days* per second and pushed the entire
+  320-day event through in one frame. The cutaway now ramps in absolute
+  sim-days per second (0.1 → 3 → 10, divided by `g_sim_speed`), which plays
+  flash → fireball → ejecta shell over ~18 sim-days in six seconds.
+- A supernova is framed on its shell at the end of the cutaway
+  (`SN_FRAME_AU` = 40 AU), and is pinned statically at the birth site. It is no
+  longer anchored to the remnant, because the blast stays put in world space
+  while the remnant drifts (`supernova.h`).
+
+Also verified after these fixes: the replayed tour produces byte-identical MP4s
+across runs; `--aperture 2.8` as a baseline renders every AGN leg; the shot
+format still round-trips byte-stably; `make IMGUI=0` builds and films;
+warning-clean.
+
+Known limits, not blockers:
+
+- `SN_FRAME_AU` is a constant sized for a red-giant progenitor. A red
+  supergiant's flash radius scales with its initial radius and could still
+  engulf the camera. The robust version asks `supernova.c` for the event's
+  radius at the end of the cutaway.
+
+Resolved after phase 4:
+
+- **Radial streaks on nebula, galaxy and distant-star legs: fixed.** Confirmed
+  as the warp aberration: its strength came from the camera's raw position
+  change per frame (full at 60,000 AU/s), and a directed camera covering ~10⁹ c
+  between keys pinned it at maximum, giving a radial "warp tunnel" and the frame
+  shoved off-centre. It is now off whenever a shot or tour drives the camera
+  (choreography, not a warp flight); manual warp flight keeps it. With a shot
+  playing, frames are pixel-identical to `--relativistic 0`. The short dashed
+  streaks that remain at low sample counts are genuine camera motion blur
+  under-sampled (§15), and become smooth streaks at film sample counts.
+- **Editor scrubbing: fixed.** Scrubbing the ImGui "Cinematic (shot)" timeline
+  now starts a *preview* that holds the same snapshot of your settings as
+  playback, so unset fields fall back exactly as they do when playing, in
+  either scrub direction. "End preview" restores your settings, and Play
+  continues from the previewed moment. Quitting mid-play or mid-preview
+  restores the snapshot before settings are saved, so a shot's fov/aperture
+  are never persisted as your preferences.
+
+### Phase 5 — Presentation ✅ done
 
 `--cinematic-info` title cards and captions.
+
+**Done when:** a film with `--cinematic-info` names each subject as the camera
+arrives, and the same command without it still produces clean frames. — **met.**
+
+What landed:
+
+| File | Change |
+|---|---|
+| `src/render/cinema_titles.c/.h` | New module: subject tracking, lower-third timing, distance/date/scale-bar/speed formatting |
+| `src/ui/ui.c/.h` | `ui_cine_title()` / `ui_cine_speed()`: output-resolution fonts, shadowed text, feathered scrim, accent rule, scale bar |
+| `src/render/cinema_cam.c/.h` | `CineSubject`, `cinema_shot_subject()`, `cinema_body_kind()`, `cinema_shot_cut_between()` |
+| `src/render/cinema_tour.c/.h` | Per-leg subject record, cutaway event subject, `cinema_tour_current_subject()` |
+| `src/render/cinematic.c/.h` | `cinematic_picture_band()`: overlays sit inside the letterbox |
+| `src/main.c` | `--cinematic-info`; overlay drawn after the resolve, before capture |
+
+How it behaves:
+
+- **Subject** comes from the tour (current leg, or the event a director
+  cutaway covers), from a shot (the current key's `look_at`, else its
+  `anchor`), or, for the free camera in live mode, from the nearest body once
+  you have arrived at it (within ~60 radii, or 60 glare radii for a star) and
+  stayed for a second.
+- **Lower-third**, lower left of the picture: name; kind and live distance
+  ("Supermassive black hole · 242,167 light-years away"); the date; and a
+  scale bar giving a round length at the subject's depth ("100,000 km",
+  "20 AU", "20,000 light-years"). It waits 0.6 s after a cut, fades in over
+  0.9 s, holds 4.5 s and fades out over 1.2 s, all on the film clock, so it is
+  deterministic.
+- **Date** is J2000.0 + `g_sim_time`, because the Solar System is seeded from
+  J2000.0 elements and the orbital clock counts from load. A universe seeded
+  from another epoch would show a date offset by that difference. There is no
+  per-universe epoch field yet. Past ~7000 years it switches to "Year N".
+- **Speed readout**, lower right, always on with `--cinematic-info` while the
+  camera moves. It is measured **relative to the subject** in film seconds: an
+  anchored camera rides a body that the time-lapse moves thousands of times
+  faster than real (a star's galactic drift at 30 sim-days/s is ~1,700 c),
+  which is true displacement but meaningless on screen. Hard cuts are skipped,
+  and it is smoothed in log space (~0.25 s). Format: km/s below 0.01% c,
+  `0.25% c` up to 10%, `0.85 c` / `3.2 c` / `1,240 c` beyond, then words
+  (`4.1 million c`). Nothing caps it: the camera is a massless observer. The
+  honest numbers are large, because a two-minute tour of the known universe is
+  wildly superluminal: ~1 c orbiting Jupiter, ~600 c across an exoplanet
+  system, ~10⁹ c around a nebula and ~10¹² c on the M87 leg.
+- **Readability**: fonts are opened at output resolution (4K text is rendered
+  at 4K, not upscaled), with a soft shadow and a feathered dark scrim so text
+  holds over a supernova as well as over black sky.
+- Drawn once per output frame after `cinematic_frame_resolve()` and before
+  capture, so text never goes through the accumulation (no motion-blur
+  smear), and it composites after the grade (grain does not crawl over it).
+- Without the flag the overlay code never runs, so output stays clean frames.
 
 ---
 
 ## 13.1 Authoring a watchable shot
 
-Lessons from building `assets/shots/showcase.json`, which are not obvious from
-the format and cost several renders each:
+`assets/shots/showcase.json` is now **generated** by `tools/make_showcase.py`:
+one continuous 90 s move with no hard cuts, outward from Earth (Earth ->
+Saturn -> the Solar System -> Alpha Centauri -> the Lagoon nebula ->
+Sagittarius A* -> the Milky Way face-on). Positions come from catalogue
+coordinates in the simulator's frame; edit the generator, not the JSON. Its
+header carries the render command (1080p30, 32 samples, letterbox, grain,
+titles, `--no-orbits`, `soundtrack_1.ogg`).
+
+Lessons from building it, which are not obvious from the format and cost
+several renders each:
 
 - **One origin per continuous move.** A draft placed the near keys relative to
   the Sun and the far keys relative to the galactic centre; the camera
@@ -856,7 +1066,23 @@ the format and cost several renders each:
   galactic scale, and sim time is the dominant render cost under motion blur.
 - **`--relativistic 0` for film work.** The warp aberration is a flourish for
   flying the app by hand; on a fast pull-back it saturates and smears the
-  frame.
+  frame. (Now automatic: it is off whenever a shot drives the camera.)
+- **Never turn toward something just off frame.** A turn that swings a bright
+  star past the frame edge leaves a moment where its glare has emptied the sky
+  but the star itself is not yet in view: a black frame. Leave Saturn by
+  finishing its orbit on the backlit side and pulling straight back along the
+  Sun line instead: no turn, and the Sun stays in frame throughout.
+- **Looking back is looking sunward.** Leaving the inner system outward and
+  looking back at a planet shows its night side against the Sun's glare.
+- **Black holes need the camera within a few AU.** Sgr A*'s horizon is
+  ~0.08 AU; from 60 AU it is two pixels. At ~2.5 AU the shadow, photon ring,
+  lensed disc and the swirl of lensed galactic-centre stars fill the frame.
+- **Aim transits by direction, not by name.** A transit key with `look_at`
+  would raise the destination's title card while it is still a dot; aim with
+  yaw/pitch (the generator's `look_pos`) and name the arrival key instead.
+- **Nebulae are soft volumes.** The Lagoon reads as a pink cloud at any
+  distance; keep its pass short and close (2.2 -> 1.5 radii), where its cavity
+  and the galactic band behind it carry the frame.
 
 ---
 
@@ -893,12 +1119,20 @@ feature specifically:
   for 30 seconds. `--draft` and the 1080p default mitigate, and the progress
   line prints a live ETA. An up-front estimate before the first frame is still
   worth adding so a long run is a choice rather than a surprise.
-- **Motion blur re-runs the sim N× per frame.** Confirmed in phase 2:
-  `advance_simulation()` is called once per sub-frame, so at high sample counts
-  and large timescales the *simulation*, not the renderer, becomes the
-  bottleneck. `--shutter 0` opts out. A camera-only blur (jittering the pose but
-  not sim time) becomes worth adding in phase 3, when the camera is actually
-  moving and would blur on its own.
+- **Motion blur re-runs the sim N× per frame. Now automatic camera-only blur**
+  (`src/render/cinema_blur.c`). The camera's own blur never needed the sim
+  sliced, since each sample re-poses the camera on the shutter anyway. So per
+  frame the renderer estimates how far any object moves on screen *relative to
+  what the camera rides* (the current key's anchor) while the shutter is open:
+  bodies in or near view, ringed bodies (orbital speed at the inner edge), and
+  sampled asteroid-belt particles. If nothing would move more than half a
+  pixel, the sim advances once and only the camera blurs; otherwise the full
+  sliced blur runs. No setting. Measured on the 120 s known-universe tour at
+  8 samples: 624 of 960 frames went camera-only, 200 s → 141 s (30% faster),
+  and those frames were pixel-identical to full blur. Frames that differ are
+  the full-blur ones, by sub-pixel drift, because advancing the integrator in a
+  different number of steps shifts moons slightly. Film-out prints the split
+  (`motion blur: N/M frames needed object blur`).
 - **Accumulating in RGBA32F at 4K** is 132 MB for the accumulator alone, plus
   the scene target and bloom chain. Fine on a desktop GPU, worth watching.
 - ~~**Auto-exposure interacts badly with accumulation.**~~ **Fixed in phase 2.**

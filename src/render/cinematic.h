@@ -123,6 +123,8 @@ double cinematic_focus_distance(void);
  * settings.cine_focus_auto / the manual distance. A name that matches nothing
  * is reported once and then ignored. */
 void cinematic_set_focus_target(const char *name);
+/* The current focus-lock name, "" when none. */
+const char *cinematic_focus_target(void);
 
 /* Lens sample for sub-frame `s`: a point on the aperture disc in camera-space
  * (right, up) AU. The caller offsets the camera by du*right + dv*up IN DOUBLE
@@ -166,6 +168,9 @@ void cinematic_frame_begin(void);
 void cinematic_sub_begin(int sub);
 void cinematic_sub_end(void);
 void cinematic_frame_resolve(void);
+/* The visible picture band in output pixels, y down: the whole frame, or the
+ * area between the letterbox bars. Overlays position themselves inside it. */
+void cinematic_picture_band(float *top, float *bottom);
 
 /* ---- encoder --------------------------------------------------------------
  * Raw RGB frames are piped to an ffmpeg subprocess (CINEMATIC.md §7): the

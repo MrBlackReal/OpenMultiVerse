@@ -26,6 +26,11 @@ typedef struct {
     double acc[3];         /* m/s^2 (recomputed each step)    */
     double fast_acc[3];    /* m/s^2 dominant parent force, RESPA inner step */
     float  col[3];         /* RGB display colour              */
+    /* Catalogue absolute magnitude (StarBin v2 field stars): drives the
+     * star's drawn brightness when set. Zero-initialised bodies have none,
+     * hence the flag rather than a sentinel value. */
+    int    has_abs_mag;
+    float  abs_mag;
     int    is_star;
     int    is_comet;       /* 1 = comet nucleus: comet.c draws coma + ion/dust   */
                            /* tails, activity driven by RadianceField flux       */

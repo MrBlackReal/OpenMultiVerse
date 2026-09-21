@@ -486,6 +486,190 @@ static void draw_tex(TextCache *tc, float x, float y, float h) {
     draw_quad(x, y, w, h);
 }
 
+/* ── cinematic lower-third (CINEMATIC.md §11.1) ───────────────────────────── */
+/* Its own fonts, opened at sizes proportional to the OUTPUT height and
+ * reopened if that changes: the HUD fonts are fixed pixel sizes, which would
+ * be upscaled (soft) on a 4K film. UTF-8 so names like "Omega/Swan" or a
+ * middle dot render as written. */
+static TTF_Font *s_ct_font_title = NULL, *s_ct_font_body = NULL;
+static int       s_ct_font_h = 0;
+static TextCache s_tc_ct[5];            /* title, line 2, line 3, scale, speed */
+
+static void ct_text(TextCache *tc, TTF_Font *font, const char *str)
+{
+    SDL_Color white = { 255, 255, 255, 255 };
+    if (!font || !str) return;
+    if (tc->tex && strcmp(tc->str, str) == 0) return;
+    snprintf(tc->str, sizeof tc->str, "%s", str);
+    if (tc->tex) { glDeleteTextures(1, &tc->tex); tc->tex = 0; }
+    SDL_Surface *surf = TTF_RenderUTF8_Blended(font, str, white);
+    if (surf) tc->tex = surf_to_tex(surf, &tc->w, &tc->h);
+}
+
+/* Text at native texel size (the font was opened for this output), with a
+ * soft offset shadow so it reads over a bright nebula as well as black sky. */
+static float ct_draw(TextCache *tc, float x, float y, float a, float shadow)
+{
+    if (!tc->tex) return 0.0f;
+    float w = (float)tc->w, h = (float)tc->h;
+    glUniform1i(s_loc_use_tex, 1);
+    glBindTexture(GL_TEXTURE_2D, tc->tex);
+    glUniform4f(s_loc_color, 0.0f, 0.0f, 0.0f, a * 0.55f);
+    draw_quad(x + shadow, y + shadow, w, h);
+    glUniform4f(s_loc_color, 1.0f, 1.0f, 1.0f, a);
+    draw_quad(x, y, w, h);
+    return w;
+}
+
+/* (Re)open the lower-third fonts for the current output height. */
+static int ct_fonts_ensure(void)
+{
+    int fh = (int)((float)WIN_H * 0.040f + 0.5f);
+    if (fh < 12) fh = 12;
+    if (fh != s_ct_font_h) {
+        if (s_ct_font_title) TTF_CloseFont(s_ct_font_title);
+        if (s_ct_font_body)  TTF_CloseFont(s_ct_font_body);
+        s_ct_font_title = ui_theme_open_font(fh);
+        s_ct_font_body  = ui_theme_open_font((int)(fh * 0.55f + 0.5f));
+        if (s_ct_font_title) TTF_SetFontStyle(s_ct_font_title, TTF_STYLE_BOLD);
+        for (int i = 0; i < 5; i++) {
+            if (s_tc_ct[i].tex) glDeleteTextures(1, &s_tc_ct[i].tex);
+            memset(&s_tc_ct[i], 0, sizeof s_tc_ct[i]);
+        }
+        s_ct_font_h = fh;
+    }
+    return fh;
+}
+
+/* A soft dark scrim behind overlay text, so it reads over a bright nebula or
+ * a supernova as well as over black sky. The UI shader only draws flat rects,
+ * so the gradient is built from strips: darkest at the text's anchored edge
+ * (left, or right when from_right), fading to nothing, with feathered top and
+ * bottom from stacked insets. */
+static void ct_scrim(float x, float y, float w, float h, float pad,
+                     int from_right, float alpha)
+{
+    const int STRIPS = 24, LAYERS = 8;
+    glUniform1i(s_loc_use_tex, 0);
+    for (int l = 0; l < LAYERS; l++) {
+        float in = pad * (float)l / (float)LAYERS;
+        float y0 = y - pad + in, hh = h + 2.0f * (pad - in);
+        for (int i = 0; i < STRIPS; i++) {
+            float f  = (float)i / (float)STRIPS;
+            float a  = alpha * 0.42f / (float)LAYERS * (1.0f - f) * (1.0f - f);
+            /* Pixel-snapped, abutting edges: any overlap doubles the alpha
+             * along the seam and shows as a faint vertical line. */
+            float e0 = floorf(x + w * (float)i / (float)STRIPS + 0.5f);
+            float e1 = floorf(x + w * (float)(i + 1) / (float)STRIPS + 0.5f);
+            if (from_right) {
+                float r0 = floorf(x + w - w * (float)(i + 1) / (float)STRIPS + 0.5f);
+                float r1 = floorf(x + w - w * (float)i / (float)STRIPS + 0.5f);
+                e0 = r0; e1 = r1;
+            }
+            glUniform4f(s_loc_color, 0.0f, 0.0f, 0.0f, a);
+            draw_quad(e0, floorf(y0 + 0.5f), e1 - e0, floorf(hh + 0.5f));
+        }
+    }
+}
+
+static void ct_gl_begin(void)
+{
+    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram(s_shader);
+    glUniform2f(s_loc_screen, (float)WIN_W, (float)WIN_H);
+    glActiveTexture(GL_TEXTURE0);
+    glBindVertexArray(s_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, s_vbo);
+}
+
+static void ct_gl_end(void)
+{
+    glBindVertexArray(0);
+    glDisable(GL_BLEND);
+    glDepthMask(GL_TRUE);
+    glEnable(GL_DEPTH_TEST);
+}
+
+void ui_cine_title(const char *title, const char *line2, const char *line3,
+                   float alpha, float bar_px, const char *bar_label,
+                   float band_top, float band_bottom)
+{
+    if (!s_shader || alpha <= 0.002f) return;
+    const float W = (float)WIN_W;
+
+    int fh = ct_fonts_ensure();
+    ct_text(&s_tc_ct[0], s_ct_font_title, title);
+    ct_text(&s_tc_ct[1], s_ct_font_body, line2);
+    ct_text(&s_tc_ct[2], s_ct_font_body, line3);
+    ct_text(&s_tc_ct[3], s_ct_font_body, bar_label);
+
+    /* Lower-left of the PICTURE (inside any letterbox), on a title-safe
+     * margin. Layout in output pixels, scaled from the font height. */
+    float u    = (float)fh;
+    float pic_h = band_bottom - band_top;
+    float x    = W * 0.06f;
+    float bot  = band_bottom - pic_h * 0.09f;
+    float gap  = u * 0.18f;
+    float sh   = u * 0.045f;
+    float h0 = s_tc_ct[0].tex ? (float)s_tc_ct[0].h : 0.0f;
+    float h1 = s_tc_ct[1].tex ? (float)s_tc_ct[1].h : 0.0f;
+    float h2 = s_tc_ct[2].tex ? (float)s_tc_ct[2].h : 0.0f;
+    float hb = (bar_px > 0.0f && s_tc_ct[3].tex) ? (float)s_tc_ct[3].h : 0.0f;
+    float block = h0 + (h1 > 0 ? gap + h1 : 0) + (h2 > 0 ? h2 : 0) + (hb > 0 ? gap * 2 + hb : 0);
+    float y = bot - block;
+
+    ct_gl_begin();
+
+    {
+        float tw = 0.0f;
+        for (int i = 0; i < 3; i++) if (s_tc_ct[i].tex && (float)s_tc_ct[i].w > tw) tw = (float)s_tc_ct[i].w;
+        if (hb > 0) { float bw = bar_px + u * 0.35f + (float)s_tc_ct[3].w; if (bw > tw) tw = bw; }
+        ct_scrim(x - u * 1.2f, y, tw + u * 4.0f, block, u * 0.8f, 0, alpha);
+    }
+
+    /* Accent rule down the left edge of the block. */
+    float rule_w = u * 0.07f;
+    draw_rect(x - u * 0.45f, y + h0 * 0.12f, rule_w, block - h0 * 0.12f,
+              1.0f, 1.0f, 1.0f, alpha * 0.85f);
+
+    ct_draw(&s_tc_ct[0], x, y, alpha, sh);
+    y += h0;
+    if (h1 > 0) { y += gap; ct_draw(&s_tc_ct[1], x, y, alpha * 0.82f, sh * 0.7f); y += h1; }
+    if (h2 > 0) { ct_draw(&s_tc_ct[2], x, y, alpha * 0.66f, sh * 0.7f); y += h2; }
+
+    /* Scale bar: a length at the subject's distance, with end ticks. */
+    if (hb > 0) {
+        y += gap * 2;
+        float bh = u * 0.05f, tick = hb * 0.55f, cy = y + hb * 0.5f;
+        glUniform1i(s_loc_use_tex, 0);
+        draw_rect(x + sh, cy - bh * 0.5f + sh, bar_px, bh, 0, 0, 0, alpha * 0.5f);
+        draw_rect(x, cy - bh * 0.5f, bar_px, bh, 1, 1, 1, alpha * 0.9f);
+        draw_rect(x, cy - tick * 0.5f, bh, tick, 1, 1, 1, alpha * 0.9f);
+        draw_rect(x + bar_px - bh, cy - tick * 0.5f, bh, tick, 1, 1, 1, alpha * 0.9f);
+        ct_draw(&s_tc_ct[3], x + bar_px + u * 0.35f, y, alpha * 0.82f, sh * 0.7f);
+    }
+    ct_gl_end();
+}
+
+void ui_cine_speed(const char *label, float alpha, float band_top, float band_bottom)
+{
+    if (!s_shader || alpha <= 0.002f || !label || !label[0]) return;
+    float u = (float)ct_fonts_ensure();
+    ct_text(&s_tc_ct[4], s_ct_font_body, label);
+    if (!s_tc_ct[4].tex) return;
+    float pic_h = band_bottom - band_top;
+    float x = (float)WIN_W * 0.94f - (float)s_tc_ct[4].w;   /* right-aligned */
+    float y = band_bottom - pic_h * 0.09f - (float)s_tc_ct[4].h;
+    ct_gl_begin();
+    ct_scrim(x - u * 3.0f, y, (float)s_tc_ct[4].w + u * 3.8f, (float)s_tc_ct[4].h,
+             u * 0.5f, 1, alpha);
+    ct_draw(&s_tc_ct[4], x, y, alpha * 0.82f, u * 0.045f * 0.7f);
+    ct_gl_end();
+}
+
 /* ── build bar ────────────────────────────────────────────────────────────── */
 /*
  * draw_build_bar — render the preset selector panel on the left side of screen.
@@ -1083,6 +1267,10 @@ void ui_render(void) {
 }
 
 void ui_shutdown(void) {
+    for (int i = 0; i < 5; i++)
+        if (s_tc_ct[i].tex) glDeleteTextures(1, &s_tc_ct[i].tex);
+    if (s_ct_font_title) TTF_CloseFont(s_ct_font_title);
+    if (s_ct_font_body)  TTF_CloseFont(s_ct_font_body);
     if (s_tc_move.tex) glDeleteTextures(1, &s_tc_move.tex);
     if (s_tc_sim.tex)  glDeleteTextures(1, &s_tc_sim.tex);
     if (s_tc_fps.tex)  glDeleteTextures(1, &s_tc_fps.tex);

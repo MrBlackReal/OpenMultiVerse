@@ -26,6 +26,7 @@
  * major-axis sizes (SIMBAD / NED, J2000).
  */
 #include "nebula.h"
+#include "render.h"
 #include "cinematic.h"
 #include "gl_utils.h"
 #include "common.h"
@@ -203,6 +204,7 @@ void nebula_render(const float vp_camrel[16],
     if (!s_enabled || !s_shader || !s_vao) return;
 
     glUseProgram(s_shader);
+    render_star_veil_uniforms(s_shader);
     glUniformMatrix4fv(s_u_vp, 1, GL_FALSE, vp_camrel);
     glUniform3fv(s_u_right, 1, cam_right);
     glUniform3fv(s_u_up,    1, cam_up);

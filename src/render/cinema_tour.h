@@ -36,6 +36,7 @@
  */
 #pragma once
 #include "common.h"
+#include "cinema_cam.h"
 
 /* Select which halves run. Both default on; --tour and --director isolate one.
  * Call before cinema_tour_build(). */
@@ -59,5 +60,9 @@ void cinema_tour_tick(double dt);
 /* What the tour is currently showing, for the film's own logging and (phase 5)
  * for title cards. Returns "" before the first leg. */
 const char *cinema_tour_subject(void);
+
+/* What the tour is presenting now: the current leg's subject, or the event a
+ * director cutaway covers (CINEMATIC.md §11.1). 0 if none. */
+int cinema_tour_current_subject(CineSubject *out);
 
 void cinema_tour_shutdown(void);

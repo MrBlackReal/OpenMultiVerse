@@ -80,5 +80,10 @@ void post_set_relativistic(float beta, float cx, float cy);
  * formula the depth-writing shaders use), intensity 0 = no flare (the pass is
  * skipped entirely — byte-identical output), col = light chromaticity.
  * Must be called every frame; the value does not persist. */
+/* Veiling-glare haze around a nearby bright star (star_veil.h): strength is
+ * the saturated glare scale (0 = off), view_dir the unit direction to the star
+ * in camera space (x right, y up, z forward). */
+void post_set_veil_haze(float strength, const float view_dir[3],
+                        const float col[3], float fov_tan);
 void post_set_lens_flare(float ndc_x, float ndc_y, float log_depth,
                          float intensity, const float col[3]);

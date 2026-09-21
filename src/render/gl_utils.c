@@ -12,6 +12,7 @@
  *   the VAO with glBindVertexArray(0).
  */
 #include "gl_utils.h"
+#include "star_veil.h"
 
 /* ---------------------------------------------------------------- private */
 
@@ -49,9 +50,28 @@ static char *read_file(const char *path) {
  * #version line is present it is prepended. */
 static char *inject_prelude(const char *src) {
     if (!src) return NULL;
-    char prelude[128];
+    /* Also the star veil (star_veil.h): the same glare test as the C side,
+     * so every background layer drowns in a nearby star's glare identically.
+     * Shaders that never call veil_vis() compile the uniforms away. */
+    char prelude[1024];
     int plen = snprintf(prelude, sizeof(prelude),
-                        "#define DEPTH_FAR %.8e\n", (double)RENDER_DEPTH_FAR);
+        "#define DEPTH_FAR %.8e\n"
+        "#define VEIL_DIFFUSE %.6f\n"
+        "#define VEIL_PSF_GLSL %.6f\n"
+        "#define VEIL_FLOOR_GLSL %.6f\n"
+        "#define VEIL_CORE_DEG_GLSL %.6f\n"
+        "uniform vec3  u_veil_dir;\n"
+        "uniform float u_veil_e;       /* E_psf   */\n"
+        "uniform float u_veil_f;       /* E_floor */\n"
+        "float veil_vis(vec3 dir, float lum) {\n"
+        "    if (u_veil_e <= 0.0 && u_veil_f <= 0.0) return 1.0;\n"
+        "    float c  = clamp(dot(normalize(dir), u_veil_dir), -1.0, 1.0);\n"
+        "    float th = max(degrees(acos(c)), %.6f);\n"
+        "    float glare = u_veil_e * %.6f / (th * th) + u_veil_f * %.6f;\n"
+        "    return smoothstep(%.6f, %.6f, log2(max(lum, 1e-6) / glare));\n"
+        "}\n",
+        (double)RENDER_DEPTH_FAR, VEIL_DIFFUSE, VEIL_PSF, VEIL_FLOOR, VEIL_CORE_DEG, VEIL_CORE_DEG, VEIL_PSF, VEIL_FLOOR,
+        VEIL_LO, VEIL_HI);
     if (plen < 0 || plen >= (int)sizeof(prelude)) plen = 0;  /* fall back to plain copy */
 
     size_t slen = strlen(src);

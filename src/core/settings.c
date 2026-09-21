@@ -70,6 +70,11 @@ void settings_reset(void)
     g_settings.vignette             = 0.0f;
     g_settings.lens_spikes          = 0.0f;
     g_settings.lens_flare           = 0.25f;
+    snprintf(g_settings.earth_day_texture, sizeof g_settings.earth_day_texture,
+             "%s", "assets/textures/earth/earth_day_5400.jpg");
+    snprintf(g_settings.earth_night_texture, sizeof g_settings.earth_night_texture,
+             "%s", "assets/textures/earth/earth_night_3600.jpg");
+    g_settings.earth_texture_max_px = 0;
     g_settings.flare_ghosts         = 1.0f;
     g_settings.flare_halo           = 1.0f;
     g_settings.flare_halo_radius    = 0.38f;
@@ -208,6 +213,19 @@ void settings_load(void)
     g_settings.vignette             = (float)json_num(json_get(root, "vignette"),               g_settings.vignette);
     g_settings.lens_spikes          = (float)json_num(json_get(root, "lens_spikes"),            g_settings.lens_spikes);
     g_settings.lens_flare           = (float)json_num(json_get(root, "lens_flare"),             g_settings.lens_flare);
+    {
+        /* json_str returns the default pointer itself when the key is absent,
+         * and snprintf from a buffer into itself is undefined (glibc empties
+         * it) — so go through a copy. */
+        char tmp[256];
+        snprintf(tmp, sizeof tmp, "%s",
+                 json_str(json_get(root, "earth_day_texture"), g_settings.earth_day_texture));
+        snprintf(g_settings.earth_day_texture, sizeof g_settings.earth_day_texture, "%s", tmp);
+        snprintf(tmp, sizeof tmp, "%s",
+                 json_str(json_get(root, "earth_night_texture"), g_settings.earth_night_texture));
+        snprintf(g_settings.earth_night_texture, sizeof g_settings.earth_night_texture, "%s", tmp);
+    }
+    g_settings.earth_texture_max_px = (int)json_num(json_get(root, "earth_texture_max_px"), g_settings.earth_texture_max_px);
     g_settings.flare_ghosts         = (float)json_num(json_get(root, "flare_ghosts"),           g_settings.flare_ghosts);
     g_settings.flare_halo           = (float)json_num(json_get(root, "flare_halo"),             g_settings.flare_halo);
     g_settings.flare_halo_radius    = (float)json_num(json_get(root, "flare_halo_radius"),      g_settings.flare_halo_radius);
@@ -331,6 +349,9 @@ int settings_save(void)
             (double)g_settings.vignette, (double)g_settings.lens_spikes,
             (double)g_settings.lens_flare,
             (double)g_settings.relativistic);
+    fprintf(f, "  \"earth_day_texture\": \"%s\", \"earth_night_texture\": \"%s\",\n",
+            g_settings.earth_day_texture, g_settings.earth_night_texture);
+    fprintf(f, "  \"earth_texture_max_px\": %d,\n", g_settings.earth_texture_max_px);
     fprintf(f, "  \"flare_ghosts\": %.6g, \"flare_halo\": %.6g, \"flare_halo_radius\": %.6g,\n",
             (double)g_settings.flare_ghosts, (double)g_settings.flare_halo,
             (double)g_settings.flare_halo_radius);

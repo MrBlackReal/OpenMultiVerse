@@ -80,6 +80,8 @@ static GLint  s_u_comp_bloom[BLOOM_LEVELS], s_u_comp_bloom_w;
 static GLint  s_u_comp_exposure, s_u_comp_tonemap;
 static GLint  s_u_comp_chromatic, s_u_comp_vignette, s_u_comp_rel_beta;
 static GLint  s_u_comp_rel_center;
+static GLint  s_u_comp_haze, s_u_comp_haze_view, s_u_comp_haze_col,
+              s_u_comp_haze_tan, s_u_comp_haze_aspect;
 
 static GLuint s_quad_vao = 0, s_quad_vbo = 0;
 
@@ -207,6 +209,11 @@ void post_init(void)
     s_u_comp_vignette  = glGetUniformLocation(s_sh_comp,   "u_vignette");
     s_u_comp_rel_beta  = glGetUniformLocation(s_sh_comp,   "u_rel_beta");
     s_u_comp_rel_center= glGetUniformLocation(s_sh_comp,   "u_rel_center");
+    s_u_comp_haze       = glGetUniformLocation(s_sh_comp,  "u_haze");
+    s_u_comp_haze_view  = glGetUniformLocation(s_sh_comp,  "u_haze_view");
+    s_u_comp_haze_col   = glGetUniformLocation(s_sh_comp,  "u_haze_col");
+    s_u_comp_haze_tan   = glGetUniformLocation(s_sh_comp,  "u_haze_tan");
+    s_u_comp_haze_aspect= glGetUniformLocation(s_sh_comp,  "u_haze_aspect");
 
     /* Fullscreen quad (two triangles) in NDC. */
     static const float quad[12] = {
@@ -335,6 +342,21 @@ void post_set_relativistic(float beta, float cx, float cy)
     s_rel_beta = beta < 0.0f ? 0.0f : (beta > 1.0f ? 1.0f : beta);
     s_rel_cx   = cx;
     s_rel_cy   = cy;
+}
+
+/* Star-veil glare haze (render.c). Pushed every frame; strength 0 = off. */
+static float s_haze = 0.0f, s_haze_tan = 0.4f;
+static float s_haze_view[3] = { 0.0f, 0.0f, 1.0f }, s_haze_col[3] = { 1.0f, 1.0f, 1.0f };
+
+void post_set_veil_haze(float strength, const float view_dir[3],
+                        const float col[3], float fov_tan)
+{
+    s_haze = strength > 0.0f ? strength : 0.0f;
+    for (int k = 0; k < 3; k++) {
+        s_haze_view[k] = view_dir ? view_dir[k] : 0.0f;
+        s_haze_col[k]  = col ? col[k] : 1.0f;
+    }
+    s_haze_tan = fov_tan;
 }
 
 void post_set_lens_flare(float ndc_x, float ndc_y, float log_depth,
@@ -482,6 +504,11 @@ void post_end(void)
     glUniform1f(s_u_comp_vignette, s_vignette);
     glUniform1f(s_u_comp_rel_beta, s_rel_beta);
     glUniform2f(s_u_comp_rel_center, s_rel_cx, s_rel_cy);
+    glUniform1f(s_u_comp_haze, s_haze);
+    glUniform3fv(s_u_comp_haze_view, 1, s_haze_view);
+    glUniform3fv(s_u_comp_haze_col, 1, s_haze_col);
+    glUniform1f(s_u_comp_haze_tan, s_haze_tan);
+    glUniform1f(s_u_comp_haze_aspect, (float)s_w / (float)(s_h > 0 ? s_h : 1));
     draw_quad();
 
     /* 4. Lens flare: additive LDR overlay on top of the tonemapped image (a

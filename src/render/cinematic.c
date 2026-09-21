@@ -9,6 +9,7 @@
  * system land on top of this in phases 2-3.
  */
 #include "cinematic.h"
+#include "cinema_blur.h"
 #include "gl_utils.h"
 #include "post.h"
 #include "body.h"      /* g_cam_prox, g_bodies — focus targets */
@@ -323,6 +324,8 @@ void cinematic_set_focus_target(const char *name)
     s_focus_warned = 0;
 }
 
+const char *cinematic_focus_target(void) { return s_focus_name; }
+
 /* Camera distance in AU to the focus-locked body, or 0 if there isn't one.
  * Resolved every frame rather than cached as an index: a tracked body can be
  * absorbed mid-shot, and g_nbodies is a high-water mark whose dead slots are
@@ -446,6 +449,15 @@ static float letterbox_half(void)
     float screen = (float)WIN_W / (float)WIN_H;
     if (target <= screen) return 0.0f;      /* frame is already this wide */
     return 0.5f * screen / target;
+}
+
+void cinematic_picture_band(float *top, float *bottom)
+{
+    float h = (float)WIN_H;
+    float half = cinematic_active() ? letterbox_half() : 0.0f;
+    if (half <= 0.0f) { *top = 0.0f; *bottom = h; return; }
+    *top    = h * (0.5f - half);
+    *bottom = h * (0.5f + half);
 }
 
 static void draw_quad(GLuint src_tex, float scale, int resolve)
@@ -720,6 +732,7 @@ void cinematic_encoder_close(void)
                 s_frames_written, secs,
                 secs > 0.0 ? (double)s_frames_written / secs : 0.0,
                 g_cine.output);
+        cinema_blur_report();
         s_frames_written = 0;
         s_frames_issued  = 0;
     }

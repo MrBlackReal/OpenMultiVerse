@@ -59,6 +59,11 @@ uniform vec4  u_ecl[6];          /* may block the sun): xyz = occluder −    */
 uniform float u_sun_radius;      /* emitter visual radius (AU) → penumbra   */
 uniform float u_obliquity;    /* axial tilt, radians (0 = upright)      */
 uniform int   u_planet_type;  /* 0-9, selects colour recipe             */
+/* Real Earth imagery (render/earth_tex.c): 0 = procedural, 1 = day map,
+ * 2 = day + night lights. Bound only for the body named "Earth". */
+uniform int       u_earth_tex;
+uniform sampler2D u_earth_day;     /* NASA Blue Marble, sRGB -> linear   */
+uniform sampler2D u_earth_night;   /* NASA Black Marble city lights      */
 uniform float u_star_heat;    /* 0..1 surface heating from star approach */
 uniform float u_starspots;    /* 0..1 star-surface granulation/spot strength */
 uniform float u_time;         /* seconds — convective granulation churn  */
@@ -235,10 +240,55 @@ vec3 terrain_normal(vec3 NL, float strength)
  * Per-planet surface colour  (NL = normal in body-local frame)
  * ====================================================================== */
 
+/* ---- Earth imagery ------------------------------------------------------
+ * Sampled ONCE in main() where the body-local normal is formed (derivatives
+ * need uniform control flow), then read by surface_color and the lighting.
+ * Equirectangular: longitude from atan in the equatorial plane (y is the spin
+ * axis), latitude from asin. EARTH_LON_SIGN picks east vs west. */
+#define EARTH_LON_SIGN -1.0
+#define EARTH_CITY_GAIN 1.6
+vec3  g_earth_day = vec3(0.0);
+float g_earth_sea = 0.0;
+vec2  g_earth_uv, g_earth_dx, g_earth_dy;
+
+vec2 earth_uv(vec3 NL)
+{
+    float lon = atan(NL.z, NL.x);
+    float lat = asin(clamp(NL.y, -1.0, 1.0));
+    return vec2(0.5 + EARTH_LON_SIGN * lon * (0.5 / 3.14159265), 0.5 - lat / 3.14159265);
+}
+
+/* Ocean is dark and blue-dominant; land, ice and desert are not. Replaces the
+ * procedural land mask wherever real coastlines matter (glint, lights). */
+float earth_sea_mask(vec3 c)
+{
+    float blue = c.b - max(c.r, c.g);
+    float lum  = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    return smoothstep(0.004, 0.02, blue) * (1.0 - smoothstep(0.05, 0.12, lum));
+}
+
+void earth_sample(vec3 NL)
+{
+    vec2 uv = earth_uv(NL);
+    /* Seam: u jumps 1 -> 0 where longitude wraps, and the raw derivatives
+     * there would pick the smallest mip (a visible line). A second, shifted
+     * parameterisation is continuous across that seam; per axis, use the
+     * smaller of the two gradients (Tarini's method). */
+    vec2 uv2 = vec2(fract(uv.x + 0.5) - 0.5, uv.y);
+    vec2 dx = dFdx(uv), dy = dFdy(uv);
+    vec2 dx2 = dFdx(uv2), dy2 = dFdy(uv2);
+    if (abs(dx2.x) < abs(dx.x)) dx.x = dx2.x;
+    if (abs(dy2.x) < abs(dy.x)) dy.x = dy2.x;
+    g_earth_uv = uv; g_earth_dx = dx; g_earth_dy = dy;
+    g_earth_day = textureGrad(u_earth_day, uv, dx, dy).rgb;
+    g_earth_sea = earth_sea_mask(g_earth_day);
+}
+
 vec3 surface_color(vec3 NL) {
     float n = fbm(NL * 3.5);
 
     /* ---- Earth -------------------------------------------------------- */
+    if (u_planet_type == 1 && u_earth_tex > 0) return g_earth_day;
     if (u_planet_type == 1) {
         float n2  = fbm(NL * 3.5 + vec3(5.3, 2.7, 8.1));
         float lat = abs(NL.y);
@@ -679,6 +729,7 @@ void main() {
      * Apply the inverse body rotation (Rodrigues, angle = -u_rotation).
      * When u_obliquity == 0 this reduces to a plain Y-axis rotation.    */
     vec3 NL = world_to_local(N, u_rotation);
+    if (u_planet_type == 1 && u_earth_tex > 0) earth_sample(NL);
 
     vec3 base_surface = surface_color(NL);
     vec3 surface = base_surface;
@@ -697,7 +748,10 @@ void main() {
          * so the oceans stay glassy for the specular glint below. */
         float strength = 0.0;
         float gate = 1.0;
-        if (u_planet_type == 1) {
+        if (u_planet_type == 1 && u_earth_tex > 0) {
+            strength = 0.0;   /* imagery: procedural relief would put
+                               * mountains where there are none */
+        } else if (u_planet_type == 1) {
             gate = smoothstep(0.44, 0.49, fbm(NL * 3.5));
             strength = 1.5;
         }
@@ -711,8 +765,9 @@ void main() {
         }
     }
 
-    /* Mountain snow: high ridged terrain whitens, more readily at latitude. */
-    if (u_planet_type == 1) {
+    /* Mountain snow: high ridged terrain whitens, more readily at latitude.
+     * (The imagery already shows the real snow.) */
+    if (u_planet_type == 1 && u_earth_tex == 0) {
         float land = smoothstep(0.44, 0.49, fbm(NL * 3.5));
         float alt  = terrain_height(NL);
         surface = mix(surface, vec3(0.90, 0.92, 0.95),
@@ -749,6 +804,10 @@ void main() {
         float cn1 = fbm(warped);
         float cn2 = fbm(warped * 2.1 + vec3(3.3, 7.6, 1.9));
         float cloud_val = cn1 * 0.70 + cn2 * 0.30;
+        if (u_earth_tex > 0) {
+            /* Fine structure so edges break into wisps instead of blobs. */
+            cloud_val += (fbm(warped * 4.7 + vec3(8.1, 0.6, 3.9)) - 0.5) * 0.16;
+        }
         /* Coverage threshold from amount; Earth's 0.6 reproduces the
          * original 0.48..0.66 band almost exactly.  Thin decks are also more
          * translucent, so Mars' sparse CO2 wisps don't read as Earth cumulus. */
@@ -756,6 +815,14 @@ void main() {
         float thr = mix(0.80, 0.42, amt);
         float opacity = mix(0.45, 1.0, smoothstep(0.15, 0.60, amt));
         cloud_mask = smoothstep(thr - 0.09, thr + 0.09, cloud_val) * opacity;
+        if (u_earth_tex > 0) {
+            /* Against real imagery the hard-edged procedural deck read as white
+             * blotches over a dark planet. Real cloud is mostly thin: raise the
+             * threshold a little and feather it wide, so only thick cores go
+             * opaque and the surface shows through the rest. */
+            thr += 0.04;
+            cloud_mask = smoothstep(thr - 0.06, thr + 0.18, cloud_val) * 0.92;
+        }
 
         /* Cloud shadows: resample the deck displaced toward the sun (its
          * tangential component) — the offset patch is what shades this spot.
@@ -766,7 +833,9 @@ void main() {
         vec3 warped_sh = NL_sh * 4.2 + warp * 0.55 + vec3(4.1, 2.3, 6.8);
         float sh_val = fbm(warped_sh) * 0.70
                      + fbm(warped_sh * 2.1 + vec3(3.3, 7.6, 1.9)) * 0.30;
-        cloud_shadow = smoothstep(thr - 0.09, thr + 0.09, sh_val) * opacity;
+        cloud_shadow = (u_earth_tex > 0)
+                     ? smoothstep(thr - 0.06, thr + 0.18, sh_val) * 0.92
+                     : smoothstep(thr - 0.09, thr + 0.09, sh_val) * opacity;
     }
 
     /* (L computed above the cloud block; also used for emission clamping
@@ -1037,7 +1106,15 @@ void main() {
     }
 
     /* ---- City lights (Earth, night side only) --------------------------- */
-    if (u_planet_type == 1) {
+    if (u_planet_type == 1 && u_earth_tex == 2) {
+        /* Black Marble: warm city light above a faint blue moonlit base.
+         * Keep only the warm excess, so oceans and unlit land stay dark. */
+        float night_mask = smoothstep(0.08, -0.12, sun_dot);
+        vec3  nl   = textureGrad(u_earth_night, g_earth_uv, g_earth_dx, g_earth_dy).rgb;
+        float warm = max(0.0, 0.5 * (nl.r + nl.g) - 0.9 * nl.b);
+        vec3  city = nl * smoothstep(0.0, 0.25, warm);
+        lava_emit += city * EARTH_CITY_GAIN * night_mask * (1.0 - impact_light_block);
+    } else if (u_planet_type == 1 && u_earth_tex == 0) {
         float night_mask  = smoothstep(0.08, -0.12, sun_dot);
         float n_land      = fbm(NL * 3.5);
         float land_mask   = smoothstep(0.40, 0.50, n_land);
@@ -1188,7 +1265,8 @@ void main() {
      * look.  Masked to open water: no land, no ice caps, no cloud cover. */
     vec3 spec_out = vec3(0.0);
     if (u_planet_type == 1) {
-        float sea = 1.0 - smoothstep(0.42, 0.47, fbm(NL * 3.5));
+        float sea = (u_earth_tex > 0) ? g_earth_sea
+                  : 1.0 - smoothstep(0.42, 0.47, fbm(NL * 3.5));
         sea *= 1.0 - smoothstep(0.78, 0.93, abs(NL.y));
         sea *= 1.0 - cloud_mask;
         if (sea > 0.001) {
@@ -1212,6 +1290,18 @@ void main() {
 
     vec3 lighting = amb_col + (sun_col * day + sun2_term) * (1.0 - u_ambient);
     vec3 col_out  = surface * lighting + lava_emit + spec_out;
+
+    /* Rayleigh haze over imagery Earth's sunlit disc. Air scatters blue
+     * sunlight toward the camera over the whole day side, thickening toward
+     * the limb as the path through the atmosphere lengthens. It is what makes
+     * real photos read as a blue marble rather than a dark map with a rim
+     * glow; without it the true-colour oceans looked nearly black. */
+    if (u_planet_type == 1 && u_earth_tex > 0) {
+        float mu   = max(dot(N, -ray_dir), 0.0);
+        float path = 0.10 + 0.90 * pow(1.0 - mu, 2.2);
+        vec3  rayleigh = vec3(0.30, 0.52, 1.00);
+        col_out += rayleigh * sun_col * (path * 0.16 * day);
+    }
 
     /* Tidal shredding: matter torn off heats up, so add a hot incandescent glow,
      * brightest on the limb so the stretched strand reads as glowing gas. */

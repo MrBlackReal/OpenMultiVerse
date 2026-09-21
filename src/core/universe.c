@@ -816,11 +816,32 @@ static unsigned cell_hash(int cx, int cy, int cz)
  * (catalogtool gaia-bin) and gitignored, so a fresh checkout simply loads the
  * preset's JSON bodies without the extra field.
  *
- * Each catalogue star is skipped if it falls within DEDUP_LY of a star already
- * loaded from the JSON (an exoplanet host or an inline nearby star), so the two
- * sources never draw the same star twice.  The test uses a spatial hash of the
- * existing stars (built once) — O(catalog) rather than O(catalog x existing).
+ * Each catalogue star is skipped if it matches a star already loaded from the
+ * JSON (an exoplanet host or an inline nearby star) — same direction on the
+ * sky within a few arcseconds, distances in rough agreement (see the index
+ * below) — so the two sources never draw the same star twice. The test uses a
+ * hash of the existing stars' directions (built once): O(catalog) rather than
+ * O(catalog x existing).
  */
+/* Display name for a StarBin source id. tools/fetch_catalogs.py tags the
+ * supplemental catalogues in the top 16 bits (0x54 = Tycho-2, 0x48 =
+ * Hipparcos) so their ids never collide with Gaia's; decode those to the
+ * catalogue's own designation. Gaia ids stay plain decimal, as before, so
+ * nothing that looks them up by name changes. */
+static void star_catalog_name(uint64_t id, char *out, size_t n)
+{
+    unsigned tag = (unsigned)(id >> 48);
+    uint64_t num = id & ((1ULL << 48) - 1);
+    if (tag == 0x54) {
+        unsigned long long t1 = num / 10000000ULL, rest = num % 10000000ULL;
+        snprintf(out, n, "TYC %llu-%llu-%llu", t1, rest / 10ULL, rest % 10ULL);
+    } else if (tag == 0x48) {
+        snprintf(out, n, "HIP %llu", (unsigned long long)num);
+    } else {
+        snprintf(out, n, "%llu", (unsigned long long)id);
+    }
+}
+
 static void load_star_catalog(const char *path)
 {
     if (!path || !path[0]) return;
@@ -837,27 +858,46 @@ static void load_star_catalog(const char *path)
         fprintf(stderr, "[universe] star_catalog '%s': not a StarBin file\n", path);
         fclose(f); return;
     }
-    if (h.version != STARBIN_VERSION || h.record_size != sizeof(StarBinRecord)) {
+    /* v2 carries a catalogue magnitude; v1 files (no magnitude) still load. */
+    int v1 = (h.version == STARBIN_VERSION_V1 && h.record_size == STARBIN_RECORD_SIZE_V1);
+    if (!v1 && (h.version != STARBIN_VERSION || h.record_size != sizeof(StarBinRecord))) {
         fprintf(stderr, "[universe] star_catalog '%s': incompatible (v%u rec%u; "
-                        "expected v%u rec%zu)\n", path, h.version, h.record_size,
-                STARBIN_VERSION, sizeof(StarBinRecord));
+                        "expected v%u rec%zu or v1 rec%u)\n", path, h.version, h.record_size,
+                STARBIN_VERSION, sizeof(StarBinRecord), STARBIN_RECORD_SIZE_V1);
         fclose(f); return;
     }
+    const size_t rec_size = h.record_size;
     if (h.count == 0) { fclose(f); return; }
 
-    /* --- spatial hash of existing star positions (in ly, DEDUP_LY cells) --- */
-    const double DEDUP_LY = 0.1;
+    /* --- cross-catalog dedupe index of the stars already loaded ---
+     *
+     * The same physical star often reaches the universe twice: a curated or
+     * exoplanet-host body from the JSON, and again from this field catalog.
+     * The old test — two stars within 0.1 ly in 3-D — missed most of them,
+     * because catalogues disagree on DISTANCE by a few percent (2 ly at 100 ly
+     * is twenty times that tolerance), and a placeholder distance (Tycho-2
+     * scenery) never matched at all. Catalogues agree far better on where a
+     * star is on the SKY. So match by direction from the Sun: within
+     * DEDUP_ARCSEC, with distances agreeing to DEDUP_DIST_FRAC (catalogue
+     * parallaxes differ, a foreground/background pair does not) — or on sky
+     * position alone when the record's distance is flagged as a placeholder.
+     * Only record-vs-existing is checked: one catalogue never lists a star
+     * twice, but it does list close binaries (Luhman 16 A/B, 1.5" apart), which
+     * must both survive. Cells are DEDUP_ARCSEC wide in unit-vector space. */
+    const double DEDUP_ARCSEC    = 3.0;
+    const double DEDUP_DIST_FRAC = 0.25;
+    const double ANG = DEDUP_ARCSEC * (PI / 180.0) / 3600.0;   /* radians */
     int n_ex = 0;
     for (int i = 0; i < g_nbodies; i++)
         if (g_bodies[i].alive && g_bodies[i].is_star) n_ex++;
 
-    double (*ex)[3] = NULL;
+    double (*ex)[4] = NULL;                  /* unit direction xyz, distance ly */
     int *gcx = NULL, *gcy = NULL, *gcz = NULL, *ghead = NULL, *gnext = NULL;
     unsigned gmask = 0;
     if (n_ex > 0) {
         int cap = 1;
         while (cap < n_ex * 2) cap <<= 1;
-        ex    = (double(*)[3])malloc((size_t)n_ex * sizeof *ex);
+        ex    = (double(*)[4])malloc((size_t)n_ex * sizeof *ex);
         gnext = (int *)malloc((size_t)n_ex * sizeof(int));
         gcx   = (int *)malloc((size_t)cap * sizeof(int));
         gcy   = (int *)malloc((size_t)cap * sizeof(int));
@@ -875,10 +915,12 @@ static void load_star_catalog(const char *path)
                 double px = g_bodies[i].pos[0] / LY;
                 double py = g_bodies[i].pos[1] / LY;
                 double pz = g_bodies[i].pos[2] / LY;
-                ex[k][0] = px; ex[k][1] = py; ex[k][2] = pz;
-                int cx = (int)floor(px / DEDUP_LY);
-                int cy = (int)floor(py / DEDUP_LY);
-                int cz = (int)floor(pz / DEDUP_LY);
+                double d  = sqrt(px*px + py*py + pz*pz);
+                if (d < 1e-9) continue;          /* the Sun: no direction */
+                ex[k][0] = px / d; ex[k][1] = py / d; ex[k][2] = pz / d; ex[k][3] = d;
+                int cx = (int)floor(ex[k][0] / ANG);
+                int cy = (int)floor(ex[k][1] / ANG);
+                int cz = (int)floor(ex[k][2] / ANG);
                 unsigned slot = cell_hash(cx, cy, cz) & gmask;
                 while (ghead[slot] != -1 &&
                        !(gcx[slot] == cx && gcy[slot] == cy && gcz[slot] == cz))
@@ -898,23 +940,32 @@ static void load_star_catalog(const char *path)
     if (h.count <= (uint32_t)(INT_MAX - g_nbodies))
         ensure_capacity(g_nbodies + (int)h.count);    /* upper bound before dedup */
     const size_t CHUNK = 8192;
-    StarBinRecord *buf = (StarBinRecord *)malloc(CHUNK * sizeof *buf);
+    /* Read raw records at the file's own size, then view each one as a
+     * StarBinRecord: a v1 record is the v2 layout minus the trailing
+     * abs_mag/_pad2, so only those fields need defaulting. */
+    unsigned char *buf = (unsigned char *)malloc(CHUNK * rec_size);
     unsigned added = 0, skipped = 0;
-    double r2 = DEDUP_LY * DEDUP_LY;
     if (buf) {
         uint32_t remaining = h.count;
         while (remaining > 0) {
             size_t want = remaining < CHUNK ? remaining : CHUNK;
-            size_t got = fread(buf, sizeof *buf, want, f);
+            size_t got = fread(buf, rec_size, want, f);
             if (got == 0) break;
             for (size_t j = 0; j < got; j++) {
-                StarBinRecord *r = &buf[j];
+                StarBinRecord rec;
+                memset(&rec, 0, sizeof rec);
+                memcpy(&rec, buf + j * rec_size, rec_size < sizeof rec ? rec_size : sizeof rec);
+                if (v1) rec.abs_mag = NAN;
+                StarBinRecord *r = &rec;
                 double px = r->pos_ly[0], py = r->pos_ly[1], pz = r->pos_ly[2];
+                double rd = sqrt(px*px + py*py + pz*pz);
 
-                if (ex) {
-                    int cx = (int)floor(px / DEDUP_LY);
-                    int cy = (int)floor(py / DEDUP_LY);
-                    int cz = (int)floor(pz / DEDUP_LY);
+                if (ex && rd > 1e-9) {
+                    double ux = px / rd, uy = py / rd, uz = pz / rd;
+                    int placeholder = (r->flags & STARBIN_FLAG_PLACEHOLDER_DIST) != 0;
+                    int cx = (int)floor(ux / ANG);
+                    int cy = (int)floor(uy / ANG);
+                    int cz = (int)floor(uz / ANG);
                     int dup = 0;
                     for (int dz = -1; dz <= 1 && !dup; dz++)
                     for (int dy = -1; dy <= 1 && !dup; dy++)
@@ -924,8 +975,13 @@ static void load_star_catalog(const char *path)
                         while (ghead[slot] != -1) {
                             if (gcx[slot] == qx && gcy[slot] == qy && gcz[slot] == qz) {
                                 for (int e = ghead[slot]; e != -1; e = gnext[e]) {
-                                    double ax = ex[e][0]-px, ay = ex[e][1]-py, az = ex[e][2]-pz;
-                                    if (ax*ax + ay*ay + az*az < r2) { dup = 1; break; }
+                                    double ax = ex[e][0]-ux, ay = ex[e][1]-uy, az = ex[e][2]-uz;
+                                    if (ax*ax + ay*ay + az*az >= ANG * ANG) continue;
+                                    double de = ex[e][3];
+                                    if (placeholder ||
+                                        fabs(rd - de) <= DEDUP_DIST_FRAC * fmin(rd, de) + 0.05) {
+                                        dup = 1; break;
+                                    }
                                 }
                                 break;
                             }
@@ -938,7 +994,8 @@ static void load_star_catalog(const char *path)
                 ensure_capacity(g_nbodies + 1);
                 Body *bo = &g_bodies[g_nbodies];
                 body_defaults(bo);
-                snprintf(bo->name, sizeof bo->name, "%llu", (unsigned long long)r->source_id);
+                star_catalog_name(r->source_id, bo->name, sizeof bo->name);
+                if (!isnan(r->abs_mag)) { bo->has_abs_mag = 1; bo->abs_mag = r->abs_mag; }
                 bo->mass   = r->mass_kg;
                 bo->radius = (double)r->radius_km * 1000.0;
                 bo->pos[0] = px * LY; bo->pos[1] = py * LY; bo->pos[2] = pz * LY;

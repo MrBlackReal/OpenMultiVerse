@@ -36,8 +36,10 @@ distant stars as a cheap far-field point pass, so the full catalogs (~16k
 bodies) run in real time — --max-systems just chooses how big a slice you want,
 not whether it is runnable.
 """
+
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -167,20 +169,31 @@ def merge(solar, extra_sources):
     return out
 
 
-def dedup_positional(bodies, eps_ly=0.1):
-    """Drop a star that sits within eps_ly of an earlier-listed star.  The same
-    physical star often appears in two catalogs under unrelatable names (an
-    exoplanet host like "Proxima Cen" vs its bare Gaia source_id), so name
+def dedup_positional(bodies, arcsec=3.0, dist_frac=0.25):
+    """Drop a star that duplicates an earlier-listed star from ANOTHER catalogue.
+
+    The same physical star often appears in two catalogs under unrelatable names
+    (an exoplanet host like "Proxima Cen" vs its bare Gaia source_id), so name
     de-dup misses it and the render shows two stars on top of each other.
-    Sources are ordered curated-first, so the named/curated entry survives.
-    Stars with bodies parented under them are never dropped (that would orphan
-    the children); real binaries are far tighter than eps_ly and both members
-    are usually curated, so only cross-catalog duplicates match."""
+
+    Matching is by direction on the sky as seen from the Sun (within `arcsec`)
+    with distances agreeing to `dist_frac`. The first version required two
+    stars within 0.1 ly in 3-D, which missed most duplicates: catalogues agree
+    far better on a star's direction than on its distance (a 2% parallax
+    difference is 2 ly at 100 ly, twenty times that tolerance).
+
+    Only cross-catalogue pairs can match: one catalogue never lists a star
+    twice, but it does list close binaries (Luhman 16 A/B are 1.5" apart), and
+    both must survive. Sources are ordered curated-first, so the
+    named/curated entry survives. Stars with bodies parented under them are
+    never dropped (that would orphan the children). Provenance comes from the
+    "_src" tag main() sets; untagged bodies count as one shared source."""
     has_children = {b.get("parent", "") for b in bodies if b.get("parent")}
+    r = math.radians(arcsec / 3600.0)
     grid = {}
 
-    def cell(p):
-        return (int(p[0] // eps_ly), int(p[1] // eps_ly), int(p[2] // eps_ly))
+    def key(u):
+        return (int(math.floor(u[0] / r)), int(math.floor(u[1] / r)), int(math.floor(u[2] / r)))
 
     out, dropped = [], 0
     for b in bodies:
@@ -188,16 +201,24 @@ def dedup_positional(bodies, eps_ly=0.1):
             out.append(b)
             continue
         p = b.get("pos_ly", [0.0, 0.0, 0.0])
-        cx, cy, cz = cell(p)
+        d = math.sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2])
+        if d < 1e-9:                      # the Sun: no direction to match
+            out.append(b)
+            continue
+        u = (p[0] / d, p[1] / d, p[2] / d)
+        k = key(u)
+        src = b.get("_src", "")
         dup = False
         if b.get("name", "") not in has_children:
             for dx in (-1, 0, 1):
                 for dy in (-1, 0, 1):
                     for dz in (-1, 0, 1):
-                        for q in grid.get((cx + dx, cy + dy, cz + dz), ()):
-                            d2 = ((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2
-                                  + (p[2] - q[2]) ** 2)
-                            if d2 < eps_ly * eps_ly:
+                        for (v, dv, sv) in grid.get((k[0] + dx, k[1] + dy, k[2] + dz), ()):
+                            if sv == src:
+                                continue
+                            if math.dist(u, v) > r:
+                                continue
+                            if abs(d - dv) <= dist_frac * min(d, dv) + 0.05:
                                 dup = True
                                 break
                         if dup:
@@ -209,11 +230,13 @@ def dedup_positional(bodies, eps_ly=0.1):
         if dup:
             dropped += 1
             continue
-        grid.setdefault((cx, cy, cz), []).append(p)
+        grid.setdefault(k, []).append((u, d, src))
         out.append(b)
     if dropped:
-        print(f"[known] dropped {dropped} cross-catalog duplicate stars "
-              f"(same position within {eps_ly} ly)")
+        print(
+            f"[known] dropped {dropped} cross-catalog duplicate stars "
+            f"(same sky position within {arcsec}\", distances within {dist_frac:.0%})"
+        )
     return out
 
 
@@ -228,7 +251,7 @@ def cap_nearest(bodies, max_systems):
         return bodies
     by_name = {b.get("name", ""): b for b in bodies}
 
-    roots = ("star", "black_hole", "quasar")   # a system root is a star OR a hole
+    roots = ("star", "black_hole", "quasar")  # a system root is a star OR a hole
 
     def root(b):
         cur, guard = b, 0
@@ -245,7 +268,7 @@ def cap_nearest(bodies, max_systems):
 
     stars = sorted((b for b in bodies if b.get("type") in roots), key=dist)
     keep = {s.get("name", "") for s in stars[:max_systems]}
-    keep.add("Sun")                    # the Solar System is always included
+    keep.add("Sun")  # the Solar System is always included
     return [b for b in bodies if root(b).get("name", "") in keep]
 
 
@@ -268,8 +291,10 @@ def split_curated(bodies):
         return cur
 
     def curated(b):
-        return (b.get("type") in ("black_hole", "quasar")
-                or root(b).get("name", "") == "Sun")
+        return (
+            b.get("type") in ("black_hole", "quasar")
+            or root(b).get("name", "") == "Sun"
+        )
 
     cur, bulk = [], []
     for b in bodies:
@@ -288,8 +313,9 @@ def export_body_catalog(bulk, laws, tmp, out_bin):
     bulk_json = os.path.join(tmp, "bulk.json")
     with open(bulk_json, "w", encoding="utf-8") as f:
         json.dump({"laws": laws, "bodies": bulk}, f)
-    subprocess.run([verse, "--export-body-catalog", out_bin,
-                    "--preset", bulk_json], check=True)
+    subprocess.run(
+        [verse, "--export-body-catalog", out_bin, "--preset", bulk_json], check=True
+    )
 
 
 def main():
@@ -297,25 +323,49 @@ def main():
         return full if os.path.exists(os.path.join(ROOT, full)) else sample
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--exoplanets", default=default_csv(
-        "assets/catalogs/exoplanets_full.csv", "assets/catalogs/exoplanets_sample.csv"))
-    ap.add_argument("--gaia", default=default_csv(
-        "assets/catalogs/gaia_full.csv", "assets/catalogs/gaia_sample.csv"))
-    ap.add_argument("--blackholes", default="assets/catalogs/black_holes.csv",
-                    help="curated real black-hole CSV (no bulk feed exists; "
-                         "empty string to skip)")
+    ap.add_argument(
+        "--exoplanets",
+        default=default_csv(
+            "assets/catalogs/exoplanets_full.csv",
+            "assets/catalogs/exoplanets_sample.csv",
+        ),
+    )
+    ap.add_argument(
+        "--gaia",
+        default=default_csv(
+            "assets/catalogs/gaia_full.csv", "assets/catalogs/gaia_sample.csv"
+        ),
+    )
+    ap.add_argument(
+        "--blackholes",
+        default="assets/catalogs/black_holes.csv",
+        help="curated real black-hole CSV (no bulk feed exists; empty string to skip)",
+    )
     ap.add_argument("--solar", default="assets/universe.json")
-    ap.add_argument("--out", default="assets/universes/known_universe.json",
-                    help="manifest JSON to write (laws + curated bodies + refs)")
-    ap.add_argument("--out-bin", default="assets/catalogs/known_universe_bodies.bin",
-                    help="BodyBin for the bulk catalog bodies the manifest references")
-    ap.add_argument("--star-catalog", default="assets/catalogs/gaia_stars.bin",
-                    help="StarBin of far-field scenery stars to reference (empty to omit)")
-    ap.add_argument("--max-systems", type=int, default=0,
-                    help="keep the Solar System + this many nearest star systems "
-                         "(default 0 = everything, matching the shipped preset; "
-                         "the full catalogs run in real time, so this just sizes "
-                         "the universe to a smaller slice if you want one)")
+    ap.add_argument(
+        "--out",
+        default="assets/universes/known_universe.json",
+        help="manifest JSON to write (laws + curated bodies + refs)",
+    )
+    ap.add_argument(
+        "--out-bin",
+        default="assets/catalogs/known_universe_bodies.bin",
+        help="BodyBin for the bulk catalog bodies the manifest references",
+    )
+    ap.add_argument(
+        "--star-catalog",
+        default="assets/catalogs/gaia_stars.bin",
+        help="StarBin of far-field scenery stars to reference (empty to omit)",
+    )
+    ap.add_argument(
+        "--max-systems",
+        type=int,
+        default=0,
+        help="keep the Solar System + this many nearest star systems "
+        "(default 0 = everything, matching the shipped preset; "
+        "the full catalogs run in real time, so this just sizes "
+        "the universe to a smaller slice if you want one)",
+    )
     args = ap.parse_args()
 
     tmp = os.path.join(ROOT, "tools", "_known_tmp")
@@ -325,28 +375,51 @@ def main():
 
     extra = []
     if args.exoplanets:
-        extra.append(catalogtool("exoplanets",
-                                 os.path.join(ROOT, args.exoplanets),
-                                 os.path.join(tmp, "exo.json")))
+        extra.append(
+            catalogtool(
+                "exoplanets",
+                os.path.join(ROOT, args.exoplanets),
+                os.path.join(tmp, "exo.json"),
+            )
+        )
     if args.gaia:
-        extra.append(catalogtool("gaia",
-                                 os.path.join(ROOT, args.gaia),
-                                 os.path.join(tmp, "gaia.json")))
+        extra.append(
+            catalogtool(
+                "gaia", os.path.join(ROOT, args.gaia), os.path.join(tmp, "gaia.json")
+            )
+        )
     if args.blackholes:
-        extra.append(catalogtool("blackholes",
-                                 os.path.join(ROOT, args.blackholes),
-                                 os.path.join(tmp, "bh.json")))
+        extra.append(
+            catalogtool(
+                "blackholes",
+                os.path.join(ROOT, args.blackholes),
+                os.path.join(tmp, "bh.json"),
+            )
+        )
 
     # Drop catalogue systems with no real position (parked at the origin).
     extra = [drop_unplaced(src) for src in extra]
 
+    # Tag provenance so dedup_positional only matches ACROSS catalogues (a
+    # catalogue's own close binaries must both survive); stripped right after.
+    for b in solar.get("bodies", []):
+        b["_src"] = "solar"
+    for i, src in enumerate(extra):
+        for b in src:
+            b["_src"] = f"extra{i}"
+
     bodies = merge(solar, extra)
     bodies = dedup_positional(bodies)
+    bodies = [{k: v for k, v in b.items() if k != "_src"} for b in bodies]
     bodies = cap_nearest(bodies, args.max_systems)
 
     laws = {
-        "G": 6.674e-11, "softening": 1e5, "time_scale": 1.0,
-        "force_exp": 2.0, "lambda": 0.0, "pn_factor": 0.0,
+        "G": 6.674e-11,
+        "softening": 1e5,
+        "time_scale": 1.0,
+        "force_exp": 2.0,
+        "lambda": 0.0,
+        "pn_factor": 0.0,
         "c_light": 2.99792458e8,
     }
 
@@ -366,18 +439,22 @@ def main():
             manifest[key] = solar[key]
 
     out_path = os.path.join(ROOT, args.out)
-    header = ("// OpenMultiVerse \"Known Universe\" — manifest, auto-generated by\n"
-              "// tools/build_known_universe.py. Laws + the curated Solar System and\n"
-              "// black holes inline; bulk catalog bodies load from body_catalog (a\n"
-              "// BodyBin), far-field scenery stars from star_catalog (a StarBin).\n")
+    header = (
+        '// OpenMultiVerse "Known Universe" — manifest, auto-generated by\n'
+        "// tools/build_known_universe.py. Laws + the curated Solar System and\n"
+        "// black holes inline; bulk catalog bodies load from body_catalog (a\n"
+        "// BodyBin), far-field scenery stars from star_catalog (a StarBin).\n"
+    )
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(header)
         json.dump(manifest, f, indent=2)
         f.write("\n")
 
     n_bh = sum(1 for b in curated if b.get("type") in ("black_hole", "quasar"))
-    print(f"[known] manifest: {len(curated)} curated bodies ({n_bh} black holes) "
-          f"-> {args.out}")
+    print(
+        f"[known] manifest: {len(curated)} curated bodies ({n_bh} black holes) "
+        f"-> {args.out}"
+    )
     print(f"[known] body_catalog: {len(bulk)} bulk bodies -> {args.out_bin}")
 
 

@@ -76,6 +76,12 @@ typedef struct {
     float  vignette;           /* corner darkening 0..1 (0 = off)             */
     float  lens_spikes;        /* star-glare diffraction spike strength (0=off)*/
     float  lens_flare;         /* sun lens-flare overlay strength (0 = off)   */
+    /* Earth satellite imagery (render/earth_tex.c). Paths may point at any
+     * equirectangular JPG/PNG, e.g. a higher-resolution NASA release;
+     * max_px caps the loaded width (0 = full resolution). */
+    char   earth_day_texture[256];
+    char   earth_night_texture[256];
+    int    earth_texture_max_px;
     float  flare_ghosts;       /* ghost-sprite chain gain (1 = calibrated)    */
     float  flare_halo;         /* halo ring gain                              */
     float  flare_halo_radius;  /* halo ring radius (screen units)             */

@@ -33,6 +33,11 @@ void main() {
         v_color.rgb *= 1.0 + u_twinkle * 0.16 * tw;
     }
 
+    /* Star veil (clusters only: the dynamic-dot pass applies it on the CPU
+     * so it can exempt the exposed star's own system, and leaves
+     * u_veil_e/f at 0 here). */
+    v_color.a *= veil_vis(a_pos, max(max(v_color.r, v_color.g), v_color.b));
+
     gl_PointSize = a_size;
     gl_Position  = u_vp * vec4(a_pos, 1.0);
 }

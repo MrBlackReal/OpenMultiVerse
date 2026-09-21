@@ -1,7 +1,45 @@
-{ "name": "orbit test", "keys": [
-  { "t": 0.00, "anchor": "Earth", "offset": [0.00060000, 0.00009000, 0.00000000], "look_at": "Earth", "fov": 30, "ease": "linear" },
-  { "t": 2.00, "anchor": "Earth", "offset": [0.00000000, 0.00009000, 0.00060000], "look_at": "Earth", "fov": 30, "ease": "linear" },
-  { "t": 4.00, "anchor": "Earth", "offset": [-0.00060000, 0.00009000, 0.00000000], "look_at": "Earth", "fov": 30, "ease": "linear" },
-  { "t": 6.00, "anchor": "Earth", "offset": [-0.00000000, 0.00009000, -0.00060000], "look_at": "Earth", "fov": 30, "ease": "linear" },
-  { "t": 8.00, "anchor": "Earth", "offset": [0.00060000, 0.00009000, -0.00000000], "look_at": "Earth", "fov": 30, "ease": "linear" }
-] }
+{
+  "name": "orbit test",
+  "keys": [
+    {
+      "t": 0.0,
+      "anchor": "Earth",
+      "offset": [0.0006, 0.00009, 0.0],
+      "look_at": "Earth",
+      "fov": 30,
+      "ease": "linear"
+    },
+    {
+      "t": 2.0,
+      "anchor": "Earth",
+      "offset": [0.0, 0.00009, 0.0006],
+      "look_at": "Earth",
+      "fov": 30,
+      "ease": "linear"
+    },
+    {
+      "t": 4.0,
+      "anchor": "Earth",
+      "offset": [-0.0006, 0.00009, 0.0],
+      "look_at": "Earth",
+      "fov": 30,
+      "ease": "linear"
+    },
+    {
+      "t": 6.0,
+      "anchor": "Earth",
+      "offset": [-0.0, 0.00009, -0.0006],
+      "look_at": "Earth",
+      "fov": 30,
+      "ease": "linear"
+    },
+    {
+      "t": 8.0,
+      "anchor": "Earth",
+      "offset": [0.0006, 0.00009, -0.0],
+      "look_at": "Earth",
+      "fov": 30,
+      "ease": "linear"
+    }
+  ]
+}

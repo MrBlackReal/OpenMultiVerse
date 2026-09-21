@@ -24,6 +24,12 @@ uniform float     u_chromatic;  /* lateral CA strength (0 = off)               *
 uniform float     u_vignette;   /* corner darkening 0..1 (0 = off)             */
 uniform float     u_rel_beta;   /* relativistic effect 0..1 (0 = off)          */
 uniform vec2      u_rel_center; /* heading point in UV (0.5,0.5 = look axis)   */
+/* Star-veil glare haze (render.c star_veil_update, star_veil.h). */
+uniform float     u_haze;       /* E_psf (star_veil.h), 0 = off              */
+uniform vec3      u_haze_view;  /* unit direction to the star, camera basis   */
+uniform vec3      u_haze_col;   /* star chromaticity                          */
+uniform float     u_haze_tan;   /* tan(fov/2)                                 */
+uniform float     u_haze_aspect;
 
 /* Narkowicz 2015 ACES filmic approximation; linear in, display-linear out. */
 vec3 tonemap_aces(vec3 x) {
@@ -97,6 +103,15 @@ void main() {
                + texture(u_bloom1, v_uv).rgb * u_bloom_w.y
                + wide                        * u_bloom_w.z;
     vec3 hdr   = scene + bloom * u_intensity;
+
+    /* Veiling glare: the light that drowned the background near a bright
+     * star, same angular falloff as the mask (star_veil.h). */
+    if (u_haze > 0.0) {
+        vec2  n   = v_uv * 2.0 - 1.0;
+        vec3  pd  = normalize(vec3(n.x * u_haze_aspect * u_haze_tan, n.y * u_haze_tan, 1.0));
+        float th  = max(degrees(acos(clamp(dot(pd, u_haze_view), -1.0, 1.0))), VEIL_CORE_DEG_GLSL);
+        hdr += u_haze_col * (u_haze * VEIL_PSF_GLSL / (th * th));
+    }
 
     vec3 col;
     if (u_tonemap == 0) {

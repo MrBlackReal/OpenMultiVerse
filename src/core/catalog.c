@@ -636,7 +636,7 @@ static void eq_vel_to_gl(double ra_deg, double dec_deg,
 /* ---- shared Gaia row science (used by both the JSON and binary emitters) -- */
 
 typedef struct {
-    int name, ra, dec, plx, dpc, pmra, pmde, rv, te;
+    int name, ra, dec, plx, dpc, pmra, pmde, rv, te, mag, phd;
 } GaiaCols;
 
 typedef struct {
@@ -645,6 +645,8 @@ typedef struct {
     double vel[3];   /* km/s, GL frame                  */
     double smass;    /* stellar mass, solar masses      */
     double rgb[3];   /* display colour, 0..1            */
+    double abs_mag;  /* from an observed-magnitude column; NaN = none */
+    int    placeholder_dist;  /* distance is a scenery placeholder      */
 } StarValues;
 
 /* Read past blank/comment lines to the CSV header, fill the column indices.
@@ -677,6 +679,13 @@ static char *gaia_read_header(FILE *in, GaiaCols *c)
     c->rv   = col_index(hdr, nh, "radial_velocity");
     c->te   = col_index(hdr, nh, "teff");
     if (c->te < 0) c->te = col_index(hdr, nh, "st_teff");
+    /* Optional observed magnitude (Gaia G, Tycho VT, Hipparcos V): lets
+     * scenery stars with a placeholder distance still show at their real
+     * brightness. */
+    c->mag  = col_index(hdr, nh, "mag");
+    if (c->mag < 0) c->mag = col_index(hdr, nh, "phot_g_mean_mag");
+    if (c->mag < 0) c->mag = col_index(hdr, nh, "vmag");
+    c->phd  = col_index(hdr, nh, "placeholder_dist");   /* optional 0/1 flag */
     if (c->ra < 0 || c->dec < 0 || (c->plx < 0 && c->dpc < 0)) {
         free(header);
         return NULL;
@@ -700,6 +709,13 @@ static int gaia_parse_row(char **f, int nf, const GaiaCols *c, int ordinal,
     if (isnan(ra) || isnan(dec) || dist_pc <= 0.0) return 0;
 
     eq_to_ecliptic_ly(ra, dec, dist_pc * PC_TO_LY, sv->pos);
+
+    /* M = m - 5 log10(d / 10 pc). With a placeholder distance the two errors
+     * cancel from Earth: the star shows at its catalogued brightness. */
+    double mag = field_num(f,nf,c->mag);
+    sv->abs_mag = isnan(mag) ? NAN : mag - 5.0 * log10(dist_pc / 10.0);
+    double phd = field_num(f,nf,c->phd);
+    sv->placeholder_dist = (!isnan(phd) && phd != 0.0);
 
     double teff = field_num(f,nf,c->te);
     sv->smass = mass_from_teff(teff);
@@ -827,6 +843,8 @@ static int convert_gaia_bin(const char *in_path, const char *out_path, int max_i
         r.color[0]   = clamp_u8(sv.rgb[0]);
         r.color[1]   = clamp_u8(sv.rgb[1]);
         r.color[2]   = clamp_u8(sv.rgb[2]);
+        r.abs_mag    = (float)sv.abs_mag;
+        r.flags      = sv.placeholder_dist ? STARBIN_FLAG_PLACEHOLDER_DIST : 0;
         if (fwrite(&r, sizeof r, 1, o) != 1) { write_err = 1; free(ln); break; }
         count++;
         free(ln);

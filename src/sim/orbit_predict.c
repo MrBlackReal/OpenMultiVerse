@@ -21,6 +21,7 @@
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
+#include "physics.h"   /* g_orbits_off */
 
 #define ORBIT_PREDICT_MAX_PTS 512
 #define ORBIT_PREDICT_STEPS   3000   /* integration substeps across the span */
@@ -201,7 +202,7 @@ static int select_target(void)
 
 void orbit_predict_render(const float vp_camrel[16])
 {
-    if (!s_shader || !g_settings.orbit_predict) return;
+    if (!s_shader || !g_settings.orbit_predict || g_orbits_off) return;
 
     int body = select_target();
     if (body < 0 || body >= g_nbodies ||

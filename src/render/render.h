@@ -21,3 +21,7 @@ void render_frame(const float view[16], const float proj[16],
                   const float view_rot[16], float dt);
 
 void render_shutdown(void);
+
+/* Upload this frame's star-veil glare (star_veil.h) to a program whose shader
+ * calls veil_vis(); call after glUseProgram. */
+void render_star_veil_uniforms(unsigned int prog);

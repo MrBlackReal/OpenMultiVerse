@@ -1083,8 +1083,31 @@ here — they are global, cross-universe, and live in `settings.json` via
 An optional top-level `"star_catalog"` string points at a **StarBin** file — a
 compact binary star catalog. A bulk field of hundreds of thousands of stars is
 far too large to ship as JSON (~400 bytes/star of text); the StarBin format is a
-fixed 48-byte record (`StarBinRecord` in `catalog.h`) behind a small header
-(magic `'OMVS'`, version, count, `record_size`). At the end of `universe_load()`,
+fixed 56-byte record (`StarBinRecord` in `catalog.h`) behind a small header
+(magic `'OMVS'`, version, count, `record_size`). Version 2 adds `abs_mag`: the
+absolute magnitude from the catalogue's *observed* magnitude (an optional `mag`,
+`phot_g_mean_mag` or `vmag` CSV column) and the row's distance. When present it
+drives the star's drawn brightness instead of the radius-based estimate, which
+is what lets supplemental catalogues with only a placeholder distance (Tycho-2
+in `tools/fetch_catalogs.py`) still appear at their real brightness from Earth.
+Version-1 files (48-byte records, no magnitude) still load. Source ids tagged in
+the top 16 bits by the fetcher decode to catalogue names (`0x54` -> `TYC a-b-c`,
+`0x48` -> `HIP n`); Gaia ids stay plain decimal. A `flags` byte marks rows whose
+distance is a scenery placeholder (`STARBIN_FLAG_PLACEHOLDER_DIST`, from an
+optional `placeholder_dist` CSV column).
+
+**Deduplication** is by position on the sky, not in 3-D, at all three stages
+(`tools/fetch_catalogs.py` merge, `tools/build_known_universe.py`
+`dedup_positional`, and `load_star_catalog`): catalogues agree on a star's
+direction to milliarcseconds but disagree on its distance by percent, so the
+old 3-D 0.1 ly test missed most cross-catalog duplicates (a 2% parallax
+difference is 2 ly at 100 ly). A duplicate is within ~3" on the sky with
+distances agreeing to 25% (skipped for placeholder distances); only entries
+from different catalogues can match, so a catalogue's own close binaries
+survive. The fetcher additionally prefers Gaia > Hipparcos > Tycho-2, matches
+Tycho-2 to Hipparcos by Tycho-2's own HIP cross-identification, and requires
+magnitudes to agree beyond 1". On the shipped data the loader now drops 1,730
+field-star duplicates instead of 1,113. At the end of `universe_load()`,
 `load_star_catalog()` streams those records straight into `g_bodies[]` as real,
 navigable stars — cheap now that stars carry no trail and no GL buffer (§ trails).
 

@@ -85,6 +85,12 @@ int    physics_sanitize_system(int root);   /* one system's members only */
 void physics_step(double dt);
 
 /* Trail helpers */
+/* --no-orbits: no orbit trails or orbit prediction are computed or drawn —
+ * the trail tick, snapshots and roll-backs, the trail pass and the predictor
+ * all return at once. Set from the CLI before the universe loads (so warm-up
+ * skips them too) and never changed after; the OpenMP path only reads it. */
+extern int g_orbits_off;
+
 void trails_begin_frame_snapshot(void);
 void trails_begin_frame_snapshot_system(int root);   /* one system's members only */
 void trails_tick(double dt);

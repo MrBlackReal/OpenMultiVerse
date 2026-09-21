@@ -1,5 +1,0 @@
-{ "name": "fast leg", "keys": [
-  { "t": 0.0, "pos": [-7809.02, 4474.27, -3.12464], "yaw": -93.1604, "pitch": -5.5357, "fov": 50, "timescale": 5, "shutter": 180, "ease": "linear" },
-  { "t": 1.0, "pos": [-1.90887e+06, 1.09371e+06, -763.121], "yaw": -93.0939, "pitch": -5.5738, "fov": 50, "timescale": 5, "shutter": 180, "ease": "linear" },
-  { "t": 2.0, "pos": [-1.21474e+08, 6.95997e+07, -48562.1], "yaw": -88.9045, "pitch": -7.9491, "fov": 50, "timescale": 5, "shutter": 180, "ease": "linear" }
-] }

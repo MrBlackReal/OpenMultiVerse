@@ -15,20 +15,21 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
     if (argc < 4) {
-        fprintf(stderr,
-            "usage: %s <exoplanets|horizons|gaia|blackholes> <in.csv> <out.json> [max]\n",
-            argv[0]);
+        fprintf(stderr, "usage: %s <exoplanets|horizons|gaia|blackholes> <in.csv> <out.json> [max]\n", argv[0]);
         return 2;
     }
+
     int type = catalog_type_from_name(argv[1]);
+
     if (type < 0) {
         fprintf(stderr, "catalogtool: unknown catalog type '%s'\n", argv[1]);
         return 2;
     }
+
     int max = (argc >= 5) ? atoi(argv[4]) : 0;
     int n = catalog_convert((CatalogType)type, argv[2], argv[3], max);
+
     return (n >= 0) ? 0 : 1;
 }

@@ -5,6 +5,7 @@
  * `make IMGUI=0` the functions below are no-op stubs instead, so the rest of
  * the program is unaffected.
  */
+#include "earth_tex.h"
 #include "menu.h"
 #include "profiler.h"
 #include "presets.h"
@@ -1086,19 +1087,30 @@ static void menu_render_settings(void)
             if (cinema_shot_playing()) {
                 if (igButton("Stop", (ImVec2_c){ 90.0f, 0.0f })) cinema_shot_stop();
             } else {
-                if (igButton("Play", (ImVec2_c){ 90.0f, 0.0f })) cinema_shot_play(0.0);
+                /* From a scrub preview, play on from the previewed moment. */
+                double from = cinema_shot_previewing() ? cinema_shot_time() : 0.0;
+                if (igButton("Play", (ImVec2_c){ 90.0f, 0.0f })) cinema_shot_play(from);
+                if (cinema_shot_previewing()) {
+                    igSameLine(0.0f, 8.0f);
+                    if (igButton("End preview", (ImVec2_c){ 110.0f, 0.0f }))
+                        cinema_shot_preview_end();
+                }
             }
             igSameLine(0.0f, 8.0f);
-            igTextDisabled("playing drives the camera; Stop restores your settings");
+            igTextDisabled(cinema_shot_previewing()
+                           ? "previewing: End preview restores your settings"
+                           : "playing drives the camera; Stop restores your settings");
             {
                 /* Scrubbing previews without running the clock, so you can park
-                 * on a moment and judge the framing. */
+                 * on a moment and judge the framing. It holds the same snapshot
+                 * as playback, so what you see is exactly what that moment
+                 * films, whichever direction you scrub. */
                 float t = (float)cinema_shot_time();
                 igPushItemWidth(igGetContentRegionAvail().x * w);
                 if (igSliderFloat("Scrub", &t, 0.0f,
                                   (float)cinema_shot_duration(), "%.2f s", 0)) {
-                    cinema_shot_set_time((double)t);
-                    cinema_shot_eval((double)t);
+                    if (cinema_shot_playing()) cinema_shot_set_time((double)t);
+                    else                       cinema_shot_preview((double)t);
                 }
                 igPopItemWidth();
             }
@@ -1574,6 +1586,24 @@ int menu_render(int current_preset, int *laws_changed, const char **out_load_pat
                     if (igSliderFloat("Star spikes", &sp, 0.0f, 1.5f, "%.2f", 0))
                         g_settings.lens_spikes = sp;
                     igSetItemTooltip("Diffraction spikes on bright stars.");
+                    {
+                        /* Earth imagery resolution cap: applied at once by
+                         * reloading (render/earth_tex.c). Full = the files as
+                         * shipped, or whatever higher-res NASA release the
+                         * settings paths point at. */
+                        static const int   caps[]  = { 0, 4096, 2048, 1024 };
+                        static const char *names[] = { "Full", "4096", "2048", "1024" };
+                        int cur = 0;
+                        for (int ci = 0; ci < 4; ci++)
+                            if (g_settings.earth_texture_max_px == caps[ci]) cur = ci;
+                        if (igCombo_Str_arr("Earth texture", &cur, names, 4, 4)) {
+                            g_settings.earth_texture_max_px = caps[cur];
+                            earth_tex_init();
+                        }
+                        igSetItemTooltip("Resolution of Earth's satellite imagery "
+                                         "(NASA Blue Marble / Black Marble). Lower "
+                                         "saves GPU memory.");
+                    }
                     igSliderFloat("Lens flare", &g_settings.lens_flare, 0.0f, 1.0f, "%.2f", 0);
                     igSetItemTooltip("Ghost sprites + halo + anamorphic streak from the "
                                      "dominant sun (0 = off).");

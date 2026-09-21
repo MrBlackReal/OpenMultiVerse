@@ -1,8 +1,50 @@
-{ "name": "scale crossing", "keys": [
-  { "t": 0,  "anchor": "Earth", "offset": [0.0004, 0.0002, 0.0004], "look_at": "Earth", "fov": 40, "ease": "in" },
-  { "t": 3,  "pos": [0, 20, 50], "look_at": "Sun", "fov": 45, "ease": "inout" },
-  { "t": 6,  "pos": [0, 2.0e5, 5.0e5], "look_at": "Sun", "fov": 45, "ease": "inout" },
-  { "t": 9,  "pos": [0, 2.0e8, 5.0e8], "look_at": "Sun", "fov": 45, "ease": "inout" },
-  { "t": 12, "pos": [1.186e+11, 1.1831e+11, 1.5267e+11], "yaw": -90.0000, "pitch": -18.4349, "fov": 45, "ease": "inout" },
-  { "t": 15, "pos": [1.186e+11, 1.0831e+11, 1.2267e+11], "yaw": -90.0000, "pitch": -18.4349, "fov": 45, "ease": "out" }
-] }
+{
+  "name": "scale crossing",
+  "keys": [
+    {
+      "t": 0,
+      "anchor": "Earth",
+      "offset": [0.0004, 0.0002, 0.0004],
+      "look_at": "Earth",
+      "fov": 40,
+      "ease": "in"
+    },
+    {
+      "t": 3,
+      "pos": [0, 20, 50],
+      "look_at": "Sun",
+      "fov": 45,
+      "ease": "inout"
+    },
+    {
+      "t": 6,
+      "pos": [0, 2.0e5, 5.0e5],
+      "look_at": "Sun",
+      "fov": 45,
+      "ease": "inout"
+    },
+    {
+      "t": 9,
+      "pos": [0, 2.0e8, 5.0e8],
+      "look_at": "Sun",
+      "fov": 45,
+      "ease": "inout"
+    },
+    {
+      "t": 12,
+      "pos": [1.186e11, 1.1831e11, 1.5267e11],
+      "yaw": -90.0,
+      "pitch": -18.4349,
+      "fov": 45,
+      "ease": "inout"
+    },
+    {
+      "t": 15,
+      "pos": [1.186e11, 1.0831e11, 1.2267e11],
+      "yaw": -90.0,
+      "pitch": -18.4349,
+      "fov": 45,
+      "ease": "out"
+    }
+  ]
+}

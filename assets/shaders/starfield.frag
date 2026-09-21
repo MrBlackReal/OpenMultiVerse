@@ -10,6 +10,7 @@
  */
 
 in  vec4 v_color;
+in  vec3 v_dir;
 out vec4 frag_color;
 
 uniform float u_fade;
@@ -24,5 +25,8 @@ void main() {
     float d = length(gl_PointCoord - vec2(0.5));
     if (d > 0.5) discard;
 
-    frag_color = v_color * u_fade;
+    /* Drowned by a nearby star's glare where it is fainter than the glare
+     * at this point on the sky (veil_vis, gl_utils prelude). */
+    float lum = max(max(v_color.r, v_color.g), v_color.b);
+    frag_color = v_color * (u_fade * veil_vis(v_dir, lum));
 }

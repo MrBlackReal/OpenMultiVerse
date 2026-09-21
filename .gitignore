@@ -90,3 +90,6 @@ assets/PS_2026.07.03_09.35.26.csv
 # CI step scratch output (see .github/workflows/ci.yml)
 build.log
 orphans.txt
+
+# Build intermediates (make): build/<flavour>/...
+/build/

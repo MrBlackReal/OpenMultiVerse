@@ -50,6 +50,14 @@ static double   s_clock;            /* position within the tour shot       */
 static double   s_duration;
 static char     s_subject[64];
 
+/* Where each leg starts on the tour clock and what it presents, so the title
+ * cards (cinema_titles.c) can name the current subject at any moment. */
+#define MAX_LEGS 32
+static double      s_leg_t0[MAX_LEGS];
+static CineSubject s_leg_sub[MAX_LEGS];
+static int         s_nlegs;
+static CineSubject s_cut_sub;       /* the event a cutaway is covering */
+
 /* Tour shot stashed while a cutaway plays. */
 static CineKey  s_tour_keys[CINE_MAX_KEYS];
 static int      s_tour_nkeys;
@@ -61,6 +69,21 @@ static int      s_cuts_taken;
 static double   s_finale_t;         /* tour clock at which the finale starts */
 
 /* ------------------------------------------------------------------ helpers */
+
+static void subject_to_cine(const Subject *sub, CineSubject *out)
+{
+    memset(out, 0, sizeof *out);
+    snprintf(out->name, sizeof out->name, "%s", sub->name);
+    out->body = -1;
+    if (sub->kind == SUB_BODY) {
+        out->body = body_find_named(sub->name);
+        if (out->body >= 0) cinema_body_kind(out->body, out->kind, sizeof out->kind);
+    } else {
+        out->pos_au[0] = sub->pos[0]; out->pos_au[1] = sub->pos[1]; out->pos_au[2] = sub->pos[2];
+        snprintf(out->kind, sizeof out->kind, "%s",
+                 sub->is_galaxy ? "Galaxy" : (sub->cat == CAT_NEBULA ? "Nebula" : ""));
+    }
+}
 
 /* Deterministic per-subject variation: a tour must render identically every
  * run (§5), so orbit phases come from the subject's name, not rand(). */
@@ -583,6 +606,7 @@ int cinema_tour_build(double duration)
     CineKey keys[CINE_MAX_KEYS];
     int n = 0;
     double t = 0.0;
+    s_nlegs = 0;
 
     for (int i = 0; i < want_legs && n + 4 < CINE_MAX_KEYS; i++) {
         int leg_start = n;
@@ -598,6 +622,10 @@ int cinema_tour_build(double duration)
                     route[i].radius_au, route[i].vis_au, R, nd, nd * 2.2,
                     leg_timescale(&route[i]));
         }
+        if (s_nlegs < MAX_LEGS) {
+            s_leg_t0[s_nlegs] = t;
+            subject_to_cine(&route[i], &s_leg_sub[s_nlegs++]);
+        }
         n += move_approach_orbit(&keys[n], &route[i], t, per_leg * 0.92, fov);
         /* Cut into every leg after the first: subjects are light years to
          * megaparsecs apart and a film cuts between them. Flying the gap
@@ -610,6 +638,10 @@ int cinema_tour_build(double duration)
         /* Finale: approach the galaxy face-on and hold. */
         Subject *g = &s_subs[galaxy_idx];
         int fin_start = n;
+        if (s_nlegs < MAX_LEGS) {
+            s_leg_t0[s_nlegs] = t;
+            subject_to_cine(g, &s_leg_sub[s_nlegs++]);
+        }
         n += move_approach_orbit(&keys[n], g, t, finale * 0.70, 50.0);
         keys[fin_start].cut = 1;
         t += finale * 0.70;
@@ -655,6 +687,20 @@ int cinema_tour_build(double duration)
 
 int         cinema_tour_active(void)  { return s_active; }
 const char *cinema_tour_subject(void) { return s_subject; }
+
+int cinema_tour_current_subject(CineSubject *out)
+{
+    if (!s_active) return 0;
+    if (s_cutaway) { *out = s_cut_sub; return 1; }
+    int i = -1;
+    for (int k = 0; k < s_nlegs; k++) if (s_clock >= s_leg_t0[k]) i = k;
+    if (i < 0) return 0;
+    *out = s_leg_sub[i];
+    /* A leg's body can have been absorbed since the build; re-resolve by name
+     * rather than trusting the index (g_nbodies slots are reused). */
+    if (out->body >= 0) out->body = body_find_named(out->name);
+    return 1;
+}
 void        cinema_tour_shutdown(void){ s_active = 0; s_nsubs = 0; }
 
 void cinema_tour_set_mode(int tour_on, int director_on)
@@ -685,6 +731,7 @@ void cinema_tour_set_mode(int tour_on, int director_on)
 #define CUT_MIN_SCORE   40.0
 #define CUT_DURATION     6.0
 #define CUT_MAX_TAKES    6
+#define SN_FRAME_AU      40.0   /* ejecta cloud of a giant, ~20 days in  */
 
 static double score_event(const FieldGraphEvent *e)
 {
@@ -714,8 +761,16 @@ static void build_cutaway(const FieldGraphEvent *e, CineKey *out)
 
     /* If a participant is still alive, prefer anchoring to it: the event site
      * drifts with the system, and a static pin would slowly lose the subject. */
-    int live = body_find_named(e->a_name);
-    if (live < 0 && e->b_name[0]) live = body_find_named(e->b_name);
+    int is_sn = (e->type == FG_EVENT_SUPERNOVA);
+    int live = -1;
+    if (!is_sn) {
+        live = body_find_named(e->a_name);
+        if (live < 0 && e->b_name[0]) live = body_find_named(e->b_name);
+    }
+    /* ...except a supernova: its blast stays pinned at the birth position in
+     * world space while the remnant drifts off (supernova.h), so the event
+     * site IS the static point, and anchoring to the remnant would drift the
+     * camera away from the shell it came to film. */
     if (live >= 0) {
         sub.kind = SUB_BODY;
         snprintf(sub.name, sizeof sub.name, "%s", g_bodies[live].name);
@@ -731,11 +786,30 @@ static void build_cutaway(const FieldGraphEvent *e, CineKey *out)
         if (glare > sub.vis_au) sub.vis_au = glare;
     }
 
+    /* A supernova is framed on the size its ejecta cloud reaches by the END
+     * of the cutaway (see the clock below), so the shell grows into a frame
+     * the camera is already outside of. Framed on the progenitor's glare
+     * instead, the camera sat a few AU from the flash and inside where the
+     * cloud was about to be: a white blowout, then grey fog. */
+    if (is_sn && sub.vis_au < SN_FRAME_AU) sub.vis_au = SN_FRAME_AU;
+
     move_approach_orbit(out, &sub, 0.0, CUT_DURATION, 40.0);
     out[0].cut = 1;
-    /* Events unfold on the stellar clock, so hold the orbital clock near real
-     * time — winding it forward would skip straight past the flash. */
     for (int i = 0; i < 3; i++) { out[i].timescale = 1.0; out[i].shutter = 180.0f; }
+
+    /* A supernova unfolds over days to months of ORBITAL sim time: the flash
+     * peaks within hours and is gone by ~0.4 day, the fireball lingers a
+     * week, the cloud expands for months (supernova.c). The timescale keys
+     * multiply g_sim_speed (1 day/s by default, but user-selectable), so the
+     * ramp is written in absolute sim-days per second and converted: a slow
+     * start so the flash reads, then fast enough that the shell visibly
+     * grows. Geometric interpolation (cinema_cam.c) integrates this to ~20
+     * sim-days over the cutaway's six seconds. */
+    if (is_sn && g_sim_speed > 0.0) {
+        const double days_per_s[3] = { 0.1, 3.0, 10.0 };
+        for (int i = 0; i < 3; i++)
+            out[i].timescale = days_per_s[i] * DAY / g_sim_speed;
+    }
 }
 
 static void director_poll(void)
@@ -765,6 +839,15 @@ static void director_poll(void)
 
     CineKey cut[3];
     build_cutaway(best, cut);
+
+    memset(&s_cut_sub, 0, sizeof s_cut_sub);
+    snprintf(s_cut_sub.name, sizeof s_cut_sub.name, "%s", best->a_name);
+    snprintf(s_cut_sub.kind, sizeof s_cut_sub.kind, "%s", field_graph_event_name(best->type));
+    if (s_cut_sub.kind[0] >= 'a' && s_cut_sub.kind[0] <= 'z') s_cut_sub.kind[0] -= 32;
+    s_cut_sub.body = -1;
+    s_cut_sub.pos_au[0] = best->pos[0] * RS;
+    s_cut_sub.pos_au[1] = best->pos[1] * RS;
+    s_cut_sub.pos_au[2] = best->pos[2] * RS;
 
     s_tour_nkeys      = cinema_shot_get(s_tour_keys);   /* stash the spine */
     s_last_event_time = best->sim_time_s;

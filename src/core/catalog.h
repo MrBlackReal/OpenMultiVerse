@@ -40,7 +40,13 @@ typedef enum {
  * sizeof(StarBinRecord) on read so any ABI drift fails loudly.
  */
 #define STARBIN_MAGIC   0x4F4D5653u   /* 'OMVS' */
-#define STARBIN_VERSION 1u
+#define STARBIN_VERSION 2u
+/* v1 had no abs_mag (48-byte records); the loader still reads it, as NaN. */
+#define STARBIN_VERSION_V1     1u
+/* The row's distance is a scenery placeholder, not a measurement (Tycho-2
+ * stars in tools/fetch_catalogs.py): dedupe it by sky position alone. */
+#define STARBIN_FLAG_PLACEHOLDER_DIST 0x01u
+#define STARBIN_RECORD_SIZE_V1 48u
 
 typedef struct {
     uint32_t magic;        /* STARBIN_MAGIC                                    */
@@ -56,7 +62,13 @@ typedef struct {
     float    mass_kg;      /* stellar mass, kg                                 */
     float    radius_km;    /* stellar radius, km                              */
     uint8_t  color[3];     /* display RGB, 0..255                             */
-    uint8_t  _pad;         /* reserved; keeps the record 8-byte aligned       */
+    uint8_t  flags;        /* STARBIN_FLAG_* (was reserved padding: v1 = 0)    */
+    /* v2: absolute magnitude from the catalogue's OBSERVED magnitude and the
+     * row's (possibly placeholder) distance, so a star lands at its real
+     * apparent brightness from Earth. NaN = none; the renderer then falls
+     * back to its radius-based estimate. */
+    float    abs_mag;
+    uint32_t _pad2;        /* keeps the record 8-byte aligned (56 bytes)      */
 } StarBinRecord;
 
 /* Map "exoplanets" | "horizons" | "gaia" | "gaia-bin" | "blackholes" to a
@@ -71,5 +83,4 @@ int catalog_type_from_name(const char *name);
  * Returns the number of bodies written (>= 0) on success, or -1 on failure
  * (a diagnostic is printed to stderr).
  */
-int catalog_convert(CatalogType type, const char *in_path,
-                    const char *out_path, int max_items);
+int catalog_convert(CatalogType type, const char *in_path, const char *out_path, int max_items);

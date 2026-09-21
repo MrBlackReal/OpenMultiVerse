@@ -67,6 +67,7 @@
 #include <math.h>
 
 double g_sim_time  = 0.0;
+int    g_orbits_off = 0;
 double g_sim_speed = DAY;
 int    g_paused    = 0;
 
@@ -1718,6 +1719,7 @@ static void snapshot_body_trail(Body *b)
 
 void trails_begin_frame_snapshot(void)
 {
+    if (g_orbits_off) return;
     for (int i = 0; i < g_nbodies; i++)
         snapshot_body_trail(&g_bodies[i]);
 }
@@ -1729,6 +1731,7 @@ void trails_begin_frame_snapshot(void)
  * root < 0 or an unbuilt CSR falls back to the global snapshot. */
 void trails_begin_frame_snapshot_system(int root)
 {
+    if (g_orbits_off) return;
     int slot = (root >= 0 && root < s_cap) ? s_root_to_slot[root] : -1;
     if (slot < 0) {
         trails_begin_frame_snapshot();
@@ -1764,6 +1767,7 @@ void trails_begin_frame_snapshot_system(int root)
 void trails_cut_body_at_time(int body_idx, double hit_dt, double frame_dt,
                              const double cut_pos[3])
 {
+    if (g_orbits_off) return;
     Body *b;
     double tau, cut_vel[3], segment_len, max_err;
     double dx, dy, dz, dist2;
@@ -1853,6 +1857,7 @@ void trails_tick(double dt) {
 }
 
 void trails_tick_system(int root, double dt) {
+    if (g_orbits_off) return;
     int i;
     int slot = (root >= 0 && root < s_cap) ? s_root_to_slot[root] : -1;
     if (dt <= 0.0) return;

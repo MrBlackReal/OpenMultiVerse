@@ -26,6 +26,7 @@
 #include "math3d.h"
 #include <stdlib.h>
 #include <string.h>
+#include "physics.h"   /* g_orbits_off */
 
 static GLuint *s_vao = NULL;
 static GLuint *s_vbo = NULL;
@@ -234,7 +235,7 @@ static long s_reup_verts = 0;
 
 void trails_render(const float vp[16])
 {
-    if (!s_shader) return;
+    if (!s_shader || g_orbits_off) return;
     s_drawn = s_culled = s_reup = 0; s_reup_verts = 0;
 
     /* Distance from camera to nearest star — controls LOD fade.

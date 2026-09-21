@@ -13,6 +13,7 @@
  * generated so the renderer still starts in development builds.
  */
 #include "starfield.h"
+#include "render.h"
 #include "gl_utils.h"
 #include "math3d.h"
 #include "settings.h"
@@ -339,7 +340,7 @@ void starfield_init(void) {
      * regenerate (new star count) doesn't leak the old buffers/shader. */
     if (s_vao || s_vbo || s_shader) starfield_shutdown();
 
-    s_shader = gl_shader_load("assets/shaders/color.vert",
+    s_shader = gl_shader_load("assets/shaders/starfield.vert",
                               "assets/shaders/starfield.frag");
     if (!s_shader) return;
 
@@ -404,6 +405,7 @@ void starfield_render(const float view_rot[16], const float proj[16],
     glUseProgram(s_shader);
     glUniformMatrix4fv(s_loc_vp, 1, GL_FALSE, vp);
     glUniform1f(s_loc_fade, fade);
+    render_star_veil_uniforms(s_shader);
 
     glBindVertexArray(s_vao);
 

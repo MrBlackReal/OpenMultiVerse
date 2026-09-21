@@ -164,6 +164,38 @@ static int belt_in_range(const Belt *b)
 
 static Belt  *s_belts      = NULL;
 static int    s_n_belts    = 0;
+
+/* Largest on-screen motion, in pixels, of any belt particle in view over
+ * sim_dt seconds, relative to ref_vel (m/s): the part of their motion a
+ * camera tracking ref_vel would see. Used to decide whether motion blur needs
+ * the sim sliced across the shutter (cinema_blur.c). Samples at most ~4000
+ * particles per belt; the belts are statistically uniform. */
+double asteroids_max_screen_px(const double ref_vel[3], double sim_dt,
+                               const float fwd[3], double cos_lim, double px_per_rad)
+{
+    double best = 0.0;
+    for (int bi = 0; bi < s_n_belts; bi++) {
+        const Belt *b = &s_belts[bi];
+        if (!b->initialized || !belt_in_range(b) || b->n <= 0) continue;
+        int step = b->n / 4000 + 1;
+        for (int i = 0; i < b->n; i += step) {
+            const Particle *p = &b->p[i];
+            double rx = p->pos[0] * RS - g_cam.pos[0];
+            double ry = p->pos[1] * RS - g_cam.pos[1];
+            double rz = p->pos[2] * RS - g_cam.pos[2];
+            double d = sqrt(rx*rx + ry*ry + rz*rz);
+            if (d <= 0.0) continue;
+            double ux = rx / d, uy = ry / d, uz = rz / d;
+            if (ux*fwd[0] + uy*fwd[1] + uz*fwd[2] < cos_lim) continue;
+            double vx = p->vel[0] - ref_vel[0], vy = p->vel[1] - ref_vel[1], vz = p->vel[2] - ref_vel[2];
+            double vr = vx*ux + vy*uy + vz*uz;
+            double px = vx - vr*ux, py = vy - vr*uy, pz = vz - vr*uz;
+            double m = sqrt(px*px + py*py + pz*pz) * sim_dt * RS / d * px_per_rad;
+            if (m > best) best = m;
+        }
+    }
+    return best;
+}
 static float *s_upload_buf = NULL;   /* shared upload scratch: PFP × max(n) across all belts */
 
 /* ---------------------------------------------------------------- bake */

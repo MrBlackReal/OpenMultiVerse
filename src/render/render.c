@@ -61,6 +61,8 @@
 #include "camera.h"
 #include "cosmic_field.h"
 #include "radiance_field.h"
+#include "star_veil.h"
+#include "earth_tex.h"
 #include "starfield.h"
 #include "nebula.h"
 #include "galaxy.h"
@@ -439,6 +441,188 @@ static void lod_update_density_scale(void)
  * collective glow should still read from galaxy distances.  Cheap: the cluster
  * list is cached (static field stars), so this only projects it each frame. */
 static double smoothstepd(double edge0, double edge1, double x);
+/* ------------------------------------------------------------ star veil
+ *
+ * A camera exposed for a nearby star cannot also record the stars behind it:
+ * the Sun from Earth is ~25 magnitudes (1e10x) brighter than Sirius, which is
+ * why Apollo photos show a black sky. The background layers are tuned for
+ * visibility rather than scaled physically against a nearby star, so without
+ * this they stayed at full brightness beside a blazing sun.
+ *
+ * The model is glare, not a global dimmer (star_veil.h): each background
+ * source survives only while it outshines the star's glare at its own place
+ * on the sky, so the sky drowns nearest the star first and bright stars and
+ * the Milky Way core outlast faint ones. This computes the glare scale E once
+ * per frame from:
+ *   - irradiance at the camera on a compressed scale, (irr/Earth)^0.5, so the
+ *     washout tightens smoothly around the star as you fly out instead of
+ *     switching off;
+ *   - where the star is: its glare still floods the frame from just past the
+ *     edge (stray light), fading out 30 degrees beyond it as it would behind
+ *     a lens hood; none from behind;
+ *   - eclipses: a planet covering the disc takes its glare with it, so stars
+ *     come out during totality as they do in real eclipse photographs.
+ * The dominant star's own system (s_veil_root) is what the exposure is set
+ * for, and is exempt on the CPU paths (dots, glare billboards). */
+#define STAR_VEIL_SCALE 300.0   /* exposure-floor E at Earth-like flux      */
+#define STAR_VEIL_PSF   0.01    /* glare PSF E at Earth-like flux: the Sun's
+                                 * haze is 1 at 1 degree, 0.1 at 3 degrees   */
+
+static double s_veil_e      = 0.0;              /* E_psf,   0 = off */
+static double s_veil_f      = 0.0;              /* E_floor, 0 = off */
+static double s_veil_dir[3] = { 0.0, 0.0, -1.0 };
+static int    s_veil_root   = -1;
+
+static double smoothstepd(double edge0, double edge1, double x);
+
+static void star_veil_compute(const float cam_fwd[3], float fov_deg, float aspect,
+                              float col_out[3]);
+
+/* Per frame: the mask (s_veil_*) and the matching glare haze for post. The
+ * haze is pushed every frame, zero included, so it can never go stale. */
+static void star_veil_update(const float cam_fwd[3], const float cam_right[3],
+                             const float cam_up[3], float fov_deg, float aspect)
+{
+    float col[3] = { 1.0f, 1.0f, 1.0f };
+    star_veil_compute(cam_fwd, fov_deg, aspect, col);
+    float view[3] = { 0.0f, 0.0f, 1.0f }, h = 0.0f;
+    if (s_veil_e > 0.0 || s_veil_f > 0.0) {
+        view[0] = (float)(s_veil_dir[0]*cam_right[0] + s_veil_dir[1]*cam_right[1] + s_veil_dir[2]*cam_right[2]);
+        view[1] = (float)(s_veil_dir[0]*cam_up[0]    + s_veil_dir[1]*cam_up[1]    + s_veil_dir[2]*cam_up[2]);
+        view[2] = (float)(s_veil_dir[0]*cam_fwd[0]   + s_veil_dir[1]*cam_fwd[1]   + s_veil_dir[2]*cam_fwd[2]);
+        h = (float)s_veil_e;
+    }
+    post_set_veil_haze(h, view, col, tanf(fov_deg * 0.5f * (float)(PI / 180.0)));
+}
+
+static void star_veil_compute(const float cam_fwd[3], float fov_deg, float aspect,
+                              float col_out[3])
+{
+    s_veil_e = 0.0;
+    s_veil_f = 0.0;
+    s_veil_root = -1;
+
+    double cam_m[3] = { g_cam.pos[0] * AU, g_cam.pos[1] * AU, g_cam.pos[2] * AU };
+    RadianceContrib top[1];
+    if (radiance_field_top(cam_m, -1, 1, top) < 1 || top[0].irr <= 0.0) return;
+    if (top[0].body < 0) return;          /* transient/nebula light: no disc */
+    int dom = top[0].body;
+
+    /* Camera-relative in double (the standard recipe). */
+    double rx = top[0].pos[0] * RS - g_cam.pos[0];
+    double ry = top[0].pos[1] * RS - g_cam.pos[1];
+    double rz = top[0].pos[2] * RS - g_cam.pos[2];
+    double dist = sqrt(rx*rx + ry*ry + rz*rz);
+    if (dist <= 0.0) return;
+    double ux = rx / dist, uy = ry / dist, uz = rz / dist;
+
+    double cth = ux*cam_fwd[0] + uy*cam_fwd[1] + uz*cam_fwd[2];
+    double hd  = atan(tan(fov_deg * 0.5 * (PI / 180.0)) * sqrt(1.0 + (double)aspect * aspect));
+    double w = smoothstepd(cos(fmin(hd + 30.0 * (PI / 180.0), PI)), cos(hd), cth);
+    if (w <= 0.0) return;
+
+    /* Eclipse: fraction of the star's disc left uncovered by nearer bodies.
+     * The star's radius is projected to each occluder's distance so the
+     * comparison is between two discs at the same depth. */
+    double rs_star = g_bodies[dom].radius * RS;
+    double lit = 1.0;
+    for (int i = 0; i < g_nbodies && lit > 0.0; i++) {
+        if (i == g_field_star_begin && g_field_star_end > g_field_star_begin) {
+            i = g_field_star_end - 1;   /* frozen scenery never eclipses */
+            continue;
+        }
+        const Body *b = &g_bodies[i];
+        if (!b->alive || b->is_star || i == dom || b->radius <= 0.0) continue;
+        double sx = b->pos[0] * RS - g_cam.pos[0];
+        double sy = b->pos[1] * RS - g_cam.pos[1];
+        double sz = b->pos[2] * RS - g_cam.pos[2];
+        double along = sx*ux + sy*uy + sz*uz;
+        if (along <= 0.0 || along >= dist) continue;
+        double perp2 = sx*sx + sy*sy + sz*sz - along*along;
+        double ro = b->radius * RS;
+        double rp = rs_star * along / dist;
+        if (perp2 >= (ro + rp) * (ro + rp)) continue;
+        double area = (rp > 0.0) ? fmin(1.0, (ro * ro) / (rp * rp)) : 1.0;
+        double cov  = area * (1.0 - smoothstepd(fabs(ro - rp), ro + rp, sqrt(perp2)));
+        lit *= 1.0 - cov;
+    }
+
+    /* Linear brightness drives the glare PSF (and so the visible glow, which
+     * then shrinks with distance like the disc); the square root drives the
+     * exposure floor, the smooth fly-out washout. See star_veil.h. */
+    /* Capped at ~10x Earth's sunlight (the Sun from inside Mercury's orbit):
+     * past that a camera stops down rather than letting the glare grow
+     * without bound. Uncapped, 60 AU from an accreting black hole put the
+     * glare haze at thousands and the frame went solid white. */
+    double rel  = fmin(top[0].irr / 1361.0, 10.0);
+    double ef   = STAR_VEIL_SCALE * w * lit * sqrt(rel);
+    if (ef < 0.02) return;                /* too faint to hide anything */
+    /* A black hole's light comes from its extended accretion disc, not a
+     * compact disc at the centre — the centre is its dark shadow. A point
+     * glare there buried the shadow and photon ring under a white blob, so
+     * black holes set the exposure (floor) but cast no point glare. */
+    s_veil_e = g_bodies[dom].is_black_hole ? 0.0 : STAR_VEIL_PSF * w * lit * rel;
+    s_veil_f = ef;
+    s_veil_dir[0] = ux; s_veil_dir[1] = uy; s_veil_dir[2] = uz;
+    s_veil_root = body_root_star(dom);
+    col_out[0] = top[0].col[0]; col_out[1] = top[0].col[1]; col_out[2] = top[0].col[2];
+}
+
+/* Upload this frame's glare to a program whose shader calls veil_vis(). */
+void render_star_veil_uniforms(unsigned int prog)
+{
+    glUniform3f(glGetUniformLocation(prog, "u_veil_dir"),
+                (float)s_veil_dir[0], (float)s_veil_dir[1], (float)s_veil_dir[2]);
+    glUniform1f(glGetUniformLocation(prog, "u_veil_e"), (float)s_veil_e);
+    glUniform1f(glGetUniformLocation(prog, "u_veil_f"), (float)s_veil_f);
+}
+
+/* Visibility of body i's dot or corona at camera-relative (x,y,z), with the
+ * HDR brightness the dot is drawn at (col * gain). 1 inside the exposed star's
+ * own system. */
+static float body_veil(int i, float x, float y, float z, const float col[3], float gain)
+{
+    if ((s_veil_e <= 0.0 && s_veil_f <= 0.0) || body_root_star(i) == s_veil_root) return 1.0f;
+    double d[3] = { x, y, z };
+    float m = col[0] > col[1] ? col[0] : col[1];
+    if (col[2] > m) m = col[2];
+    return star_veil_vis(d, s_veil_dir, s_veil_e, s_veil_f, (double)(m * gain));
+}
+
+/* The static field-star points (see the call site in render_frame). Lifted
+ * into a function so the black-hole environment capture can draw the same
+ * stars into its cubemap faces. */
+static void field_stars_draw(const float vp_camrel[16])
+{
+    if (s_field_shader && s_field_count > 0) {
+        float near_dist = (float)((double)g_settings.near_dot_dist_ly * LY * RS);
+        glUseProgram(s_field_shader);
+        glUniformMatrix4fv(s_field_vp, 1, GL_FALSE, vp_camrel);
+        /* Camera relative to the same field reference: rel = a_pos - u_cam is
+         * then evaluated on small offsets, free of the float32 cancellation that
+         * subtracting two ~1e10 AU absolutes would suffer. */
+        glUniform3f(s_field_cam, (float)(g_cam.pos[0] - s_field_ref[0]),
+                    (float)(g_cam.pos[1] - s_field_ref[1]),
+                    (float)(g_cam.pos[2] - s_field_ref[2]));
+        glUniform1f(s_field_near,    near_dist);
+        glUniform1f(s_field_horizon, (float)g_settings.farfield_horizon_au);
+        glUniform1f(s_field_time,    (float)g_render_time);
+        glUniform1f(s_field_twinkle, (float)g_settings.star_twinkle);
+        render_star_veil_uniforms(s_field_shader);
+        glBindVertexArray(s_field_vao);
+        glEnable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glEnable(GL_PROGRAM_POINT_SIZE);
+        glDrawArrays(GL_POINTS, 0, s_field_count);
+        glDisable(GL_PROGRAM_POINT_SIZE);
+        glDisable(GL_BLEND);
+        glDepthMask(GL_TRUE);
+        glBindVertexArray(0);
+    }
+}
+
 static void clusters_render(const float vp_camrel[16])
 {
     if (g_settings.cluster_impostors <= 0.0f || !s_cluster_shader) return;
@@ -515,6 +699,7 @@ static void clusters_render(const float vp_camrel[16])
     glUniformMatrix4fv(s_cluster_vp, 1, GL_FALSE, vp_camrel);
     glUniform1f(s_cluster_time,    0.0f);
     glUniform1f(s_cluster_twinkle, 0.0f);   /* no twinkle on aggregate glows */
+    render_star_veil_uniforms(s_cluster_shader);  /* star_dot.vert veils */
     glBindVertexArray(s_cluster_vao);
     glBindBuffer(GL_ARRAY_BUFFER, s_cluster_vbo);
     if (count > s_cluster_vbo_cap) {
@@ -539,6 +724,120 @@ static void clusters_render(const float vp_camrel[16])
     glDepthMask(GL_TRUE);
     glBindVertexArray(0);
 }
+
+/* ------------------------------------------------------ lensing environment
+ *
+ * Near a black hole's shadow, light arrives bent through large angles: the
+ * directions it comes from lie off the edge of the screen, or behind the
+ * camera. The lens used to sample only a snapshot of the current frame, which
+ * has no data there; it fell back to faint procedural stars and went nearly
+ * transparent, so the UNLENSED scene showed through — a hollow ring around
+ * the shadow exactly where the lensing is strongest. Physically that ring
+ * holds compressed images of the whole sky.
+ *
+ * So when a hole's lensing zone is big enough on screen to matter, the distant
+ * background (skybox stars, field stars, cluster glows, galaxies, nebulae — no
+ * foreground bodies) is captured once per frame into a cubemap around the
+ * camera, and bh.frag samples it wherever the snapshot cannot serve. */
+#define ENV_SIZE 1024
+static GLuint s_env_tex = 0, s_env_fbo = 0, s_env_depth = 0;
+
+static int env_ensure(void)
+{
+    if (s_env_tex) return 1;
+    glGenTextures(1, &s_env_tex);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, s_env_tex);
+    for (int f = 0; f < 6; f++)
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, GL_RGBA16F,
+                     ENV_SIZE, ENV_SIZE, 0, GL_RGBA, GL_HALF_FLOAT, NULL);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, 0);
+
+    glGenRenderbuffers(1, &s_env_depth);
+    glBindRenderbuffer(GL_RENDERBUFFER, s_env_depth);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, ENV_SIZE, ENV_SIZE);
+    glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
+    glGenFramebuffers(1, &s_env_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, s_env_fbo);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, s_env_depth);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_CUBE_MAP_POSITIVE_X, s_env_tex, 0);
+    int ok = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (!ok) {
+        fprintf(stderr, "[render] lensing environment FBO incomplete — lensed "
+                        "sky falls back to procedural stars\n");
+        glDeleteFramebuffers(1, &s_env_fbo);
+        glDeleteRenderbuffers(1, &s_env_depth);
+        glDeleteTextures(1, &s_env_tex);
+        s_env_fbo = s_env_depth = s_env_tex = 0;
+    }
+    return ok;
+}
+
+/* Render the distant background into the six faces around the camera. The
+ * standard cube-face orientation, so bh.frag samples it by world direction. */
+static void env_capture(float sf_fade)
+{
+    static const float dirs[6][3] = { {1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1} };
+    static const float ups [6][3] = { {0,-1,0}, {0,-1,0}, {0,0,1}, {0,0,-1}, {0,-1,0}, {0,-1,0} };
+
+    /* Save the caller's target BEFORE env_ensure(): creating the cubemap on
+     * the first call unbinds to framebuffer 0, and restoring that sent the
+     * black hole's own draw to the back buffer (lost under the post pass). */
+    GLint prev_fbo = 0, prev_vp[4];
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prev_fbo);
+    glGetIntegerv(GL_VIEWPORT, prev_vp);
+    if (!env_ensure()) {
+        glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prev_fbo);
+        return;
+    }
+
+    Mat4 proj;
+    mat4_perspective(proj, 90.0f, 1.0f, 0.0001f, RENDER_DEPTH_FAR);
+    glBindFramebuffer(GL_FRAMEBUFFER, s_env_fbo);
+    glViewport(0, 0, ENV_SIZE, ENV_SIZE);
+    for (int f = 0; f < 6; f++) {
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, s_env_tex, 0);
+        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        Mat4 view_rot, vp;
+        float zero[3] = { 0.0f, 0.0f, 0.0f };
+        mat4_lookAt(view_rot, zero, dirs[f], ups[f]);
+        mat4_mul(vp, proj, view_rot);
+        Vec3 right, up, fwd;
+        mat4_get_right(view_rot, right);
+        mat4_get_up(view_rot, up);
+        mat4_get_fwd(view_rot, fwd);
+
+        glDisable(GL_DEPTH_TEST);
+        glDepthMask(GL_FALSE);
+        starfield_render(view_rot, proj, sf_fade);
+        glDepthMask(GL_TRUE);
+        glEnable(GL_DEPTH_TEST);
+        galaxy_render(vp, right, up, fwd, g_cam.pos, 1.0f, 1.0f,
+                      ENV_SIZE, ENV_SIZE, (float)g_render_time, 0);
+        /* The galaxy's resolved stars: far from the Sun (e.g. at Sgr A*) they
+         * are nearly all the stars there are to lens. */
+        galaxy_render_stars(vp, g_cam.pos, 1.0f - sf_fade, (float)g_render_time);
+        nebula_render(vp, right, up, fwd, g_cam.pos, 1.0f, 1.0f, ENV_SIZE, ENV_SIZE);
+        field_stars_draw(vp);
+        clusters_render(vp);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prev_fbo);
+    glViewport(prev_vp[0], prev_vp[1], prev_vp[2], prev_vp[3]);
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+}
+
 
 /* ── body lighting via the RadianceField (Phase A #4) ────────────────────────
  * The two brightest light sources at a body, as (emitter − body) in AU floats
@@ -991,11 +1290,17 @@ static float star_dot_apparent_mag(int idx, float dcam)
     const double AU_PER_PC = 206264.806;
     const double M_SUN     = 4.83;
 
+    double d_pc = (double)dcam / AU_PER_PC;
+    if (!(d_pc > 1e-9)) d_pc = 1e-9;
+    /* A catalogue magnitude (StarBin v2 field star) wins over the estimate,
+     * matching the field-star pass so a star keeps its brightness when it
+     * moves between the far and near dot paths. */
+    if (g_bodies[idx].has_abs_mag)
+        return (float)(g_bodies[idx].abs_mag + 5.0 * log10(d_pc) - 5.0);
+
     double L = (double)g_bodies[idx].radius / R_SUN_M;
     L = L * L;
     if (!(L > 1e-6)) L = 1e-6;
-    double d_pc = (double)dcam / AU_PER_PC;
-    if (!(d_pc > 1e-9)) d_pc = 1e-9;
 
     return (float)(M_SUN - 2.5 * log10(L) + 5.0 * log10(d_pc) - 5.0);
 }
@@ -1244,6 +1549,7 @@ void render_init(void) {
     s_sp_time            = glGetUniformLocation(s_sphere_shader, "u_time");
     s_sp_obliquity = glGetUniformLocation(s_sphere_shader, "u_obliquity");
     s_sp_ptype     = glGetUniformLocation(s_sphere_shader, "u_planet_type");
+    earth_tex_init();   /* real Earth imagery; falls back to procedural */
     s_sp_star_heat = glGetUniformLocation(s_sphere_shader, "u_star_heat");
     s_sp_starspots = glGetUniformLocation(s_sphere_shader, "u_starspots");
     s_sp_impact_count = glGetUniformLocation(s_sphere_shader, "u_impact_count");
@@ -1981,6 +2287,10 @@ static void field_stars_ensure(void)
         double L  = Lr * Lr;
         if (!(L > 1e-6)) L = 1e-6;
         float absmag = (float)(M_SUN - 2.5 * log10(L));   /* distance-independent */
+        /* Catalogue magnitude wins when the star carries one (StarBin v2): it
+         * is what the sky actually shows, where the radius-based estimate is a
+         * guess from temperature. */
+        if (b->has_abs_mag) absmag = b->abs_mag;
         buf[w*8+0] = (float)(b->pos[0] * RS - cx);
         buf[w*8+1] = (float)(b->pos[1] * RS - cy);
         buf[w*8+2] = (float)(b->pos[2] * RS - cz);
@@ -2062,6 +2372,7 @@ void render_frame(const float view[16], const float proj[16],
             if (t > 1.0f) t = 1.0f;
             sf_fade = 1.0f - t * t * (3.0f - 2.0f * t);
         }
+        star_veil_update(cam_fwd, cam_right, cam_up, FOV, (float)WIN_W / (float)WIN_H);
         glDisable(GL_DEPTH_TEST);
         glDepthMask(GL_FALSE);
         starfield_render(view_rot, proj, sf_fade);
@@ -2295,6 +2606,9 @@ void render_frame(const float view[16], const float proj[16],
         glUniform1f(s_sp_obliquity, (float)(b->obliquity * (PI / 180.0)));
         int ptype = get_planet_type(b->name);
         glUniform1i(s_sp_ptype,     ptype);
+        /* Satellite imagery for the real Earth only, by name: Earth-like
+         * exoplanets share recipe 1 and must not become copies of Earth. */
+        earth_tex_bind(s_sphere_shader, ptype == 1 && strcmp(b->name, "Earth") == 0);
         /* Cloud coverage is data-driven: solid worlds with an authored
          * atmosphere get a procedural deck scaled by its intensity.  Gas
          * giants / Venus / Titan already ARE cloud recipes — excluded. */
@@ -3150,6 +3464,8 @@ void render_frame(const float view[16], const float proj[16],
             float bx = (float)(b->pos[0] * RS - cx);
             float by = (float)(b->pos[1] * RS - cy);
             float bz = (float)(b->pos[2] * RS - cz);
+            f *= body_veil(i, bx, by, bz, b->col, gain);
+            if (f <= 0.0f) continue;
             dot_data[dot_count*8+0] = bx;
             dot_data[dot_count*8+1] = by;
             dot_data[dot_count*8+2] = bz;
@@ -3193,6 +3509,8 @@ void render_frame(const float view[16], const float proj[16],
             float bx = (float)(b->pos[0] * RS - cx);
             float by = (float)(b->pos[1] * RS - cy);
             float bz = (float)(b->pos[2] * RS - cz);
+            f *= body_veil(i, bx, by, bz, b->col, gain);
+            if (f <= 0.0f) continue;
             dot_data[dot_count*8+0] = bx;
             dot_data[dot_count*8+1] = by;
             dot_data[dot_count*8+2] = bz;
@@ -3248,32 +3566,7 @@ void render_frame(const float view[16], const float proj[16],
      * nearer than NEAR_DOT_DIST — the exact threshold the dynamic near path uses
      * to take over — so the handoff is seamless with no double-draw. */
     field_stars_ensure();
-    if (s_field_shader && s_field_count > 0) {
-        float near_dist = (float)((double)g_settings.near_dot_dist_ly * LY * RS);
-        glUseProgram(s_field_shader);
-        glUniformMatrix4fv(s_field_vp, 1, GL_FALSE, vp_camrel);
-        /* Camera relative to the same field reference: rel = a_pos - u_cam is
-         * then evaluated on small offsets, free of the float32 cancellation that
-         * subtracting two ~1e10 AU absolutes would suffer. */
-        glUniform3f(s_field_cam, (float)(g_cam.pos[0] - s_field_ref[0]),
-                    (float)(g_cam.pos[1] - s_field_ref[1]),
-                    (float)(g_cam.pos[2] - s_field_ref[2]));
-        glUniform1f(s_field_near,    near_dist);
-        glUniform1f(s_field_horizon, (float)g_settings.farfield_horizon_au);
-        glUniform1f(s_field_time,    (float)g_render_time);
-        glUniform1f(s_field_twinkle, (float)g_settings.star_twinkle);
-        glBindVertexArray(s_field_vao);
-        glEnable(GL_DEPTH_TEST);
-        glDepthMask(GL_FALSE);
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glEnable(GL_PROGRAM_POINT_SIZE);
-        glDrawArrays(GL_POINTS, 0, s_field_count);
-        glDisable(GL_PROGRAM_POINT_SIZE);
-        glDisable(GL_BLEND);
-        glDepthMask(GL_TRUE);
-        glBindVertexArray(0);
-    }
+    field_stars_draw(vp_camrel);
 
     /* ---- Cluster impostors: aggregate glow for dense field-star clumps whose
      * members are sub-pixel / culled here (drawn after the star points so it
@@ -3354,6 +3647,11 @@ void render_frame(const float view[16], const float proj[16],
             float hf = farfield_horizon_fade(dist);
             if (hf <= 0.0f) continue;
             hf *= glare_fade;
+            /* Another system's corona drowns in the exposed star's glare the
+             * same way its dot does (same brightness the dot would have). */
+            hf *= body_veil(i, rx, ry, rz, g_bodies[i].col,
+                            star_dot_hdr_gain(i, dist));
+            if (hf <= 0.0f) continue;
 
             glUniform3f(s_gl_center, rx, ry, rz);
             glUniform1f(s_gl_radius, radius);
@@ -3439,7 +3737,54 @@ void render_frame(const float view[16], const float proj[16],
     }
 
     if (s_bh_shader && n_bh > 0) {
+        /* Capture the lensing environment only when some hole's strong-lens
+         * zone is big enough on screen to matter: Einstein radius ~
+         * sqrt(2 Rs / D) radians for a camera at distance D. */
+        int want_env = 0;
+        float px_per_rad = (float)WIN_H / (2.0f * tanf(FOV * 0.5f * (float)(PI / 180.0)));
+        for (int bi = 0; bi < n_bh && !want_env; bi++) {
+            int i = s_bh_list[bi];
+            double dx = g_bodies[i].pos[0] * RS - g_cam.pos[0];
+            double dy = g_bodies[i].pos[1] * RS - g_cam.pos[1];
+            double dz = g_bodies[i].pos[2] * RS - g_cam.pos[2];
+            double D  = sqrt(dx*dx + dy*dy + dz*dz);
+            double rs = s_bh_rs[bi] * RS;
+            if (D > 0.0 && rs > 0.0 && sqrt(2.0 * rs / fmax(D, rs)) * px_per_rad > 8.0)
+                want_env = 1;
+        }
+        if (want_env) {
+            /* The environment depends only on the camera's POSITION (every
+             * source in it is light-years away; orientation is free — the lens
+             * samples it by world direction). So reuse it until the camera has
+             * moved enough to show parallax, the star-veil exposure has shifted,
+             * or the universe changed. 1 AU at the nearest background (~0.1 ly)
+             * is under half an environment texel. Deterministic: the same path
+             * gives the same recaptures. */
+            static int      env_valid = 0;
+            static double   env_pos[3];
+            static double   env_veil  = 0.0;
+            static unsigned env_gen   = 0;
+            double mx = g_cam.pos[0] - env_pos[0], my = g_cam.pos[1] - env_pos[1],
+                   mz = g_cam.pos[2] - env_pos[2];
+            double dv = fabs(s_veil_f - env_veil);
+            if (!env_valid || mx*mx + my*my + mz*mz > 1.0 ||
+                dv > 0.10 * fmax(env_veil, 0.02) || env_gen != (unsigned)g_universe_generation) {
+                env_capture(sf_fade);
+                env_valid = 1;
+                env_pos[0] = g_cam.pos[0]; env_pos[1] = g_cam.pos[1]; env_pos[2] = g_cam.pos[2];
+                env_veil = s_veil_f;
+                env_gen  = (unsigned)g_universe_generation;
+            }
+        }
+
         glUseProgram(s_bh_shader);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, want_env ? s_env_tex : 0);
+        glActiveTexture(GL_TEXTURE0);
+        glUniform1i(glGetUniformLocation(s_bh_shader, "u_env"), 1);
+        glUniform1i(glGetUniformLocation(s_bh_shader, "u_has_env"), (want_env && s_env_tex) ? 1 : 0);
+        glUniform1f(glGetUniformLocation(s_bh_shader, "u_env_px_rad"),
+                    (float)(PI * 0.5) / (float)ENV_SIZE);
         glUniformMatrix4fv(s_bh_vp, 1, GL_FALSE, vp_camrel);
         glUniform3f(s_bh_right, cam_right[0], cam_right[1], cam_right[2]);
         glUniform3f(s_bh_up,    cam_up[0],    cam_up[1],    cam_up[2]);
@@ -3471,6 +3816,10 @@ void render_frame(const float view[16], const float proj[16],
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, scene_grab);
             glUniform1i(s_bh_has_scene, scene_grab ? 1 : 0);
+            /* Angular size of one pixel: lensed stars are kept to their
+             * drawn size rather than stretched into arcs (bh.frag). */
+            glUniform1f(glGetUniformLocation(s_bh_shader, "u_px_rad"),
+                        2.0f * tanf(FOV * 0.5f * (float)(PI / 180.0)) / (float)WIN_H);
 
             double rs_m = s_bh_rs[bi], isco_rs = s_bh_isco[bi];
             float radius = (float)(rs_m * RS);   /* horizon radius from mass */
@@ -3792,6 +4141,11 @@ void render_frame(const float view[16], const float proj[16],
 
 /* ------------------------------------------------------------------ shutdown */
 void render_shutdown(void) {
+    earth_tex_shutdown();
+    if (s_env_fbo)   glDeleteFramebuffers(1, &s_env_fbo);
+    if (s_env_depth) glDeleteRenderbuffers(1, &s_env_depth);
+    if (s_env_tex)   glDeleteTextures(1, &s_env_tex);
+    s_env_fbo = s_env_depth = s_env_tex = 0;
     for (int i = 0; i < 3; i++) {
         if (s_build_dist_text[i].tex) glDeleteTextures(1, &s_build_dist_text[i].tex);
         s_build_dist_text[i].tex = 0;

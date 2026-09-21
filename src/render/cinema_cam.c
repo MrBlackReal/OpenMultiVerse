@@ -7,6 +7,9 @@
 #include "body.h"
 #include "laws.h"
 #include "json.h"
+#include "lifecycle.h"
+#include "nebula.h"
+#include "galaxy.h"
 
 #include <sys/stat.h>
 #include <strings.h>
@@ -18,10 +21,14 @@ static char    s_name[64] = "untitled";
 /* Saved state for the settings a shot is allowed to drive, so live playback is
  * reversible (see cinema_shot_begin/end). */
 static int    s_playing;
+static int    s_snap;        /* a pre-shot snapshot is held (play or preview) */
+static int    s_previewing;  /* editor scrub: posed from the shot, clock stopped */
+static double s_time;        /* shot playback clock, seconds */
 static float  s_save_fov, s_save_aperture, s_save_focus_au;
 static int    s_save_focus_auto;
 static double s_save_timescale;
 static float  s_save_shutter;
+static char   s_save_focus_name[CINE_NAME_LEN];
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -143,16 +150,92 @@ static void slerp3(const double a[3], const double b[3], double u, double out[3]
     normalize3(out);
 }
 
-/* Uniform Catmull-Rom. Key times are arbitrary, but the spline runs on the
- * normalised segment parameter, so uneven spacing changes pacing (which is
- * what the author asked for by placing the keys) without breaking continuity. */
-static double catmull(double p0, double p1, double p2, double p3, double u)
+/* Centripetal Catmull-Rom (alpha = 1/2, Barry-Goldman form) through p1..p2.
+ *
+ * The uniform variant took each key's tangent from its neighbours with no
+ * regard for how far apart they are, so a key between a 0.01 AU segment and a
+ * 1e9 AU one got a tangent a hundred times too long: the camera flew past the
+ * key, turned round and came back — a visible U-turn at every change of scale,
+ * which is exactly where scale-crossing shots spend their time. Centripetal
+ * knots (spacing = sqrt of segment length) provably never cusp or loop within
+ * a segment, whatever the ratio, and still pass through every key. Timing is
+ * unchanged: u is still the normalised segment time; only the path's shape
+ * uses the knots. Missing end neighbours are reflected (p0 = 2p1 - p2), so a
+ * shot starts and ends moving along its first and last segments. */
+static double knot_step(const double a[3], const double b[3])
 {
-    double u2 = u * u, u3 = u2 * u;
-    return 0.5 * ((2.0 * p1) +
-                  (-p0 + p2) * u +
-                  (2.0*p0 - 5.0*p1 + 4.0*p2 - p3) * u2 +
-                  (-p0 + 3.0*p1 - 3.0*p2 + p3) * u3);
+    double dx = b[0]-a[0], dy = b[1]-a[1], dz = b[2]-a[2];
+    return sqrt(sqrt(dx*dx + dy*dy + dz*dz));
+}
+
+static void catmull_centripetal(const double P0[3], const double P1[3],
+                                const double P2[3], const double P3[3],
+                                double u, double out[3])
+{
+    double p0[3], p3[3];
+    double d12 = knot_step(P1, P2);
+    if (d12 <= 1e-12) {                        /* a hold: nothing to move */
+        out[0] = P1[0]; out[1] = P1[1]; out[2] = P1[2];
+        return;
+    }
+    for (int c = 0; c < 3; c++) { p0[c] = P0[c]; p3[c] = P3[c]; }
+    if (knot_step(P0, P1) <= 1e-12)
+        for (int c = 0; c < 3; c++) p0[c] = 2.0 * P1[c] - P2[c];
+    if (knot_step(P2, P3) <= 1e-12)
+        for (int c = 0; c < 3; c++) p3[c] = 2.0 * P2[c] - P1[c];
+
+    double t0 = 0.0;
+    double t1 = t0 + knot_step(p0, P1);
+    double t2 = t1 + d12;
+    double t3 = t2 + knot_step(P2, p3);
+    double t  = t1 + (t2 - t1) * u;
+    for (int c = 0; c < 3; c++) {
+        double a1 = (t1-t)/(t1-t0)*p0[c] + (t-t0)/(t1-t0)*P1[c];
+        double a2 = (t2-t)/(t2-t1)*P1[c] + (t-t1)/(t2-t1)*P2[c];
+        double a3 = (t3-t)/(t3-t2)*P2[c] + (t-t2)/(t3-t2)*p3[c];
+        double b1 = (t2-t)/(t2-t0)*a1 + (t-t0)/(t2-t0)*a2;
+        double b2 = (t3-t)/(t3-t1)*a2 + (t-t1)/(t3-t1)*a3;
+        out[c]    = (t2-t)/(t2-t1)*b1 + (t-t1)/(t2-t1)*b2;
+    }
+}
+
+/* ------------------------------------------------------- optional fields
+ *
+ * fov, aperture, focus, timescale and shutter are optional on a key. A key
+ * that leaves one out inherits it from the nearest earlier key of the SAME
+ * continuous move; a cut starts a new move, so the search stops there. With
+ * nothing to inherit, the field falls back to its value from before the shot
+ * began.
+ *
+ * This used to be "leave whatever is currently set", which made a frame
+ * depend on the evaluation history instead of on t alone. In the procedural
+ * tour that meant an AGN leg (which sets no aperture) inherited the previous
+ * star leg's f/8 focus lock on a body 1e12 AU away: the lens disc came out
+ * billions of AU wide, and every jittered sub-frame put the camera nowhere
+ * near a subject it was framing from 100 AU. The legs rendered black at
+ * --samples > 1 and perfectly at --samples 1, where there is no lens jitter. */
+enum { F_FOV, F_APERTURE, F_FOCUS, F_TIMESCALE, F_SHUTTER };
+
+static int key_has(const CineKey *k, int f)
+{
+    switch (f) {
+    case F_FOV:       return k->fov > 0.0f;
+    case F_APERTURE:  return k->aperture >= 0.0f;
+    case F_FOCUS:     return k->focus_name[0] || k->focus_au > 0.0f;
+    case F_TIMESCALE: return k->timescale >= 0.0;
+    default:          return k->shutter >= 0.0f;
+    }
+}
+
+/* The key whose value of field f is in force at key i, or NULL if nothing in
+ * i's move sets it. The cut key itself still counts: it opens the move. */
+static const CineKey *key_owner(int i, int f)
+{
+    for (int j = i; j >= 0; j--) {
+        if (key_has(&s_keys[j], f)) return &s_keys[j];
+        if (s_keys[j].cut) break;
+    }
+    return NULL;
 }
 
 /* ------------------------------------------------------------------ queries */
@@ -181,30 +264,56 @@ void cinema_shot_sort(void)
 
 void cinema_shot_begin(void)
 {
-    if (s_playing) return;
+    if (s_snap) { s_playing = 1; s_previewing = 0; return; }   /* from a preview */
     s_save_fov        = g_settings.fov;
     s_save_aperture   = g_settings.cine_aperture;
     s_save_focus_au   = g_settings.cine_focus_au;
     s_save_focus_auto = g_settings.cine_focus_auto;
     s_save_timescale  = g_laws.time_scale;
     s_save_shutter    = g_settings.cine_shutter;
+    snprintf(s_save_focus_name, sizeof s_save_focus_name, "%s",
+             cinematic_focus_target());
+    s_snap    = 1;
     s_playing = 1;
 }
 
 void cinema_shot_end(void)
 {
-    if (!s_playing) return;
+    if (!s_snap) return;
     g_settings.fov             = s_save_fov;
     g_settings.cine_aperture   = s_save_aperture;
     g_settings.cine_focus_au   = s_save_focus_au;
     g_settings.cine_focus_auto = s_save_focus_auto;
     g_laws.time_scale          = s_save_timescale;
     g_settings.cine_shutter    = s_save_shutter;
-    cinematic_set_focus_target(NULL);
-    s_playing = 0;
+    cinematic_set_focus_target(s_save_focus_name);
+    s_playing    = 0;
+    s_previewing = 0;
+    s_snap       = 0;
 }
 
-static double s_time;
+/* Editor scrub. Takes the same snapshot as playback (once), so fields the
+ * shot leaves unset fall back to the pre-shot values exactly as they do when
+ * playing — previously a bare scrub left whatever the last evaluated frame
+ * had set, so scrubbing backwards could show settings from later in the
+ * shot. The clock does not run; cinema_shot_preview_end() restores. */
+void cinema_shot_preview(double t)
+{
+    if (!cinema_shot_active()) return;
+    if (!s_snap) cinema_shot_begin();
+    s_playing    = 0;
+    s_previewing = 1;
+    s_time = t;
+    cinema_shot_eval(t);
+}
+
+void cinema_shot_preview_end(void)
+{
+    if (s_previewing) cinema_shot_end();
+}
+
+int cinema_shot_previewing(void) { return s_previewing; }
+
 
 void cinema_shot_play(double from_t)
 {
@@ -252,8 +361,10 @@ void cinema_shot_eval(double t)
      * until kb's time, then the next segment starts cleanly at kb. Generated
      * tours place the cut key at the same time as the previous key's end, so
      * the hold has zero duration and the cut reads as an instant change. */
+    int ib = i + 1;
     if (kb->cut) {
         kb = ka;
+        ib = i;
     }
 
     double span = kb->t - ka->t;
@@ -272,8 +383,7 @@ void cinema_shot_eval(double t)
     key_position(ka,          p1);
     key_position(kb,          p2);
     key_position(&s_keys[i3], p3);
-    for (int c = 0; c < 3; c++)
-        pos[c] = catmull(p0[c], p1[c], p2[c], p3[c], u);
+    catmull_centripetal(p0, p1, p2, p3, u, pos);
 
     g_cam.pos[0] = pos[0];
     g_cam.pos[1] = pos[1];
@@ -290,11 +400,16 @@ void cinema_shot_eval(double t)
     g_cam.yaw   = (float)(atan2(dir[2], dir[0]) * (180.0 / M_PI));
     g_cam.pitch = (float)(asin(clampd(dir[1], -1.0, 1.0)) * (180.0 / M_PI));
 
-    /* ---- scalars --------------------------------------------------------- */
-    if (ka->fov > 0.0f && kb->fov > 0.0f)
-        g_settings.fov = (float)(ka->fov + (kb->fov - ka->fov) * u);
-    else if (ka->fov > 0.0f)
-        g_settings.fov = ka->fov;
+    /* ---- scalars ---------------------------------------------------------
+     * Each end of the segment resolves its own value (see key_owner). With no
+     * key setting a field, it falls back to the pre-shot value (snapshotted by
+     * both playback and editor preview); with no snapshot at all it is left
+     * alone. */
+    const CineKey *oa, *ob;
+
+    oa = key_owner(i, F_FOV); ob = key_owner(ib, F_FOV);
+    if (oa && ob)     g_settings.fov = (float)(oa->fov + (ob->fov - oa->fov) * u);
+    else if (s_snap) g_settings.fov = s_save_fov;
 
     /* Aperture interpolates GEOMETRICALLY, because f-numbers are a log scale
      * (f/2.8 to f/11 is two stops, and the midpoint a photographer expects is
@@ -305,10 +420,13 @@ void cinema_shot_eval(double t)
      * blurring harder and harder right up to the moment it switches off, which
      * is the exact opposite of what the author asked for. So a segment with a
      * zero at either end holds the near key's value and switches at the key. */
-    if (ka->aperture > 0.0f && kb->aperture > 0.0f)
-        g_settings.cine_aperture = (float)lerp_geom(ka->aperture, kb->aperture, u);
-    else if (ka->aperture >= 0.0f)
-        g_settings.cine_aperture = ka->aperture;
+    oa = key_owner(i, F_APERTURE); ob = key_owner(ib, F_APERTURE);
+    if (oa && ob && oa->aperture > 0.0f && ob->aperture > 0.0f)
+        g_settings.cine_aperture = (float)lerp_geom(oa->aperture, ob->aperture, u);
+    else if (oa)
+        g_settings.cine_aperture = oa->aperture;
+    else if (s_snap)
+        g_settings.cine_aperture = s_save_aperture;
 
     /* Shutter is keyframable for the same reason fov is: a hyper-fast
      * pull-back sweeps stars across the whole frame in one frame interval, and
@@ -317,27 +435,30 @@ void cinema_shot_eval(double t)
      * practical sample count fixes it. Closing the shutter for the fast leg
      * shortens the streak instead, which is exactly what a camera operator
      * would do. */
-    if (ka->shutter >= 0.0f && kb->shutter >= 0.0f)
-        g_settings.cine_shutter = (float)(ka->shutter + (kb->shutter - ka->shutter) * u);
-    else if (ka->shutter >= 0.0f)
-        g_settings.cine_shutter = ka->shutter;
+    oa = key_owner(i, F_SHUTTER); ob = key_owner(ib, F_SHUTTER);
+    if (oa && ob)     g_settings.cine_shutter = (float)(oa->shutter + (ob->shutter - oa->shutter) * u);
+    else if (s_snap) g_settings.cine_shutter = s_save_shutter;
 
-    if (ka->timescale >= 0.0 && kb->timescale >= 0.0)
-        g_laws.time_scale = lerp_geom(ka->timescale, kb->timescale, u);
-    else if (ka->timescale >= 0.0)
-        g_laws.time_scale = ka->timescale;
+    oa = key_owner(i, F_TIMESCALE); ob = key_owner(ib, F_TIMESCALE);
+    if (oa && ob)     g_laws.time_scale = lerp_geom(oa->timescale, ob->timescale, u);
+    else if (s_snap) g_laws.time_scale = s_save_timescale;
 
     /* Focus: a named target wins and is handed to the cinematic renderer,
      * which re-resolves it per frame (so it racks focus as the body moves).
      * Otherwise interpolate the explicit distance geometrically. */
-    if (ka->focus_name[0]) {
-        cinematic_set_focus_target(ka->focus_name);
-    } else if (ka->focus_au > 0.0f) {
+    oa = key_owner(i, F_FOCUS); ob = key_owner(ib, F_FOCUS);
+    if (oa && oa->focus_name[0]) {
+        cinematic_set_focus_target(oa->focus_name);
+    } else if (oa) {
         cinematic_set_focus_target(NULL);
         g_settings.cine_focus_auto = 0;
-        g_settings.cine_focus_au   = kb->focus_au > 0.0f
-            ? (float)lerp_geom(ka->focus_au, kb->focus_au, u)
-            : ka->focus_au;
+        g_settings.cine_focus_au   = (ob && !ob->focus_name[0])
+            ? (float)lerp_geom(oa->focus_au, ob->focus_au, u)
+            : oa->focus_au;
+    } else if (s_snap) {
+        cinematic_set_focus_target(s_save_focus_name);
+        g_settings.cine_focus_auto = s_save_focus_auto;
+        g_settings.cine_focus_au   = s_save_focus_au;
     }
 }
 
@@ -350,6 +471,82 @@ void cinema_shot_goto_key(int i)
     g_cam.pos[0] = pos[0]; g_cam.pos[1] = pos[1]; g_cam.pos[2] = pos[2];
     g_cam.yaw   = (float)(atan2(dir[2], dir[0]) * (180.0 / M_PI));
     g_cam.pitch = (float)(asin(clampd(dir[1], -1.0, 1.0)) * (180.0 / M_PI));
+}
+
+/* ------------------------------------------------------------------ subject */
+
+void cinema_body_kind(int i, char *out, size_t n)
+{
+    const Body *b = &g_bodies[i];
+    if (b->is_black_hole) {
+        snprintf(out, n, "%s", b->mass > 1.0e5 * SOLAR_MASS_KG
+                 ? "Supermassive black hole" : "Black hole");
+    } else if (b->is_star) {
+        snprintf(out, n, "%s", b->star_phase == STAR_MAIN_SEQUENCE
+                 ? "Star" : lifecycle_phase_name(b->star_phase));
+    } else if (b->is_comet) {
+        snprintf(out, n, "Comet");
+    } else if (b->parent >= 0 && !g_bodies[b->parent].is_star &&
+               !g_bodies[b->parent].is_black_hole) {
+        snprintf(out, n, "Moon");
+    } else {
+        snprintf(out, n, "Planet");
+    }
+}
+
+int cinema_shot_anchor_body(double t)
+{
+    if (s_nkeys < 1) return -1;
+    t = clampd(t, s_keys[0].t, s_keys[s_nkeys - 1].t);
+    int i = 0;
+    while (i < s_nkeys - 1 && t >= s_keys[i + 1].t) i++;
+    return s_keys[i].anchor[0] ? body_find_named(s_keys[i].anchor) : -1;
+}
+
+int cinema_shot_cut_between(double t0, double t1)
+{
+    for (int i = 0; i < s_nkeys; i++)
+        if (s_keys[i].cut && s_keys[i].t > t0 && s_keys[i].t <= t1) return 1;
+    return 0;
+}
+
+int cinema_shot_subject(double t, CineSubject *out)
+{
+    if (s_nkeys < 1) return 0;
+    t = clampd(t, s_keys[0].t, s_keys[s_nkeys - 1].t);
+    int i = 0;
+    while (i < s_nkeys - 1 && t >= s_keys[i + 1].t) i++;
+    const CineKey *k = &s_keys[i];
+    const char *name = k->subject[0] ? k->subject
+                     : (k->look_at[0] ? k->look_at : k->anchor);
+    if (!name[0]) return 0;
+    int b = body_find_named(name);
+    if (b < 0) {
+        /* Not a body: static scenery can be a subject too, by the name its
+         * catalogue uses ("Lagoon (M8)", "Milky Way"). */
+        memset(out, 0, sizeof *out);
+        out->body = -1;
+        for (int n = 0; n < nebula_count(); n++)
+            if (!strcasecmp(nebula_name(n), name)) {
+                snprintf(out->name, sizeof out->name, "%s", nebula_name(n));
+                snprintf(out->kind, sizeof out->kind, "Nebula");
+                nebula_position(n, out->pos_au);
+                return 1;
+            }
+        for (int g = 0; g < galaxy_count(); g++)
+            if (!strcasecmp(galaxy_name(g), name)) {
+                snprintf(out->name, sizeof out->name, "%s", galaxy_name(g));
+                snprintf(out->kind, sizeof out->kind, "Galaxy");
+                galaxy_position(g, out->pos_au);
+                return 1;
+            }
+        return 0;                      /* absorbed or a typo: nothing to name */
+    }
+    memset(out, 0, sizeof *out);
+    snprintf(out->name, sizeof out->name, "%s", g_bodies[b].name);
+    cinema_body_kind(b, out->kind, sizeof out->kind);
+    out->body = b;
+    return 1;
 }
 
 /* ----------------------------------------------------------------- authoring */
@@ -447,6 +644,7 @@ int cinema_shot_load(const char *path)
 
         snprintf(k->anchor,  sizeof k->anchor,  "%s", json_str(json_get(c, "anchor"),  ""));
         snprintf(k->look_at, sizeof k->look_at, "%s", json_str(json_get(c, "look_at"), ""));
+        snprintf(k->subject, sizeof k->subject, "%s", json_str(json_get(c, "subject"), ""));
 
         /* An anchored key carries an offset; a free key carries a position. */
         JsonNode *p = json_get(c, k->anchor[0] ? "offset" : "pos");
@@ -521,6 +719,7 @@ int cinema_shot_save(const char *path)
         if (k->timescale >= 0.0) fprintf(f, ", \"timescale\": %.6g", k->timescale);
         if (k->shutter   >= 0.0f) fprintf(f, ", \"shutter\": %.3f", (double)k->shutter);
         if (k->cut)               fprintf(f, ", \"cut\": true");
+        if (k->subject[0])        fprintf(f, ", \"subject\": \"%s\"", k->subject);
         fprintf(f, ", \"ease\": \"%s\" }%s\n", ease_name(k->ease),
                 i == s_nkeys - 1 ? "" : ",");
     }

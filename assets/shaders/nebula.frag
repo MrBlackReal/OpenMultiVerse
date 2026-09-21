@@ -215,5 +215,7 @@ void main() {
     eye_depth = clamp(eye_depth, 0.0, FAR * 0.9995);
     gl_FragDepth = log2(eye_depth + 1.0) / log2(FAR + 1.0);
 
+    /* Star veil: emission drowns in a nearby star's glare; absorption stays. */
+    accumC *= veil_vis(rd, max(max(accumC.r, accumC.g), accumC.b) * VEIL_DIFFUSE);
     frag_color = vec4(accumC, accumA);
 }

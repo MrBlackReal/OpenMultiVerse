@@ -71,6 +71,8 @@ static int s_prof_active_systems = 0;
 #include "cinematic.h"
 #include "cinema_cam.h"
 #include "cinema_tour.h"
+#include "cinema_titles.h"
+#include "cinema_blur.h"
 #include "loading.h"
 #ifdef _OPENMP
 #include <omp.h>
@@ -79,7 +81,7 @@ static int s_prof_active_systems = 0;
 /* ── active universe ──────────────────────────────────────────────────────── */
 /* Path of the universe JSON currently loaded. Changed via switch_universe();
  * init_runtime_world() reads this so a reset reloads the chosen multiverse. */
-static char s_universe_path[512] = "assets/universe.json";
+static char s_universe_path[512] = "assets/universes/known_universe.json";
 
 /* When set (via --export-body-catalog), init_runtime_world() writes the loaded
  * universe's bulk bodies to this BodyBin path and exits before warm-up/GL — the
@@ -648,6 +650,9 @@ static void app_quit(void) {
     /* Persist only if something changed this session — and never from a
      * film-out run: its CLI look overrides and the film-only quality forcings
      * are properties of that one render, not preferences to remember. */
+    /* A shot playing or previewing has the snapshot of your settings; put
+     * it back first, so the shot's fov/aperture/... are not saved as yours. */
+    cinema_shot_end();
     if (settings_dirty() && !cinematic_filming())
         settings_save();
     audio_shutdown();
@@ -1518,6 +1523,10 @@ static void print_usage(const char *prog)
 "  --letterbox [AR]        Crop to aspect AR with matte bars (bare = 2.39).\n"
 "  --audio PATH            Soundtrack to mux (default assets/soundtrack.ogg).\n"
 "  --no-audio              Film silent.\n"
+"  --cinematic-info        Title cards (name, distance, date, scale bar) and a\n"
+"                          camera-speed readout. Default output is clean.\n"
+"  --no-orbits             No orbit trails or orbit prediction: not drawn and\n"
+"                          not computed (skips the per-step trail work).\n"
 "\n"
 "Benchmark / tools:\n"
 "  --profile               Per-stage frame profiler; prints a report on exit.\n"
@@ -1673,6 +1682,8 @@ int main(int argc, char **argv) {
             }
         }
         else if (!strcmp(argv[a], "--no-audio")) g_cine.audio = 0;
+        else if (!strcmp(argv[a], "--cinematic-info")) cinema_titles_set_enabled(1);
+        else if (!strcmp(argv[a], "--no-orbits")) g_orbits_off = 1;
         else if (!strcmp(argv[a], "--audio") && a + 1 < argc)
             snprintf(g_cine.audio_path, sizeof g_cine.audio_path, "%s", argv[++a]);
         else {
@@ -1938,7 +1949,7 @@ int main(int argc, char **argv) {
                     if (g_bodies[i].alive && !g_bodies[i].is_star &&
                         g_bodies[i].parent >= 0) { pb = i; break; }
             OrbitPredictInfo pi;
-            if (pb >= 0 && orbit_predict_compute(pb, &pi, NULL, 64))
+            if (pb >= 0 && !g_orbits_off && orbit_predict_compute(pb, &pi, NULL, 64))
                 fprintf(stdout, "[OrbitPredict] %s parent=%s %s period=%.1fd "
                         "a=%.4fau peri=%.4f apo=%.4f e=%.4f pts=%d\n",
                         g_bodies[pb].name,
@@ -2097,6 +2108,15 @@ int main(int argc, char **argv) {
         int    cine_mblur  = cinematic_motion_blur_active();
         double cine_open   = cine_mblur ? (double)dt * cinematic_shutter_fraction() : 0.0;
         double cine_closed = (double)dt - cine_open;
+        /* Camera-only blur when no object would visibly smear (cinema_blur.h):
+         * the camera still re-poses per sample, but the sim advances once
+         * instead of N times. From here on cine_mblur means "slice the sim". */
+        if (cine_mblur && !g_paused &&
+            !cinema_blur_objects_needed(cine_open * g_sim_speed * g_laws.time_scale)) {
+            cine_mblur  = 0;
+            cine_open   = 0.0;
+            cine_closed = (double)dt;
+        }
 
         /* Physics — RESPA hierarchical integrator. Under motion blur this
          * moves into the accumulation loop below, one slice per sub-frame. */
@@ -2180,6 +2200,12 @@ int main(int argc, char **argv) {
                 s = s < 0.0f ? 0.0f : (s > 1.0f ? 1.0f : s);
                 s = s * s * (3.0f - 2.0f * s);                  /* smoothstep */
                 target = (float)g_settings.relativistic * s;
+                /* Not while a shot or tour drives the camera. The effect is a
+                 * stylistic ramp for flying at warp; a directed camera covering
+                 * 10^9 c between keys is choreography, not a warp flight, and it
+                 * pinned beta at 1 — radial "warp tunnel" streaks and the frame
+                 * shoved off-centre on every nebula and galaxy leg. */
+                if (cinema_shot_playing()) target = 0.0f;
 
                 /* Heading: project the unit velocity vector to screen space via
                  * vp_camrel = proj × view_rot.  When motion aligns with the look
@@ -2379,10 +2405,12 @@ int main(int argc, char **argv) {
 
         profiler_stage_begin(PROFILER_STAGE_POST);
         cinematic_frame_resolve();   /* average -> back buffer (no-op if nsub==1) */
+        /* --cinematic-info titles: once per OUTPUT frame, after the average and
+         * before capture, so text is never smeared through the samples. */
+        if (cinematic_active() && cinema_titles_enabled())
+            cinema_titles_frame(cinematic_filming() ? cinematic_frame_dt() : (double)dt);
         profiler_stage_end(PROFILER_STAGE_POST);
-        /* Film-out writes clean frames: no HUD, no menu. (Title cards are a
-         * phase-5 --cinematic-info feature and are drawn at resolve time, not
-         * here — text must not be supersampled through the accumulator.) */
+        /* Film-out writes clean frames: no HUD, no menu. */
         if (!cinematic_filming()) {
             profiler_stage_begin(PROFILER_STAGE_UI);
             ui_render();

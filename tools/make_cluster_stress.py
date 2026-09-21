@@ -25,7 +25,10 @@ Then measure, e.g.:
         --cam 0,0.2,0.6,-90,-12 --frames 900 --shot /tmp/cs_$t.png; done
 (compare wall-clock; camera stays parked so every system is active every frame).
 """
-import argparse, json, math, random
+
+import argparse
+import json
+import random
 
 MSUN = 1.989e30
 RSUN_M = 6.957e8
@@ -33,20 +36,30 @@ RSUN_M = 6.957e8
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--systems", type=int, default=48,
-                    help="number of star systems (default 48)")
-    ap.add_argument("--planets", type=int, default=6,
-                    help="planets per system (default 6)")
-    ap.add_argument("--radius-ly", type=float, default=1.0,
-                    help="cluster radius in light-years (default 1.0; keep < "
-                         "ACTIVE_RADIUS_LY=2 so all systems stay active)")
+    ap.add_argument(
+        "--systems", type=int, default=48, help="number of star systems (default 48)"
+    )
+    ap.add_argument(
+        "--planets", type=int, default=6, help="planets per system (default 6)"
+    )
+    ap.add_argument(
+        "--radius-ly",
+        type=float,
+        default=1.0,
+        help="cluster radius in light-years (default 1.0; keep < "
+        "ACTIVE_RADIUS_LY=2 so all systems stay active)",
+    )
     ap.add_argument("--seed", type=int, default=1234)
-    ap.add_argument("--time-scale", type=float, default=200000.0,
-                    help="laws.time_scale — multiplies sim seconds per real "
-                         "second.  High values push each frame to the outer-step "
-                         "cap so PHYSICS (not render) dominates the frame, which "
-                         "is what makes the integration parallelism measurable "
-                         "(default 2e5).")
+    ap.add_argument(
+        "--time-scale",
+        type=float,
+        default=200000.0,
+        help="laws.time_scale — multiplies sim seconds per real "
+        "second.  High values push each frame to the outer-step "
+        "cap so PHYSICS (not render) dominates the frame, which "
+        "is what makes the integration parallelism measurable "
+        "(default 2e5).",
+    )
     ap.add_argument("--out", default="assets/universes/cluster_stress.json")
     args = ap.parse_args()
 
@@ -55,50 +68,66 @@ def main():
 
     def rand_in_sphere(r):
         while True:
-            x = rng.uniform(-1, 1); y = rng.uniform(-1, 1); z = rng.uniform(-1, 1)
-            if x*x + y*y + z*z <= 1.0:
-                return [x*r, y*r, z*r]
+            x = rng.uniform(-1, 1)
+            y = rng.uniform(-1, 1)
+            z = rng.uniform(-1, 1)
+            if x * x + y * y + z * z <= 1.0:
+                return [x * r, y * r, z * r]
 
     for si in range(args.systems):
         star = f"S{si:03d}"
         pos = rand_in_sphere(args.radius_ly)
         msun = rng.uniform(0.4, 2.2)
         # main-sequence-ish radius ~ M^0.8
-        r_km = (msun ** 0.8) * RSUN_M / 1000.0
+        r_km = (msun**0.8) * RSUN_M / 1000.0
         t = rng.random()
-        color = [0.6 + 0.4*t, 0.6 + 0.2*t, 0.3 + 0.6*(1-t)]
-        bodies.append({
-            "name": star, "type": "star",
-            "pos_ly": [round(c, 6) for c in pos],
-            "mass": msun * MSUN, "radius_km": round(r_km, 1),
-            "color": [round(c, 3) for c in color],
-            "obliquity_deg": round(rng.uniform(0, 30), 2),
-            "rotation_period_days": round(rng.uniform(10, 40), 2),
-        })
+        color = [0.6 + 0.4 * t, 0.6 + 0.2 * t, 0.3 + 0.6 * (1 - t)]
+        bodies.append(
+            {
+                "name": star,
+                "type": "star",
+                "pos_ly": [round(c, 6) for c in pos],
+                "mass": msun * MSUN,
+                "radius_km": round(r_km, 1),
+                "color": [round(c, 3) for c in color],
+                "obliquity_deg": round(rng.uniform(0, 30), 2),
+                "rotation_period_days": round(rng.uniform(10, 40), 2),
+            }
+        )
         # Tight, fast planets → short periods → many integrator substeps/frame.
         for pi in range(args.planets):
             a = round(0.05 + 0.12 * pi + rng.uniform(0, 0.05), 4)  # 0.05..~0.8 AU
-            bodies.append({
-                "name": f"{star}p{pi}", "type": "planet", "parent": star,
-                "mass": rng.uniform(3e23, 2e27), "radius_km": round(rng.uniform(2000, 70000), 1),
-                "color": [round(rng.uniform(0.3, 0.9), 3) for _ in range(3)],
-                "obliquity_deg": round(rng.uniform(0, 40), 2),
-                "rotation_period_days": round(rng.uniform(0.3, 3.0), 3),
-                "keplerian": {
-                    "a": a,
-                    "e": round(rng.uniform(0.0, 0.15), 4),
-                    "i": round(rng.uniform(0.0, 20.0), 4),
-                    "Omega": round(rng.uniform(0.0, 360.0), 4),
-                    "omega_tilde": round(rng.uniform(0.0, 360.0), 4),
-                    "L": round(rng.uniform(0.0, 360.0), 4),
-                },
-            })
+            bodies.append(
+                {
+                    "name": f"{star}p{pi}",
+                    "type": "planet",
+                    "parent": star,
+                    "mass": rng.uniform(3e23, 2e27),
+                    "radius_km": round(rng.uniform(2000, 70000), 1),
+                    "color": [round(rng.uniform(0.3, 0.9), 3) for _ in range(3)],
+                    "obliquity_deg": round(rng.uniform(0, 40), 2),
+                    "rotation_period_days": round(rng.uniform(0.3, 3.0), 3),
+                    "keplerian": {
+                        "a": a,
+                        "e": round(rng.uniform(0.0, 0.15), 4),
+                        "i": round(rng.uniform(0.0, 20.0), 4),
+                        "Omega": round(rng.uniform(0.0, 360.0), 4),
+                        "omega_tilde": round(rng.uniform(0.0, 360.0), 4),
+                        "L": round(rng.uniform(0.0, 360.0), 4),
+                    },
+                }
+            )
 
     preset = {
         "laws": {
-            "G": 6.674e-11, "softening": 100000.0, "time_scale": args.time_scale,
-            "force_exp": 2.0, "lambda": 0.0, "pn_factor": 0.0,
-            "c_light": 299792458.0, "gravity_isolation": 1.0,
+            "G": 6.674e-11,
+            "softening": 100000.0,
+            "time_scale": args.time_scale,
+            "force_exp": 2.0,
+            "lambda": 0.0,
+            "pn_factor": 0.0,
+            "c_light": 299792458.0,
+            "gravity_isolation": 1.0,
         },
         "bodies": bodies,
     }

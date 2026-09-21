@@ -73,7 +73,8 @@ void main() {
         col *= 1.0 + u_twinkle * 0.16 * tw;
     }
 
-    v_color      = vec4(col, fade);
+    /* Star veil: drowned where fainter than a nearby star's glare. */
+    v_color      = vec4(col, fade * veil_vis(rel, max(max(col.r, col.g), col.b)));
     gl_PointSize = size;
     gl_Position  = u_vp * vec4(rel, 1.0);
 }

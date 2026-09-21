@@ -43,6 +43,10 @@ uniform float u_disk_rate;    /* visual Keplerian swirl rate (from mass)   */
 uniform mat4  u_vp;           /* view-projection (camera-relative) — for true depth */
 uniform sampler2D u_scene;    /* scene rendered so far (post grab) — lensed bg  */
 uniform int   u_has_scene;    /* 1 when u_scene is valid (post enabled)         */
+uniform float u_px_rad;       /* angular size of one pixel, radians             */
+uniform samplerCube u_env;    /* distant background around the camera (render.c) */
+uniform int   u_has_env;      /* 1 when u_env was captured this frame            */
+uniform float u_env_px_rad;   /* angular size of one u_env texel, radians        */
 
 /* Disk geometry, in horizon-radius (Rs) units.  The inner edge is the ISCO,
  * supplied per-hole (u_disk_in) since it depends on spin (3 Rs at a*=0 down to
@@ -55,15 +59,93 @@ const float BOUND    = 9.0;   /* march only within this radius (Rs) of the hole 
  * by the fraction of the bend that actually lies ahead of the camera, so the
  * background warp falls off continuously instead of stopping at the march
  * bound and warped features (trails, rings, galaxies) stay geometrically
- * continuous with their unwarped surroundings.  LENS_OUT is where the true
- * deflection drops below ~a pixel (α(2000) ≈ 1 mrad ≈ 1 px at 1080p/60°) —
- * the taper to exactly zero there removes at most that much, so the field is
- * physically faithful to the pixel level, not an artistic cutoff.  bh.vert's
- * BILL_SCALE must cover LENS_OUT. */
-const float LENS_OUT = 2000.0;
+ * continuous with their unwarped surroundings.  LENS_OUT is where the taper
+ * to exactly zero may begin to matter: alpha(20000) = 0.1 mrad, a tenth of a
+ * pixel at 1080p/60 degrees. (It was 2000 Rs = 1 mrad, a fixed amount that is
+ * a large fraction of the whole lensing angle once the camera is far away —
+ * the Einstein radius sits at b = sqrt(2 D) Rs, ~1500 Rs from 1e5 AU of
+ * Sgr A* — so the lens faded out with distance faster than physics allows.)
+ * bh.vert's BILL_SCALE must cover LENS_OUT. */
+const float LENS_OUT = 20000.0;
 
 float weak_defl(float b) {
     return 2.0 / b + 2.9452431 / (b * b) + 5.3333333 / (b * b * b);
+}
+
+/* Rotate unit direction dir toward the hole by angle a, in the plane of dir
+ * and the hole. `to_hole` need not be normalised or perpendicular to dir. */
+vec3 bend_toward(vec3 dir, vec3 to_hole, float a) {
+    vec3 tw = to_hole - dir * dot(to_hole, dir);
+    float L = length(tw);
+    if (L < 1e-8 || a == 0.0) return dir;
+    tw /= L;
+    return normalize(dir * cos(a) + tw * sin(a));
+}
+
+/* Share of the full deflection weak_defl(b) accumulated between path
+ * positions s1 < s2 (measured from the point of closest approach). In the
+ * weak field the bend is distributed as d/ds [s / sqrt(s^2 + b^2)] / 2, the
+ * same distribution the analytic region uses for the "ahead of the camera"
+ * fraction. */
+float defl_share(float s1, float s2, float b) {
+    return 0.5 * (s2 / sqrt(s2 * s2 + b * b) - s1 / sqrt(s1 * s1 + b * b));
+}
+
+/* ---- lensed background sampling ------------------------------------------
+ * Lensing preserves SURFACE brightness: extended light (galaxy glow, nebulae,
+ * the disk) is simply remapped and stretched. A star is a point: its image
+ * stays a point but gains flux by the magnification. The snapshot/environment
+ * draw stars as few-pixel blobs, so the two are separated per sample:
+ *   base  = local minimum over a few pixels (the diffuse light under a star)
+ *   star  = what rises above it, eroded along the tangential stretch back to
+ *           the drawn dot size, then scaled by mu_t (the tangential
+ *           magnification): images near the Einstein ring become bright
+ *           points; inner, demagnified images dim.
+ * With no lensing (mu_t = 1) this returns the sample unchanged.
+ *
+ * (A first version only eroded. Near the Einstein ring mu_t is huge, the
+ * erosion width approached a star's whole radius, and the soft-edged dots
+ * were erased outright; far from the hole the entire visible lens zone is
+ * near-ring, so lensing seemed to switch off with distance.) */
+const float STAR_R_PX = 3.0;       /* drawn star-dot radius, px            */
+const float BASE_R_PX = 5.0;       /* diffuse-base probe radius, px        */
+const float MU_MAX    = 24.0;
+
+vec3 scene_at(vec3 d) {
+    vec4 c = u_vp * vec4(d, 0.0);
+    if (c.w <= 0.0) return vec3(0.0);
+    return texture(u_scene, c.xy / c.w * 0.5 + 0.5).rgb;
+}
+
+/* tt/rr: unit tangential/radial directions on the source side; px: angular
+ * size of one texel of the source; mu: tangential magnification. */
+vec3 lens_scene(vec3 d, vec3 tt, vec3 rr, float px, float mu) {
+    vec3 c = scene_at(d);
+    float a = BASE_R_PX * px;
+    vec3 base = min(min(scene_at(normalize(d + tt * a)), scene_at(normalize(d - tt * a))),
+                    min(scene_at(normalize(d + rr * a)), scene_at(normalize(d - rr * a))));
+    base = min(base, c);
+    vec3 star = c;
+    if (mu > 1.05) {
+        float w = STAR_R_PX * px * (1.0 - 1.0 / mu);
+        star = min(star, min(scene_at(normalize(d + tt * w)), scene_at(normalize(d - tt * w))));
+    }
+    return base + max(star - base, vec3(0.0)) * clamp(mu, 0.05, MU_MAX);
+}
+
+vec3 lens_env(vec3 d, vec3 tt, vec3 rr, float px, float mu) {
+    vec3 c = texture(u_env, d).rgb;
+    float a = BASE_R_PX * px;
+    vec3 base = min(min(texture(u_env, normalize(d + tt * a)).rgb, texture(u_env, normalize(d - tt * a)).rgb),
+                    min(texture(u_env, normalize(d + rr * a)).rgb, texture(u_env, normalize(d - rr * a)).rgb));
+    base = min(base, c);
+    vec3 star = c;
+    if (mu > 1.05) {
+        float w = STAR_R_PX * px * (1.0 - 1.0 / mu);
+        star = min(star, min(texture(u_env, normalize(d + tt * w)).rgb,
+                             texture(u_env, normalize(d - tt * w)).rgb));
+    }
+    return base + max(star - base, vec3(0.0)) * clamp(mu, 0.05, MU_MAX);
 }
 
 float hash13(vec3 p) {
@@ -122,7 +204,21 @@ void main() {
     float h2 = 0.0;
     if (marched) {
         float thc = sqrt(BOUND * BOUND - b2);
+        /* Bend accumulated between the camera and the bounding sphere, which
+         * the march does not integrate. Without this (and the outbound share
+         * after the loop) a ray just inside BOUND was bent by almost nothing
+         * while one just outside got the full analytic bend: a deflection
+         * that is not monotonic in b folds the lens map on itself, and every
+         * fold is a caustic — the thin concentric rings that cut through the
+         * star field far beyond the disk. With both shares added, a ray at
+         * b -> BOUND gets exactly the analytic bend and the field is
+         * continuous. */
+        float s_cam   = -tca;                         /* camera, from periapsis */
+        float s_entry = max(-thc, s_cam);             /* march start            */
+        float b_in    = sqrt(b2);
+        float a_in    = weak_defl(max(b_in, 1.0)) * defl_share(s_cam, s_entry, b_in);
         p += d * max(tca - thc, 0.0);
+        d  = bend_toward(d, -p, a_in);
 
         /* Per-pixel start jitter: phase-shifts the march so the higher-order
          * photon images inside the shadow dither into fine noise instead of
@@ -278,7 +374,12 @@ void main() {
          * fallback where the bent ray leaves the screen or when post is off. */
         vec3 dir;
         if (marched) {
+            /* Bend still to come between leaving the march and infinity. */
             dir = normalize(d);
+            float s_x = dot(p, dir);                  /* > 0: moving away       */
+            float b_x = length(p - dir * s_x);
+            float a_out = weak_defl(max(b_x, 1.0)) * defl_share(s_x, 1e9, b_x);
+            dir = bend_toward(dir, -p, a_out);
         } else {
             float b  = sqrt(b2);
             float a  = weak_defl(b)
@@ -303,6 +404,19 @@ void main() {
         float A = disk_a;
 
         float ws = 0.0;                        /* weight actually served by scene */
+
+        vec3  ch    = normalize(u_center);
+        float sin_t = length(cross(rd,  ch));
+        float sin_b = length(cross(dir, ch));
+        /* Tangential magnification sin(theta)/sin(beta): > 1 stretched,
+         * < 1 compressed (the inner images near the shadow). */
+        float mu_t  = (sin_t < 1e-6) ? 1.0 : clamp(sin_t / max(sin_b, 1e-4), 0.05, MU_MAX);
+        vec3  tt    = cross(ch, dir);          /* tangential, source side      */
+        float tl    = length(tt);
+        tt = tl > 1e-6 ? tt / tl : vec3(0.0);
+        vec3  rr    = tl > 1e-6 ? normalize(cross(dir, tt)) : vec3(0.0);
+        if (tl <= 1e-6) mu_t = 1.0;
+
         if (u_has_scene == 1) {
             vec4 clip = u_vp * vec4(dir, 0.0); /* direction at infinity */
             if (clip.w > 0.0) {
@@ -310,12 +424,26 @@ void main() {
                 vec2 m  = min(uv, 1.0 - uv);   /* distance to nearest edge */
                 float edge = clamp(min(m.x, m.y) * 12.0, 0.0, 1.0);
                 if (edge > 0.0) {
-                    vec3 bg = texture(u_scene, uv).rgb;
+                    vec3 bg = (u_px_rad > 0.0) ? lens_scene(dir, tt, rr, u_px_rad, mu_t)
+                                               : texture(u_scene, uv).rgb;
                     ws = edge;
                     S += bg * ws * (1.0 - A);
                     A += ws * (1.0 - A);
                 }
             }
+        }
+
+        /* Whatever the on-screen snapshot cannot serve — bent rays leaving the
+         * screen, or coming from behind the camera, which is most of the ring
+         * just outside the shadow — comes from the captured environment of
+         * the whole sky. Without it that ring rendered the UNLENSED scene
+         * underneath: a hollow circle where the lensing is strongest. */
+        if (u_has_env == 1 && ws < 1.0) {
+            vec3 bg = lens_env(dir, tt, rr, u_env_px_rad, mu_t);
+            float we = 1.0 - ws;
+            S += bg * we * (1.0 - A);
+            A += we * (1.0 - A);
+            ws = 1.0;
         }
 
         /* Procedural star fallback covers the weight the scene couldn't,

@@ -10,8 +10,10 @@
 #   make
 # To build without it (no C++/cimgui/g++ needed — menu.c compiles to inert stubs):
 #   make IMGUI=0
-# `make clean` is REQUIRED when toggling IMGUI either way: the object files are
-# compiled against different struct layouts and linking stale ones corrupts memory.
+# Build intermediates (.o/.d) go under build/<flavour>/, mirroring the source
+# tree, never next to the sources. Each flavour (imgui / noimgui) has its own
+# directory, so toggling IMGUI no longer needs `make clean`: the two sets of
+# objects, compiled against different struct layouts, can never be mixed.
 
 CC      = gcc
 CXX     = g++
@@ -31,11 +33,10 @@ SRCDIRS = $(SRCDIR) \
           $(SRCDIR)/render $(SRCDIR)/fx $(SRCDIR)/ui $(SRCDIR)/util
 
 SRCS    = $(foreach d,$(SRCDIRS),$(wildcard $(d)/*.c))
-OBJS    = $(SRCS:.c=.o)
 
 # Every source directory is on the include path, so headers keep being included
 # by bare name (`#include "body.h"`) regardless of which layer they live in.
-INCS    = $(addprefix -I,$(SRCDIRS))
+INCS    = $(addprefix -I,$(SRCDIRS)) -Iextern/stb
 
 # -MMD -MP emits a .d file per object listing the headers it #includes, so
 # editing a header (e.g. src/core/body.h) forces every dependent .c to recompile.
@@ -47,6 +48,11 @@ CFLAGS  = -Wall -Wextra -O2 -std=c99 $(INCS) -fopenmp -MMD -MP
 IMGUI      ?= 1
 CIMGUI_DIR  = extern/cimgui
 LINK        = $(CC)
+
+BUILDROOT  ?= build
+FLAVOUR     = $(if $(filter 1,$(IMGUI)),imgui,noimgui)
+BUILDDIR    = $(BUILDROOT)/$(FLAVOUR)
+OBJS        = $(patsubst %.c,$(BUILDDIR)/%.o,$(SRCS))
 
 # Auto-detect platform
 UNAME := $(shell uname -s 2>/dev/null || echo Windows)
@@ -78,7 +84,7 @@ else
                -lm -fopenmp -mwindows
     EXT      = .exe
     RC       = windres
-    RC_OBJ   = resource.o
+    RC_OBJ   = $(BUILDDIR)/resource.o
 endif
 
 # ---- Optional Dear ImGui (cimgui) -----------------------------------
@@ -106,15 +112,16 @@ ifeq ($(IMGUI),1)
                      -DCIMGUI_USE_SDL2 -DCIMGUI_USE_OPENGL3 \
                      $(SDL_CFLAGS)
 
-    CIMGUI_OBJS = $(CIMGUI_DIR)/cimgui.o \
-                  $(CIMGUI_DIR)/cimgui_impl.o \
-                  $(CIMGUI_DIR)/imgui/imgui.o \
-                  $(CIMGUI_DIR)/imgui/imgui_draw.o \
-                  $(CIMGUI_DIR)/imgui/imgui_tables.o \
-                  $(CIMGUI_DIR)/imgui/imgui_widgets.o \
-                  $(CIMGUI_DIR)/imgui/imgui_demo.o \
-                  $(CIMGUI_DIR)/imgui/backends/imgui_impl_sdl2.o \
-                  $(CIMGUI_DIR)/imgui/backends/imgui_impl_opengl3.o
+    CIMGUI_OBJS = $(addprefix $(BUILDDIR)/$(CIMGUI_DIR)/, \
+                  cimgui.o \
+                  cimgui_impl.o \
+                  imgui/imgui.o \
+                  imgui/imgui_draw.o \
+                  imgui/imgui_tables.o \
+                  imgui/imgui_widgets.o \
+                  imgui/imgui_demo.o \
+                  imgui/backends/imgui_impl_sdl2.o \
+                  imgui/backends/imgui_impl_opengl3.o)
 
     OBJS    += $(CIMGUI_OBJS)
     LINK     = $(CXX)
@@ -124,8 +131,19 @@ endif
 # ---- Rules ---------------------------------------------------------
 all: $(TARGET)$(EXT)
 
-$(TARGET)$(EXT): $(OBJS) $(RC_OBJ)
-	$(LINK) -o $@ $^ $(LDFLAGS)
+# The binary is shared by both flavours, so switching IMGUI must relink even
+# when the other flavour's objects are older than it. The stamp is rewritten
+# only when the flavour actually changes, so it costs nothing otherwise.
+FLAVOUR_STAMP = $(BUILDROOT)/.flavour
+
+$(TARGET)$(EXT): $(OBJS) $(RC_OBJ) $(FLAVOUR_STAMP)
+	$(LINK) -o $@ $(OBJS) $(RC_OBJ) $(LDFLAGS)
+
+$(FLAVOUR_STAMP): FORCE
+	@mkdir -p $(BUILDROOT)
+	@echo $(FLAVOUR) | cmp -s - $@ || echo $(FLAVOUR) > $@
+
+FORCE:
 
 # Offline catalog converter — standalone, no SDL/OpenGL. Shares src/core/catalog.c
 # with the simulator.
@@ -140,15 +158,19 @@ ifneq ($(EXT),)
 catalogtool: catalogtool$(EXT)
 endif
 
-resource.o: resource.rc
-	$(RC) resource.rc -O coff -o resource.o
+$(BUILDDIR)/resource.o: resource.rc
+	@mkdir -p $(@D)
+	$(RC) resource.rc -O coff -o $@
 
-# `%` spans '/', so this one rule covers src/main.c and every src/<layer>/*.c.
-$(SRCDIR)/%.o: $(SRCDIR)/%.c
+# `%` spans '/', so this one rule covers src/main.c and every src/<layer>/*.c,
+# each landing at build/<flavour>/src/<layer>/<name>.o (+ its .d).
+$(BUILDDIR)/%.o: %.c
+	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # Dear ImGui / cimgui C++ translation units (only built when IMGUI=1).
-%.o: %.cpp
+$(BUILDDIR)/%.o: %.cpp
+	@mkdir -p $(@D)
 	$(CXX) $(IMGUI_CXXFLAGS) -c -o $@ $<
 
 # CI guard (see .github/workflows/ci.yml): print the sources make will actually
@@ -158,12 +180,16 @@ print-srcs:
 	@echo $(SRCS)
 
 clean:
-	rm -f $(foreach d,$(SRCDIRS),$(d)/*.o $(d)/*.d) \
-	      $(TARGET) $(TARGET).exe resource.o catalogtool catalogtool.exe
-	rm -f $(CIMGUI_DIR)/*.o $(CIMGUI_DIR)/imgui/*.o $(CIMGUI_DIR)/imgui/backends/*.o
+	rm -rf $(BUILDROOT)
+	rm -f $(TARGET) $(TARGET).exe catalogtool catalogtool.exe
+	@# Leftovers from the old in-tree layout (objects beside the sources).
+	rm -f $(foreach d,$(SRCDIRS),$(d)/*.o $(d)/*.d) resource.o
+	rm -f $(CIMGUI_DIR)/*.o $(CIMGUI_DIR)/*.d $(CIMGUI_DIR)/imgui/*.o \
+	      $(CIMGUI_DIR)/imgui/*.d $(CIMGUI_DIR)/imgui/backends/*.o \
+	      $(CIMGUI_DIR)/imgui/backends/*.d
 
 # Pull in the auto-generated header dependencies (.d files from -MMD). The leading
 # '-' suppresses errors on the first build before any .d files exist.
 -include $(OBJS:.o=.d)
 
-.PHONY: all clean print-srcs
+.PHONY: all clean print-srcs FORCE

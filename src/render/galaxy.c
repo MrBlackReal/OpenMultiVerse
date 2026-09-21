@@ -11,6 +11,7 @@
  * Data: SIMBAD/NED J2000 positions, distances, major-axis sizes, inclinations.
  */
 #include "galaxy.h"
+#include "render.h"
 #include "cinematic.h"
 #include "starsys.h"     /* suppressed cells: promoted stars are real bodies */
 #include "gl_utils.h"
@@ -297,6 +298,7 @@ void galaxy_render(const float vp_camrel[16],
     if (!s_enabled || !s_shader || !s_vao) return;
 
     glUseProgram(s_shader);
+    render_star_veil_uniforms(s_shader);
     if (scene_depth_tex) {
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, scene_depth_tex);
