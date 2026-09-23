@@ -25,3 +25,8 @@ void render_shutdown(void);
 /* Upload this frame's star-veil glare (star_veil.h) to a program whose shader
  * calls veil_vis(); call after glUseProgram. */
 void render_star_veil_uniforms(unsigned int prog);
+
+/* Bind the interstellar dust texture and its uniforms (gl_utils prelude
+ * dust_av) to a program; call after glUseProgram. (ox, oy, oz) is the Sun --
+ * the dust cube's centre -- in the program's position frame, AU. */
+void render_dust_uniforms(unsigned int prog, float ox, float oy, float oz);

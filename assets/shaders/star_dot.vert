@@ -17,6 +17,15 @@ uniform mat4  u_vp;
 uniform float u_time;      /* seconds, for twinkle animation         */
 uniform float u_twinkle;   /* twinkle amplitude 0..1 (0 = off)       */
 
+/* Interstellar dust (prelude dust_av; positions here are camera-relative, so
+ * the camera is the origin). u_dust_extend > 0 replaces each point's distance
+ * with that many AU along its direction -- for sprites parked on a shell
+ * closer than their true distance (galaxy impostors), whose light still
+ * crosses all the dust on the way. u_dust_sun_corr = 1 when the dot's
+ * magnitude came from a catalog, i.e. already contains the Sun's column. */
+uniform float u_dust_extend;
+uniform float u_dust_sun_corr;
+
 out vec4 v_color;
 
 void main() {
@@ -38,6 +47,24 @@ void main() {
      * u_veil_e/f at 0 here). */
     v_color.a *= veil_vis(a_pos, max(max(v_color.r, v_color.g), v_color.b));
 
-    gl_PointSize = a_size;
+    /* Extinction. The magnitude was turned into size (0.45 px per mag, 1.4 px
+     * floor) and colour on the CPU; dust moves the magnitude by dm, so shrink
+     * by the same slope and put whatever the floor cannot show into alpha. */
+    float size = a_size;
+    if (u_dust_on > 0.0) {
+        vec3  far = (u_dust_extend > 0.0) ? normalize(a_pos) * u_dust_extend : a_pos;
+        float av  = dust_av(vec3(0.0), far);
+        float dm  = DUST_AG_PER_AV * av;
+        if (u_dust_sun_corr > 0.0)
+            dm -= DUST_AG_PER_AV * dust_av(u_dust_origin, far);
+        if (dm != 0.0) {
+            size = clamp(a_size - 0.45 * dm, min(a_size, 1.4), 7.0);
+            float hidden = dm - (a_size - size) / 0.45;
+            v_color.a  *= min(1.0, pow(10.0, -0.4 * hidden));
+        }
+        v_color.rgb *= dust_redden(av);
+    }
+
+    gl_PointSize = size;
     gl_Position  = u_vp * vec4(a_pos, 1.0);
 }

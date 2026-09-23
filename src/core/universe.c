@@ -45,6 +45,7 @@
  *   The root_star_of() helper walks this chain upward until parent == -1.
  */
 #include "universe.h"
+#include "dust_field.h"
 #include "cosmic_field.h"
 #include "body.h"
 #include "physics.h"
@@ -1769,7 +1770,17 @@ void universe_field_pool_update(const double cam_m[3], double radius_m)
         body_release(bo);
         body_defaults(bo);
         star_catalog_name(fs->source_id, bo->name, sizeof bo->name);
-        if (!isnan(fs->abs_mag)) { bo->has_abs_mag = 1; bo->abs_mag = fs->abs_mag; }
+        if (!isnan(fs->abs_mag)) {
+            /* Intrinsic, like the field VBO's: the catalog value contains the
+             * dust between the Sun and the star, and the dot shader adds the
+             * dust between the camera and the star, so the star keeps its
+             * brightness across the far/near handoff anywhere in the cube. */
+            double p[3] = { (double)fs->pos_ly[0] * LY * RS,
+                            (double)fs->pos_ly[1] * LY * RS,
+                            (double)fs->pos_ly[2] * LY * RS };
+            bo->has_abs_mag = 1;
+            bo->abs_mag = (float)(fs->abs_mag - dust_field_ag_from_sun(p));
+        }
         bo->mass   = fs->mass_kg;
         bo->radius = (double)fs->radius_km * 1000.0;
         bo->pos[0] = (double)fs->pos_ly[0] * LY;

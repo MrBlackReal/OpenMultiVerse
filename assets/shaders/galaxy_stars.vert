@@ -247,6 +247,12 @@ void main() {
     vec3  from_sun = pos + u_cam_abs;
     float d_sun_pc = max(length(from_sun) / AU_PER_PC, 1e-6);
     float m_sun    = absmag + 5.0 * log10f(d_sun_pc) - 5.0;
+    /* Dust can only make it fainter, so it is only worth integrating for a
+     * candidate the dust-free test would reject: it may have been hidden from
+     * the survey behind a cloud, and then it belongs here. The Sun is at
+     * u_dust_origin in this camera-relative frame. */
+    if (m_sun < u_mag_limit)
+        m_sun += DUST_AG_PER_AV * dust_av(u_dust_origin, pos);
     if (m_sun < u_mag_limit) return;
 
     /* Apparent magnitude at the CAMERA drives what we draw. Size and HDR gain
@@ -254,7 +260,8 @@ void main() {
      * catalog star of equal apparent magnitude render identically — the two
      * tiers have to be one population on screen. */
     float d_cam_pc = max(length(pos) / AU_PER_PC, 1e-6);
-    float m_cam    = absmag + 5.0 * log10f(d_cam_pc) - 5.0;
+    float av_cam   = dust_av(vec3(0.0), pos);
+    float m_cam    = absmag + 5.0 * log10f(d_cam_pc) - 5.0 + DUST_AG_PER_AV * av_cam;
 
     float size = clamp(7.0 - 0.45 * (m_cam + 1.0), 1.4, 7.0);
     float hdr  = (m_cam < 2.5) ? min(6.0, pow(10.0, 0.28 * (2.5 - m_cam))) : 1.0;
@@ -271,7 +278,7 @@ void main() {
     /* HDR lift for the rare bright members — the bloom pass blazes them in
      * their own colour. star_field.vert applies exactly this gain to catalog
      * stars (col = a_color.rgb * gain), so the two tiers overbright alike. */
-    col *= b;
+    col *= b * dust_redden(av_cam);
 
     v_color      = vec4(col, a);
     gl_PointSize = size;

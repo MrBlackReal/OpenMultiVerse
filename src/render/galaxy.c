@@ -141,6 +141,7 @@ static double      s_gal_built_cam[3] = { 1e300, 0, 0 };
 static GLuint s_imp_shader = 0, s_imp_vao = 0, s_imp_vbo = 0;
 static GLint  s_imp_vp = -1, s_imp_time = -1, s_imp_twinkle = -1;
 static float *s_imp_buf = NULL;
+static double s_imp_cam[3];              /* camera of the galaxy_render() that filled it */
 static int    s_imp_n = 0, s_imp_cap = 0;
 
 /* ── procedural galaxy lattice ────────────────────────────────────────────
@@ -497,6 +498,7 @@ void galaxy_render(const float vp_camrel[16],
 
     float half_h = (float)screen_h * 0.5f;
     s_imp_n = 0;
+    s_imp_cam[0] = cam_pos[0]; s_imp_cam[1] = cam_pos[1]; s_imp_cam[2] = cam_pos[2];
     for (int i = 0; i < s_gal_n; i++) {
         double rx = s_gal[i].pos[0] - cam_pos[0];
         double ry = s_gal[i].pos[1] - cam_pos[1];
@@ -604,6 +606,10 @@ void galaxy_render_stars(const float vp_camrel[16], const double cam_pos[3],
     glUniform1f(s_su_gain, gain);
     glUniform1fv(s_su_lf_mag, LF_TABLE, s_lf_mag);
     glUniform1f(s_su_mag_limit, CATALOG_MAG_LIMIT);
+    /* Dust dims both what the survey saw (Sun -> star) and what we draw
+     * (camera -> star); the Sun sits at -cam in this camera-relative frame. */
+    render_dust_uniforms(s_star_shader, (float)-cam_pos[0], (float)-cam_pos[1],
+                         (float)-cam_pos[2]);
     /* The selection function is evaluated from the Sun (the survey's vantage),
      * so the shader needs the camera's absolute position to recover each
      * candidate's heliocentric distance. Float is ample: a ~100 AU rounding
@@ -712,6 +718,14 @@ void galaxy_render_impostors(const float vp_camrel[16], float time_s,
     glUniformMatrix4fv(s_imp_vp, 1, GL_FALSE, vp_camrel);
     glUniform1f(s_imp_time, time_s);
     glUniform1f(s_imp_twinkle, 0.0f);      /* galaxies do not scintillate */
+    /* Sprites sit on a shell closer than their galaxies, so the dust column is
+     * taken along the full sightline past the cube: galaxies seen through the
+     * Milky Way's plane dim and redden (the zone of avoidance). Their
+     * magnitudes are intrinsic, so no Sun correction. */
+    render_dust_uniforms(s_imp_shader, (float)-s_imp_cam[0], (float)-s_imp_cam[1],
+                         (float)-s_imp_cam[2]);
+    glUniform1f(glGetUniformLocation(s_imp_shader, "u_dust_extend"), 1e12f);
+    glUniform1f(glGetUniformLocation(s_imp_shader, "u_dust_sun_corr"), 0.0f);
 
     glEnable(GL_PROGRAM_POINT_SIZE);
     glEnable(GL_BLEND);

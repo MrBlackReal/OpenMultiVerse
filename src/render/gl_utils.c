@@ -13,6 +13,7 @@
  */
 #include "gl_utils.h"
 #include "star_veil.h"
+#include "dust_field.h"
 
 /* ---------------------------------------------------------------- private */
 
@@ -53,7 +54,7 @@ static char *inject_prelude(const char *src) {
     /* Also the star veil (star_veil.h): the same glare test as the C side,
      * so every background layer drowns in a nearby star's glare identically.
      * Shaders that never call veil_vis() compile the uniforms away. */
-    char prelude[1024];
+    char prelude[4096];
     int plen = snprintf(prelude, sizeof(prelude),
         "#define DEPTH_FAR %.8e\n"
         "#define VEIL_DIFFUSE %.6f\n"
@@ -69,9 +70,53 @@ static char *inject_prelude(const char *src) {
         "    float th = max(degrees(acos(c)), %.6f);\n"
         "    float glare = u_veil_e * %.6f / (th * th) + u_veil_f * %.6f;\n"
         "    return smoothstep(%.6f, %.6f, log2(max(lum, 1e-6) / glare));\n"
+        "}\n"
+        /* Interstellar dust (dust_field.h): A_V along a segment, from the 3D
+         * texture render_dust_uniforms() binds. Positions are in the calling
+         * program's frame; u_dust_origin is the cube centre (the Sun) in that
+         * frame. One sample per two voxels (6..32), each read one mip level
+         * finer than its step, so a long ray averages instead of aliasing.
+         * Against a half-voxel reference on 1 kpc rays through the real cube:
+         * 2.5%% median, 0.07 mag worst; a fixed 12 at the step's own level was
+         * 23%% and 0.47 mag. */
+        "uniform sampler3D u_dust;\n"
+        "uniform float u_dust_on;\n"
+        "uniform float u_dust_half;    /* cube half-size, AU            */\n"
+        "uniform float u_dust_vmax;    /* density scale, ZGR23 per pc   */\n"
+        "uniform float u_dust_dim;\n"
+        "uniform vec3  u_dust_origin;\n"
+        "#define DUST_AG_PER_AV %.6f\n"
+        "#define DUST_K vec3(%.6f, %.6f, %.6f)\n"
+        "float dust_av(vec3 a, vec3 b) {\n"
+        "    if (u_dust_on <= 0.0) return 0.0;\n"
+        "    vec3 pa = a - u_dust_origin, d = b - a;\n"
+        "    vec3 ds = mix(vec3(1e-6), d, step(1e-6, abs(d)));\n"
+        "    vec3 ta = (-u_dust_half - pa) / ds, tb = (u_dust_half - pa) / ds;\n"
+        "    vec3 lo = min(ta, tb), hi = max(ta, tb);\n"
+        "    float t0 = max(max(lo.x, lo.y), max(lo.z, 0.0));\n"
+        "    float t1 = min(min(hi.x, hi.y), min(hi.z, 1.0));\n"
+        "    if (t0 >= t1) return 0.0;\n"
+        "    float len = length(d) * (t1 - t0);\n"
+        "    float vox = 2.0 * u_dust_half / u_dust_dim;\n"
+        "    int   n   = int(clamp(ceil(len / (2.0 * vox)), 6.0, 32.0));\n"
+        "    float stp = len / float(n);\n"
+        "    float lod = max(0.0, log2(stp / vox) - 1.0);\n"
+        "    float s = 0.0;\n"
+        "    for (int i = 0; i < n; i++) {\n"
+        "        vec3 p = pa + d * mix(t0, t1, (float(i) + 0.5) / float(n));\n"
+        "        s += textureLod(u_dust, p / (2.0 * u_dust_half) + 0.5, lod).r;\n"
+        "    }\n"
+        "    return %.6f * s * u_dust_vmax * stp / 206264.806;\n"
+        "}\n"
+        /* Display-channel colour change for a column A_V, luminance-neutral:
+         * the G-band dimming belongs in the magnitude, this is only the tint. */
+        "vec3 dust_redden(float av) {\n"
+        "    vec3 k = DUST_K;\n"
+        "    return pow(vec3(10.0), -0.4 * av * (k - (k.r + k.g + k.b) / 3.0));\n"
         "}\n",
         (double)RENDER_DEPTH_FAR, VEIL_DIFFUSE, VEIL_PSF, VEIL_FLOOR, VEIL_CORE_DEG, VEIL_CORE_DEG, VEIL_PSF, VEIL_FLOOR,
-        VEIL_LO, VEIL_HI);
+        VEIL_LO, VEIL_HI,
+        DUST_AG_PER_AV, DUST_KR, DUST_KG, DUST_KB, DUST_AV_PER_ZGR);
     if (plen < 0 || plen >= (int)sizeof(prelude)) plen = 0;  /* fall back to plain copy */
 
     size_t slen = strlen(src);

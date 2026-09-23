@@ -48,7 +48,13 @@ void main() {
      * then point size and HDR gain — the GLSL port of star_dot_apparent_mag /
      * star_dot_pixel_size / star_dot_hdr_gain in render.c. */
     float d_pc = max(d / AU_PER_PC, 1e-9);
-    float m    = a_absmag + 5.0 * log10f(d_pc) - 5.0;
+    float m0   = a_absmag + 5.0 * log10f(d_pc) - 5.0;
+
+    /* Interstellar extinction between camera and star. a_absmag is intrinsic
+     * (render.c removed the Sun's column from the catalog magnitude at bake),
+     * so from the Sun this restores exactly the catalog brightness. */
+    float av   = dust_av(u_cam, a_pos);
+    float m    = m0 + DUST_AG_PER_AV * av;
 
     float size = clamp(7.0 - 0.45 * (m + 1.0), 1.4, 7.0);
     float gain = (m < 2.5) ? min(6.0, pow(10.0, 0.28 * (2.5 - m))) : 1.0;
@@ -62,7 +68,13 @@ void main() {
     float hs   = u_horizon * 0.85;
     float fade = (d > hs) ? (1.0 - smoothstep(hs, u_horizon, d)) : 1.0;
 
-    vec3 col = a_color.rgb * gain;   /* brightness in RGB; fade stays in alpha */
+    /* Size bottoms out at m = 11.44; dimming past that point would not show,
+     * so a dust-buried star fades in alpha by the part the size floor hides.
+     * Without dust m == m0 and this is 1. */
+    fade *= pow(10.0, -0.4 * max(0.0, m - max(m0, 11.444)));
+
+    /* brightness in RGB; fade stays in alpha */
+    vec3 col = a_color.rgb * gain * dust_redden(av);
 
     /* Micro-twinkle: identical to star_dot.vert so field and near dots shimmer
      * consistently.  Phase hashed from the (stable) colour, not the position. */

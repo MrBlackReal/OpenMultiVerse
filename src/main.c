@@ -60,6 +60,7 @@
 #include "field_graph.h"
 #include "profiler.h"
 #include "gpu_timer.h"
+#include "dust_field.h"
 
 /* Active-system count, captured for profiler spike context only. */
 static int s_prof_active_systems = 0;
@@ -415,6 +416,9 @@ static void init_runtime_world(void) {
     boot_log("Preparing runtime world");
     loading_begin();
     loading_phase("Loading universe");
+    /* Measured dust around the Sun: needed before the load, which turns
+     * catalog magnitudes intrinsic against it (dust_field.h). */
+    if (!dust_field_loaded()) dust_field_load("assets/catalogs/dust_local.bin");
     universe_load(s_universe_path);   /* drives its own determinate progress */
 
     /* Offline export: dump the freshly-loaded (pre-warm-up) bulk bodies to a

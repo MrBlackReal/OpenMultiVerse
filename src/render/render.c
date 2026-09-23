@@ -61,6 +61,7 @@
 #include "body.h"
 #include "camera.h"
 #include "cosmic_field.h"
+#include "dust_field.h"
 #include "radiance_field.h"
 #include "star_veil.h"
 #include "earth_tex.h"
@@ -598,6 +599,50 @@ static void star_veil_compute(const float cam_fwd[3], float fov_deg, float aspec
     col_out[0] = top[0].col[0]; col_out[1] = top[0].col[1]; col_out[2] = top[0].col[2];
 }
 
+/* ── interstellar dust texture ────────────────────────────────────────────
+ * The DustBin cube (dust_field.h) as a mipmapped R16F 3D texture of density /
+ * vmax. Mipmaps are what make the shaders' 12-sample integral honest: each
+ * sample reads the level whose voxel matches its step, so a 2 kpc ray averages
+ * the clouds it crosses instead of hitting or missing them by chance. */
+static GLuint s_dust_tex = 0;
+#define DUST_TEX_UNIT 7
+
+static void dust_tex_init(void)
+{
+    if (s_dust_tex) return;
+    int dim = 0; float vmax = 0.0f;
+    float *rho = dust_field_density_alloc(&dim, &vmax);
+    if (!rho) return;
+    glGenTextures(1, &s_dust_tex);
+    glBindTexture(GL_TEXTURE_3D, s_dust_tex);
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_R16F, dim, dim, dim, 0, GL_RED, GL_FLOAT, rho);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_BORDER);
+    static const float zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    glTexParameterfv(GL_TEXTURE_3D, GL_TEXTURE_BORDER_COLOR, zero);
+    glGenerateMipmap(GL_TEXTURE_3D);
+    glBindTexture(GL_TEXTURE_3D, 0);
+    free(rho);
+}
+
+void render_dust_uniforms(unsigned int prog, float ox, float oy, float oz)
+{
+    int dim = (int)(2.0 * dust_field_half_au() / dust_field_voxel_au() + 0.5);
+    float vmax = dust_field_vmax();
+    glActiveTexture(GL_TEXTURE0 + DUST_TEX_UNIT);
+    glBindTexture(GL_TEXTURE_3D, s_dust_tex);
+    glActiveTexture(GL_TEXTURE0);
+    glUniform1i(glGetUniformLocation(prog, "u_dust"), DUST_TEX_UNIT);
+    glUniform1f(glGetUniformLocation(prog, "u_dust_on"), s_dust_tex ? 1.0f : 0.0f);
+    glUniform1f(glGetUniformLocation(prog, "u_dust_half"), (float)dust_field_half_au());
+    glUniform1f(glGetUniformLocation(prog, "u_dust_vmax"), vmax);
+    glUniform1f(glGetUniformLocation(prog, "u_dust_dim"), (float)dim);
+    glUniform3f(glGetUniformLocation(prog, "u_dust_origin"), ox, oy, oz);
+}
+
 /* Upload this frame's glare to a program whose shader calls veil_vis(). */
 void render_star_veil_uniforms(unsigned int prog)
 {
@@ -639,6 +684,9 @@ static void field_stars_draw(const float vp_camrel[16])
         glUniform1f(s_field_time,    (float)g_render_time);
         glUniform1f(s_field_twinkle, (float)g_settings.star_twinkle);
         render_star_veil_uniforms(s_field_shader);
+        /* The Sun (cube centre, world origin) in the field-reference frame. */
+        render_dust_uniforms(s_field_shader, (float)-s_field_ref[0],
+                             (float)-s_field_ref[1], (float)-s_field_ref[2]);
         glBindVertexArray(s_field_vao);
         glEnable(GL_DEPTH_TEST);
         glDepthMask(GL_FALSE);
@@ -730,6 +778,11 @@ static void clusters_render(const float vp_camrel[16])
     glUniform1f(s_cluster_time,    0.0f);
     glUniform1f(s_cluster_twinkle, 0.0f);   /* no twinkle on aggregate glows */
     render_star_veil_uniforms(s_cluster_shader);  /* star_dot.vert veils */
+    /* Cluster glows sum catalog magnitudes, which contain the Sun's column. */
+    render_dust_uniforms(s_cluster_shader, (float)-g_cam.pos[0],
+                         (float)-g_cam.pos[1], (float)-g_cam.pos[2]);
+    glUniform1f(glGetUniformLocation(s_cluster_shader, "u_dust_extend"), 0.0f);
+    glUniform1f(glGetUniformLocation(s_cluster_shader, "u_dust_sun_corr"), 1.0f);
     glBindVertexArray(s_cluster_vao);
     glBindBuffer(GL_ARRAY_BUFFER, s_cluster_vbo);
     if (count > s_cluster_vbo_cap) {
@@ -1545,6 +1598,8 @@ void render_init(void) {
      * but clamped to depth 0 rather than discarded. */
     glEnable(GL_DEPTH_CLAMP);
 
+    dust_tex_init();
+
     /* --- Sphere billboard shader --- */
     s_sphere_shader = gl_shader_load("assets/shaders/phong.vert",
                                      "assets/shaders/phong.frag");
@@ -2324,7 +2379,15 @@ static void field_stars_ensure(void)
         /* Catalogue magnitude wins when the star carries one (StarBin v2): it
          * is what the sky actually shows, where the radius-based estimate is a
          * guess from temperature. */
-        if (!isnan(fs->abs_mag)) absmag = fs->abs_mag;
+        if (!isnan(fs->abs_mag)) {
+            /* A catalog magnitude is observed, so it already contains the dust
+             * between the Sun and the star; take it out once here, and the
+             * shader adds back the dust between the CAMERA and the star. */
+            double p[3] = { (double)fs->pos_ly[0] * LY_RS,
+                            (double)fs->pos_ly[1] * LY_RS,
+                            (double)fs->pos_ly[2] * LY_RS };
+            absmag = (float)(fs->abs_mag - dust_field_ag_from_sun(p));
+        }
         buf[w*8+0] = (float)((double)fs->pos_ly[0] * LY_RS - cx);
         buf[w*8+1] = (float)((double)fs->pos_ly[1] * LY_RS - cy);
         buf[w*8+2] = (float)((double)fs->pos_ly[2] * LY_RS - cz);
@@ -3666,6 +3729,12 @@ dyn_ready:
     if (dot_count > 0) {
         glUseProgram(s_dot_shader);
         glUniformMatrix4fv(s_dot_vp, 1, GL_FALSE, vp_camrel);
+        /* Body magnitudes are intrinsic (radius estimate, or a catalog one
+         * made intrinsic at materialisation), so no Sun correction. */
+        render_dust_uniforms(s_dot_shader, (float)-g_cam.pos[0],
+                             (float)-g_cam.pos[1], (float)-g_cam.pos[2]);
+        glUniform1f(glGetUniformLocation(s_dot_shader, "u_dust_extend"), 0.0f);
+        glUniform1f(glGetUniformLocation(s_dot_shader, "u_dust_sun_corr"), 0.0f);
         glUniform1f(s_dot_time,    (float)g_render_time);
         glUniform1f(s_dot_twinkle, (float)g_settings.star_twinkle);
         glBindVertexArray(s_dot_vao);
