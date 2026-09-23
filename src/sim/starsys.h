@@ -34,6 +34,11 @@ int  starsys_enabled(void);
  * render.c hands the galaxy shaders (drives the arm-shear term). */
 void starsys_tick(const double cam_pos_au[3], float time_s);
 
+/* Round-trip test of the persistent deltas (promote, modify, demote, let
+ * time pass, re-promote, compare against Kepler). Returns 1 on pass. Run by
+ * --selftest-starsys. */
+int starsys_selftest(void);
+
 /* Suppressed candidates of galaxy `gal` for the finest star cascade:
  * fills out[i][4] = {cellx, celly, cellz, sub}. Returns the count (<= max).
  * Read by galaxy.c each frame to hide promoted stars' point sprites. */

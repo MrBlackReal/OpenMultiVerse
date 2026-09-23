@@ -266,6 +266,15 @@ int body_root_star(int i);
 void body_world_to_local_surface_dir(int body_idx, const double world_dir[3],
                                      float out[3]);
 
+/* Two-body propagation: advance the relative state (r0, v0) of a body about
+ * its primary by dt seconds, mu = G * (M_primary + m_body). Universal-variable
+ * Kepler (Vallado, alg. 8), so ellipses, parabolas and hyperbolas all work;
+ * elliptic spans are first reduced modulo the period, so a billion years
+ * costs what one orbit costs. Returns 0 if the solver failed to converge
+ * (then r, v are a straight-line drift). */
+int kepler_propagate(const double r0[3], const double v0[3], double mu, double dt,
+                     double r[3], double v[3]);
+
 /* Planetocentric state from simple moon elements (a in km, angles in degrees). */
 void moon_to_state(
         double a_km, double e, double i_deg,

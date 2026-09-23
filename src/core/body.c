@@ -317,6 +317,71 @@ void body_release(Body *b)
     free(b->bh);     b->bh = NULL;
 }
 
+static void stumpff(double z, double *C, double *S)
+{
+    if (z > 1e-8) {
+        double s = sqrt(z);
+        *C = (1.0 - cos(s)) / z;
+        *S = (s - sin(s)) / (s * z);
+    } else if (z < -1e-8) {
+        double s = sqrt(-z);
+        *C = (cosh(s) - 1.0) / -z;
+        *S = (sinh(s) - s) / (s * -z);
+    } else {
+        *C = 0.5 - z / 24.0;
+        *S = 1.0 / 6.0 - z / 120.0;
+    }
+}
+
+int kepler_propagate(const double r0[3], const double v0[3], double mu, double dt,
+                     double r[3], double v[3])
+{
+    double r0n = sqrt(r0[0]*r0[0] + r0[1]*r0[1] + r0[2]*r0[2]);
+    double v02 = v0[0]*v0[0] + v0[1]*v0[1] + v0[2]*v0[2];
+    if (!(r0n > 0.0) || !(mu > 0.0)) goto drift;
+    double sqmu  = sqrt(mu);
+    double vr0   = (r0[0]*v0[0] + r0[1]*v0[1] + r0[2]*v0[2]) / r0n;
+    double alpha = 2.0 / r0n - v02 / mu;             /* 1/a */
+
+    if (alpha > 1e-30) {                             /* ellipse: wrap */
+        double period = 2.0 * PI / (sqmu * alpha * sqrt(alpha));
+        dt = fmod(dt, period);
+    }
+
+    double chi = (alpha > 0.0) ? sqmu * alpha * dt
+                               : copysign(sqrt(fabs(dt) * sqmu / r0n) , dt);
+    double C = 0.5, S = 1.0 / 6.0, z = 0.0;
+    int ok = 0;
+    for (int it = 0; it < 60; it++) {
+        z = alpha * chi * chi;
+        stumpff(z, &C, &S);
+        double F  = r0n * vr0 / sqmu * chi * chi * C
+                  + (1.0 - alpha * r0n) * chi * chi * chi * S
+                  + r0n * chi - sqmu * dt;
+        double dF = r0n * vr0 / sqmu * chi * (1.0 - z * S)
+                  + (1.0 - alpha * r0n) * chi * chi * C + r0n;
+        double step = F / dF;
+        chi -= step;
+        if (fabs(step) <= 1e-12 * (fabs(chi) + 1.0)) { ok = 1; break; }
+    }
+    if (!ok) goto drift;
+    z = alpha * chi * chi;
+    stumpff(z, &C, &S);
+
+    double f = 1.0 - chi * chi / r0n * C;
+    double g = dt - chi * chi * chi * S / sqmu;
+    for (int k = 0; k < 3; k++) r[k] = f * r0[k] + g * v0[k];
+    double rn = sqrt(r[0]*r[0] + r[1]*r[1] + r[2]*r[2]);
+    double fd = sqmu / (rn * r0n) * (alpha * chi * chi * chi * S - chi);
+    double gd = 1.0 - chi * chi / rn * C;
+    for (int k = 0; k < 3; k++) v[k] = fd * r0[k] + gd * v0[k];
+    return 1;
+
+drift:
+    for (int k = 0; k < 3; k++) { r[k] = r0[k] + v0[k] * dt; v[k] = v0[k]; }
+    return 0;
+}
+
 Trail *trail_new(const double pos[3], const double vel[3])
 {
     /* calloc zeroes the sample buffer and every counter; only the non-zero

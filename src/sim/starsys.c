@@ -50,7 +50,62 @@ typedef struct {
     int    nbody;
     double pos_au[3];            /* star world position, AU               */
     char   name[32];             /* star name (slot-reuse guard)          */
+    double seed_mass[SS_MAX_BODIES];   /* as generated: the "untouched"   */
+    double seed_radius[SS_MAX_BODIES]; /* reference for starsys deltas    */
+    int    restored;             /* rebuilt from a delta, not the seed    */
 } Promoted;
+
+/* ── persistent deltas ───────────────────────────────────────────────────────
+ * A promoted system is regenerated from its cell seed, so an untouched one
+ * needs nothing stored: position is a pure function of (seed, t). A system
+ * something HAPPENED to -- a planet absorbed, a mass changed, a body added,
+ * the star evolved -- would come back pristine. At demotion such a system is
+ * snapshotted (every body rooted at the star, parents first, each state
+ * relative to its parent), and on re-promotion it is rebuilt from the
+ * snapshot with every orbit advanced by the elapsed time with
+ * kepler_propagate(). Only modified systems are stored. */
+typedef struct {
+    char   name[32];
+    int    parent;               /* snapshot index; -1 for the star         */
+    int    is_star, is_black_hole, is_comet;
+    double mass, radius;
+    double pos[3], vel[3];       /* star: absolute; others: rel. to parent  */
+    float  col[3];
+    double obliquity, rotation_rate, rotation_angle;
+    float  atm_color[3], atm_intensity, atm_scale;
+    int    star_phase;
+    double age_yr, ms_lifetime_yr, base_radius;
+    float  base_col[3];
+} DeltaBody;
+
+typedef struct {
+    int        gal;
+    long       cx, cy, cz;
+    int        sub;
+    double     t_saved;          /* g_sim_time at demotion                  */
+    int        star_dead;        /* the star is gone: nothing to rebuild    */
+    int        n;
+    DeltaBody *b;
+} SystemDelta;
+
+static SystemDelta *s_delta = NULL;
+static int          s_delta_n = 0, s_delta_cap = 0;
+
+static SystemDelta *delta_find(int gal, long cx, long cy, long cz, int sub)
+{
+    for (int i = 0; i < s_delta_n; i++) {
+        SystemDelta *d = &s_delta[i];
+        if (d->gal == gal && d->cx == cx && d->cy == cy && d->cz == cz && d->sub == sub)
+            return d;
+    }
+    return NULL;
+}
+
+static void delta_remove(SystemDelta *d)
+{
+    free(d->b);
+    *d = s_delta[--s_delta_n];
+}
 
 static Promoted s_prom[SS_MAX];
 static double   s_since_scan = 1e9;
@@ -262,6 +317,91 @@ static float crossfade_gain(const double cam_au[3])
     return t * t * (3.0f - 2.0f * t);
 }
 
+/* Alive bodies whose parent chain ends at `star`, parents before children.
+ * Fills out[] (up to max); returns the count. An O(N) scan, but it only runs
+ * at demotion. */
+static int system_members(int star, int *out, int max)
+{
+    static int depth[256];
+    int n = 0;
+    for (int i = 0; i < g_nbodies && n < max && n < 256; i++) {
+        if (!g_bodies[i].alive || body_root_star(i) != star) continue;
+        int d = 0;
+        for (int p = i; g_bodies[p].parent >= 0 && d < 64; p = g_bodies[p].parent) d++;
+        /* insertion by depth, stable: parents always precede children */
+        int j = n++;
+        while (j > 0 && depth[j - 1] > d) { out[j] = out[j - 1]; depth[j] = depth[j - 1]; j--; }
+        out[j] = i;  depth[j] = d;
+    }
+    return n;
+}
+
+/* Would regenerating this system from its seed lose anything? */
+static int system_modified(const Promoted *p, int star, const int *mem, int nmem)
+{
+    if (p->restored) return 1;
+    if (star < 0 || !g_bodies[star].alive) return 1;
+    if (g_bodies[star].star_phase != STAR_MAIN_SEQUENCE) return 1;
+    if (nmem != p->nbody) return 1;                 /* a body added or lost */
+    for (int i = 0; i < p->nbody; i++) {
+        int idx = body_handle_resolve(p->bh[i]);
+        if (idx < 0 || body_root_star(idx) != star) return 1;
+        const Body *b = &g_bodies[idx];
+        if (fabs(b->mass - p->seed_mass[i]) > 1e-9 * p->seed_mass[i]) return 1;
+        if (fabs(b->radius - p->seed_radius[i]) > 1e-9 * p->seed_radius[i]) return 1;
+    }
+    (void)mem;
+    return 0;
+}
+
+static void delta_save(const Promoted *p, int star, const int *mem, int n)
+{
+    SystemDelta *d = delta_find(p->gal, p->cx, p->cy, p->cz, p->sub);
+    if (d) delta_remove(d);
+    if (s_delta_n == s_delta_cap) {
+        int cap = s_delta_cap ? s_delta_cap * 2 : 16;
+        SystemDelta *t = (SystemDelta *)realloc(s_delta, (size_t)cap * sizeof *t);
+        if (!t) return;
+        s_delta = t;  s_delta_cap = cap;
+    }
+    d = &s_delta[s_delta_n];
+    memset(d, 0, sizeof *d);
+    d->gal = p->gal; d->cx = p->cx; d->cy = p->cy; d->cz = p->cz; d->sub = p->sub;
+    d->t_saved = g_sim_time;
+    if (star < 0 || !g_bodies[star].alive) {
+        d->star_dead = 1;                 /* keep the fact, not the bodies */
+        s_delta_n++;
+        return;
+    }
+    d->b = (DeltaBody *)calloc((size_t)n, sizeof *d->b);
+    if (!d->b) return;
+    for (int k = 0; k < n; k++) {
+        const Body *b = &g_bodies[mem[k]];
+        DeltaBody *e = &d->b[k];
+        snprintf(e->name, sizeof e->name, "%s", b->name);
+        e->parent = -1;
+        for (int j = 0; j < k; j++) if (mem[j] == b->parent) { e->parent = j; break; }
+        e->is_star = b->is_star;  e->is_black_hole = b->is_black_hole;
+        e->is_comet = b->is_comet;
+        e->mass = b->mass;  e->radius = b->radius;
+        for (int q = 0; q < 3; q++) {
+            const Body *pb = e->parent >= 0 ? &g_bodies[mem[e->parent]] : NULL;
+            e->pos[q] = b->pos[q] - (pb ? pb->pos[q] : 0.0);
+            e->vel[q] = b->vel[q] - (pb ? pb->vel[q] : 0.0);
+            e->col[q] = b->col[q];
+            e->atm_color[q] = b->atm_color[q];
+            e->base_col[q] = b->base_col[q];
+        }
+        e->obliquity = b->obliquity;  e->rotation_rate = b->rotation_rate;
+        e->rotation_angle = b->rotation_angle;
+        e->atm_intensity = b->atm_intensity;  e->atm_scale = b->atm_scale;
+        e->star_phase = b->star_phase;  e->age_yr = b->age_yr;
+        e->ms_lifetime_yr = b->ms_lifetime_yr;  e->base_radius = b->base_radius;
+    }
+    d->n = n;
+    s_delta_n++;
+}
+
 static void demote(Promoted *p)
 {
     /* Slot-reuse guard: only kill bodies that are still ours (a promoted
@@ -274,19 +414,109 @@ static void demote(Promoted *p)
      * killed. The slot generation is exact: it changes on every reuse, so a
      * handle taken at promotion resolves if and only if the same body is
      * still in that slot. */
+    int star = body_handle_resolve(p->bh[0]);
+    static int mem[256];
+    int nmem = (star >= 0 && g_bodies[star].alive) ? system_members(star, mem, 256) : 0;
+    int saved = system_modified(p, star, mem, nmem);
+    if (saved) delta_save(p, star, mem, nmem);
+
     for (int i = 0; i < p->nbody; i++) {
         int idx = body_handle_resolve(p->bh[i]);
         if (idx < 0) continue;            /* absorbed, or slot reused */
         g_bodies[idx].alive = 0;
     }
+    /* Everything else orbiting the star -- bodies added after promotion, or
+     * collision remnants -- goes with it; left alive they would orbit
+     * nothing. */
+    for (int k = 0; k < nmem; k++) g_bodies[mem[k]].alive = 0;
     physics_mark_timestep_dirty();   /* bodies removed — rebuild timestep model */
-    fprintf(stdout, "[StarSys] demoted '%s' (%d bodies)\n", p->name, p->nbody);
+    fprintf(stdout, "[StarSys] demoted '%s' (%d bodies%s)\n", p->name,
+            nmem > p->nbody ? nmem : p->nbody, saved ? ", delta saved" : "");
     p->active = 0;
+}
+
+static void on_body_added(int idx)
+{
+    trails_add_body(idx);
+    trails_reset_body(idx);
+    labels_add_body(idx);
+    collision_on_body_added(idx);
+}
+
+/* Rebuild a system from its delta, every orbit advanced to now. */
+static void restore(Promoted *p, const SystemDelta *d)
+{
+    double dt = g_sim_time - d->t_saved;
+    int    *ni = (int *)malloc((size_t)d->n * sizeof(int));
+    double (*ap)[3] = malloc((size_t)d->n * sizeof *ap);
+    double (*av)[3] = malloc((size_t)d->n * sizeof *av);
+    if (!ni || !ap || !av) { free(ni); free(ap); free(av); return; }
+
+    for (int k = 0; k < d->n; k++) {
+        const DeltaBody *e = &d->b[k];
+        ni[k] = -1;
+        if (k == 0 || e->parent < 0) {
+            /* The star drifts inertially; nothing in its own system is
+             * massive enough to matter over the gap. */
+            for (int q = 0; q < 3; q++) {
+                ap[k][q] = e->pos[q] + e->vel[q] * dt;
+                av[k][q] = e->vel[q];
+            }
+        } else {
+            const DeltaBody *pe = &d->b[e->parent];
+            double r[3], v[3];
+            kepler_propagate(e->pos, e->vel, g_laws.G * (pe->mass + e->mass), dt, r, v);
+            for (int q = 0; q < 3; q++) {
+                ap[k][q] = ap[e->parent][q] + r[q];
+                av[k][q] = av[e->parent][q] + v[q];
+            }
+        }
+
+        BodyCreateSpec s;
+        memset(&s, 0, sizeof s);
+        s.name = e->name;
+        s.mass = e->mass;  s.radius = e->radius;
+        s.is_star = e->is_star;
+        s.parent = (e->parent >= 0) ? ni[e->parent] : -1;
+        s.obliquity = e->obliquity;  s.rotation_rate = e->rotation_rate;
+        s.atm_intensity = e->atm_intensity;  s.atm_scale = e->atm_scale;
+        for (int q = 0; q < 3; q++) {
+            s.pos[q] = ap[k][q];  s.vel[q] = av[k][q];
+            s.col[q] = e->col[q];  s.atm_color[q] = e->atm_color[q];
+        }
+        int idx = universe_add_body(&s);
+        if (idx < 0) break;
+        Body *b = &g_bodies[idx];
+        b->is_black_hole = (uint8_t)e->is_black_hole;
+        b->is_comet = (uint8_t)e->is_comet;
+        b->rotation_angle = fmod(e->rotation_angle + e->rotation_rate * dt, 2.0 * PI);
+        b->star_phase = e->star_phase;  b->age_yr = e->age_yr;
+        b->ms_lifetime_yr = e->ms_lifetime_yr;  b->base_radius = e->base_radius;
+        for (int q = 0; q < 3; q++) b->base_col[q] = e->base_col[q];
+        ni[k] = idx;
+        on_body_added(idx);
+        if (p->nbody < SS_MAX_BODIES) {
+            p->seed_mass[p->nbody] = e->mass;
+            p->seed_radius[p->nbody] = e->radius;
+            p->bh[p->nbody] = body_handle(idx);
+            p->body[p->nbody++] = idx;
+        }
+    }
+    free(ni); free(ap); free(av);
+    p->restored = 1;
+    p->active = 1;
+    physics_mark_timestep_dirty();
+    fprintf(stdout, "[StarSys] restored '%s' from its delta (%d bodies, %.3g s later)\n",
+            p->name, d->n, dt);
 }
 
 static void promote(int gal, long cx, long cy, long cz, int sub,
                     const double star_au[3])
 {
+    /* A system whose star is gone stays gone. */
+    SystemDelta *d = delta_find(gal, cx, cy, cz, sub);
+    if (d && d->star_dead) return;
+
     Promoted *p = NULL;
     for (int i = 0; i < SS_MAX; i++)
         if (!s_prom[i].active) { p = &s_prom[i]; break; }
@@ -298,6 +528,12 @@ static void promote(int gal, long cx, long cy, long cz, int sub,
     p->pos_au[1] = star_au[1];
     p->pos_au[2] = star_au[2];
     snprintf(p->name, sizeof(p->name), "OMV %ld.%ld.%ld.%d", cx, cy, cz, sub);
+
+    if (d) {
+        restore(p, d);
+        delta_remove(d);          /* live again; re-saved if still modified */
+        return;
+    }
 
     /* Star mass from the same luminosity hash the shader brightens it with
      * (L ≈ M^3.5 main-sequence), so a brilliant sprite becomes a big star. */
@@ -328,6 +564,8 @@ static void promote(int gal, long cx, long cy, long cz, int sub,
 
     int star = universe_add_body(&spec);
     if (star < 0) { p->active = 0; return; }
+    p->seed_mass[p->nbody] = spec.mass;
+    p->seed_radius[p->nbody] = spec.radius;
     p->bh[p->nbody] = body_handle(star);
     p->body[p->nbody++] = star;
 
@@ -337,10 +575,7 @@ static void promote(int gal, long cx, long cy, long cz, int sub,
         double t = spectral_t_eff(&g_bodies[star]);
         if (t > 0.0) spectral_blackbody_rgb(t, g_bodies[star].col);
     }
-    trails_add_body(star);
-    trails_reset_body(star);
-    labels_add_body(star);
-    collision_on_body_added(star);
+    on_body_added(star);
 
     /* Deterministic planets: circular orbits near the galactic disc plane,
      * rocky inside the snow line, giants outside. */
@@ -438,12 +673,11 @@ static void promote(int gal, long cx, long cy, long cz, int sub,
 
         int idx = universe_add_body(&ps);
         if (idx < 0) break;
+        p->seed_mass[p->nbody] = ps.mass;
+        p->seed_radius[p->nbody] = ps.radius;
         p->bh[p->nbody] = body_handle(idx);
         p->body[p->nbody++] = idx;
-        trails_add_body(idx);
-        trails_reset_body(idx);
-        labels_add_body(idx);
-        collision_on_body_added(idx);
+        on_body_added(idx);
     }
 
     p->active = 1;
@@ -459,6 +693,8 @@ static void promote(int gal, long cx, long cy, long cz, int sub,
 void starsys_reset(void)
 {
     memset(s_prom, 0, sizeof(s_prom));
+    for (int i = 0; i < s_delta_n; i++) free(s_delta[i].b);
+    s_delta_n = 0;                /* deltas belong to the universe just unloaded */
     s_since_scan = 1e9;
 }
 
@@ -474,6 +710,15 @@ int starsys_suppressed(int gal, int out[][4], int max)
         out[n][1] = (int)s_prom[i].cy;
         out[n][2] = (int)s_prom[i].cz;
         out[n][3] = s_prom[i].sub;
+        n++;
+    }
+    /* A star that died while promoted must not come back as a sprite. */
+    for (int i = 0; i < s_delta_n && n < max; i++) {
+        if (!s_delta[i].star_dead || s_delta[i].gal != gal) continue;
+        out[n][0] = (int)s_delta[i].cx;
+        out[n][1] = (int)s_delta[i].cy;
+        out[n][2] = (int)s_delta[i].cz;
+        out[n][3] = s_delta[i].sub;
         n++;
     }
     return n;
@@ -596,4 +841,147 @@ void starsys_tick(const double cam_au[3], float time_s)
             }
         }
     }
+}
+
+/* ── self-test (--selftest-starsys) ─────────────────────────────────────────
+ * The delta round trip, end to end, without flying anywhere: promote a
+ * system, change it, demote, let a year pass, re-promote, and check that the
+ * changes survived and every orbit advanced exactly as Kepler says. */
+int starsys_selftest(void)
+{
+    int fail = 0;
+#define CHECK(c, ...) do { if (c) fprintf(stdout, "[selftest] ok:   " __VA_ARGS__); \
+                           else { fprintf(stdout, "[selftest] FAIL: " __VA_ARGS__); fail++; } \
+                           fprintf(stdout, "\n"); } while (0)
+    starsys_reset();
+    if (galaxy_count() <= 0) { fprintf(stdout, "[selftest] FAIL: no galaxy\n"); return 0; }
+
+    /* A system with at least two planets. Untouched rejects exercise the
+     * pristine path: they must leave no delta behind. */
+    Promoted *p = NULL;
+    long cx;
+    const long cy = 7, cz = -3;
+    const int sub = 1;
+    double pos[3];
+    galaxy_position(0, pos);
+    for (cx = 1000; cx < 1400 && !p; cx++) {
+        double at[3] = { pos[0] + (double)cx * 1e5, pos[1], pos[2] };
+        promote(0, cx, cy, cz, sub, at);
+        for (int i = 0; i < SS_MAX; i++)
+            if (s_prom[i].active && s_prom[i].cx == cx) {
+                if (s_prom[i].nbody >= 3) p = &s_prom[i];
+                else demote(&s_prom[i]);
+            }
+        if (p) break;
+    }
+    if (!p) { fprintf(stdout, "[selftest] FAIL: no multi-planet system found\n"); return 0; }
+    CHECK(s_delta_n == 0, "untouched systems leave no delta (%d)", s_delta_n);
+
+    int star = body_handle_resolve(p->bh[0]);
+    int pb   = body_handle_resolve(p->bh[1]);
+    int pc   = body_handle_resolve(p->bh[2]);
+    char name_b[32], name_c[32];
+    snprintf(name_b, sizeof name_b, "%s", g_bodies[pb].name);
+    snprintf(name_c, sizeof name_c, "%s", g_bodies[pc].name);
+    double mass_c = g_bodies[pc].mass + 1.0e24;
+    int nbody0 = p->nbody;
+
+    /* The things that happen to a system: an absorbed planet, a mass change,
+     * a body added (a moon for planet c). */
+    g_bodies[pb].alive = 0;
+    g_bodies[pc].mass = mass_c;
+    BodyCreateSpec ms;
+    memset(&ms, 0, sizeof ms);
+    ms.name = "selftest moon";
+    ms.mass = 7.0e22;  ms.radius = 1.7e6;  ms.parent = pc;
+    double a_moon = 4.0e8, v_moon = sqrt(g_laws.G * (mass_c + ms.mass) / a_moon);
+    ms.pos[0] = g_bodies[pc].pos[0] + a_moon;
+    ms.pos[1] = g_bodies[pc].pos[1];  ms.pos[2] = g_bodies[pc].pos[2];
+    ms.vel[0] = g_bodies[pc].vel[0];
+    ms.vel[1] = g_bodies[pc].vel[1] + v_moon;  ms.vel[2] = g_bodies[pc].vel[2];
+    ms.col[0] = ms.col[1] = ms.col[2] = 0.8f;
+    int moon = universe_add_body(&ms);
+    BodyHandle hmoon = body_handle(moon);
+    CHECK(moon >= 0 && body_root_star(moon) == star, "moon added under planet c");
+
+    BodyHandle hs[SS_MAX_BODIES];
+    memcpy(hs, p->bh, sizeof hs);
+    demote(p);
+    SystemDelta *d = delta_find(0, cx, cy, cz, sub);
+    CHECK(d != NULL, "modified system saved a delta");
+    CHECK(d && d->n == nbody0 - 1 + 1, "delta holds %d bodies (star + surviving planets + moon)",
+          d ? d->n : -1);
+    int any_alive = 0;
+    for (int i = 0; i < nbody0; i++) if (body_handle_resolve(hs[i]) >= 0) any_alive = 1;
+    CHECK(!any_alive && body_handle_resolve(hmoon) < 0,
+          "demotion killed every member, the added moon included");
+
+    /* Expected states a year later, straight from the delta. */
+    const double dt = 3.15576e7;
+    double exp_c[3] = { 0 }, exp_m[3] = { 0 }, v[3];
+    int kc = -1, km = -1;
+    for (int k = 0; d && k < d->n; k++) {
+        if (!strcmp(d->b[k].name, name_c)) kc = k;
+        if (!strcmp(d->b[k].name, "selftest moon")) km = k;
+    }
+    CHECK(kc > 0 && km > 0 && d->b[km].parent == kc, "moon's parent recorded as planet c");
+    if (kc > 0 && km > 0) {
+        const DeltaBody *c = &d->b[kc], *s0 = &d->b[0], *m = &d->b[km];
+        kepler_propagate(c->pos, c->vel, g_laws.G * (s0->mass + c->mass), dt, exp_c, v);
+        kepler_propagate(m->pos, m->vel, g_laws.G * (c->mass + m->mass), dt, exp_m, v);
+    }
+
+    g_sim_time += dt;
+    double at[3] = { pos[0] + (double)cx * 1e5, pos[1], pos[2] };
+    promote(0, cx, cy, cz, sub, at);
+    Promoted *p2 = NULL;
+    for (int i = 0; i < SS_MAX; i++)
+        if (s_prom[i].active && s_prom[i].cx == cx) p2 = &s_prom[i];
+    CHECK(p2 && p2->restored, "re-promotion restored from the delta");
+    CHECK(delta_find(0, cx, cy, cz, sub) == NULL, "delta consumed while the system is live");
+
+    if (p2) {
+        int s2 = body_handle_resolve(p2->bh[0]);
+        static int mem[256];
+        int n = system_members(s2, mem, 256);
+        int nb = -1, nc = -1, nm = -1;
+        for (int k = 0; k < n; k++) {
+            if (!strcmp(g_bodies[mem[k]].name, name_b)) nb = mem[k];
+            if (!strcmp(g_bodies[mem[k]].name, name_c)) nc = mem[k];
+            if (!strcmp(g_bodies[mem[k]].name, "selftest moon")) nm = mem[k];
+        }
+        CHECK(nb < 0, "absorbed planet b stays gone");
+        CHECK(nc >= 0 && fabs(g_bodies[nc].mass - mass_c) <= 1e-9 * mass_c,
+              "planet c kept its changed mass");
+        CHECK(nm >= 0 && g_bodies[nm].parent == nc, "moon restored around planet c");
+        if (nc >= 0 && nm >= 0) {
+            double ec = 0, em = 0, rc = 0, rm = 0;
+            for (int q = 0; q < 3; q++) {
+                double c = g_bodies[nc].pos[q] - g_bodies[s2].pos[q];
+                double m = g_bodies[nm].pos[q] - g_bodies[nc].pos[q];
+                ec += (c - exp_c[q]) * (c - exp_c[q]);  rc += exp_c[q] * exp_c[q];
+                em += (m - exp_m[q]) * (m - exp_m[q]);  rm += exp_m[q] * exp_m[q];
+            }
+            /* The bound is the world's own resolution here: positions are
+             * absolute doubles ~1e9 AU from the origin, so each carries
+             * ~|pos| * 2^-52 of rounding -- 2e4 m, against a 4e8 m moon
+             * orbit. Anything beyond a few of those would be a real error. */
+            double sa = 0.0;
+            for (int q = 0; q < 3; q++) sa += g_bodies[s2].pos[q] * g_bodies[s2].pos[q];
+            double ulp = 8.0 * 2.220446e-16 * sqrt(sa);
+            CHECK(sqrt(ec) < ulp + 1e-9 * sqrt(rc), "planet c advanced one year along its "
+                  "orbit (err %.3g m, world resolution %.3g m)", sqrt(ec), ulp);
+            CHECK(sqrt(em) < ulp + 1e-9 * sqrt(rm), "moon advanced one year around planet c "
+                  "(err %.3g m, world resolution %.3g m)", sqrt(em), ulp);
+        }
+        demote(p2);
+        CHECK(delta_find(0, cx, cy, cz, sub) != NULL,
+              "a restored system is re-saved when demoted again");
+    }
+    g_sim_time -= dt;
+    starsys_reset();
+#undef CHECK
+    fprintf(stdout, "[selftest] starsys: %s (%d failure%s)\n", fail ? "FAILED" : "passed",
+            fail, fail == 1 ? "" : "s");
+    return fail == 0;
 }

@@ -1536,6 +1536,7 @@ static void print_usage(const char *prog)
 "\n"
 "Benchmark / tools:\n"
 "  --profile               Per-stage frame profiler; prints a report on exit.\n"
+"  --selftest-starsys      Run the procedural-system delta round-trip test; exit.\n"
 "  --profile-gpu           --profile plus per-pass GPU times (timer queries).\n"
 "                          Serialises CPU and GPU, so fps under it is not real.\n"
 "  --benchmark             Scripted galaxy flythrough; prints an FPS report.\n"
@@ -1580,6 +1581,7 @@ int main(int argc, char **argv) {
     const char *cli_focus = NULL;
     const char *cli_shot_script = NULL;
     const char *cli_shot_save   = NULL;
+    int         cli_selftest_starsys = 0;
     int         cli_tour_only = 0, cli_director_only = 0;
     int         cine_dur_set = 0;   /* --duration given explicitly? */
 
@@ -1668,6 +1670,10 @@ int main(int argc, char **argv) {
         /* Load --shot-script, write it back out canonicalised, and exit: a
          * validator for hand-written shots, and what makes the format's
          * round-trip testable without the GUI. */
+        else if (!strcmp(argv[a], "--selftest-starsys")) {
+            cli_selftest_starsys = 1;
+            headless = 1;
+        }
         else if (!strcmp(argv[a], "--shot-save") && a + 1 < argc) {
             cli_shot_save = argv[++a];
             headless = 1;
@@ -1844,6 +1850,13 @@ int main(int argc, char **argv) {
         g_cam.pos[2] = cam_pos[2];
         g_cam.yaw    = cam_yaw;
         g_cam.pitch  = cam_pitch;
+    }
+
+    /* --selftest-starsys: the procedural-system delta round trip; exits. */
+    if (cli_selftest_starsys) {
+        int ok = starsys_selftest();
+        app_quit();
+        return ok ? 0 : 1;
     }
 
     /* --shot-save: load, canonicalise, write, exit. Needs the world (anchor and
