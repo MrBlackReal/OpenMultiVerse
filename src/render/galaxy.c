@@ -133,6 +133,94 @@ static GalaxyInst *s_gal = NULL;
 static int         s_gal_n = 0, s_gal_cap = 0;
 static double      s_gal_built_cam[3] = { 1e300, 0, 0 };
 
+/* Brightness: the SAME magnitude law the stars use, not a separate invented
+ * one. A galaxy gets an absolute magnitude from its size, an apparent
+ * magnitude from its distance, and then star_field.vert's size curve and the
+ * two-tier alpha. Visibility then falls out of the physics at every vantage --
+ * a 2 Gly galaxy is correctly invisible from Earth AND correctly bright when
+ * you are beside it -- with no distance-dependent exposure hack.
+ *
+ * M = GAL_M_REF - 5*log10(r / GAL_R_REF): luminosity goes as r^2, and a
+ * 50 kly disc is about M_V -20.9 (the Milky Way). */
+#define GAL_M_REF   (-20.9f)
+#define GAL_R_REF   (5.0e4f)     /* light-years */
+
+/* ── the real deep sky: SDSS BOSS / eBOSS (tools/fetch_boss.py) ─────────────
+ * 1.9 M galaxies and quasars with measured 3D positions, 2.75 - 18 Gly out,
+ * over a quarter of the sky. They enter galaxy_proc_update() as candidates
+ * alongside the procedural ones, so a real galaxy renders exactly like a
+ * procedural one (volume when big on screen, impostor when small); and a
+ * procedural candidate the survey would have seen is dropped (survey_covers),
+ * so the two never double up -- the arrangement the stars use. */
+#define SURVEYBIN_MAGIC 0x53564D4Fu
+typedef struct { float pos_ly[3]; float z; float absmag; uint8_t tracer, pad[3]; } SurveyRec;
+static SurveyRec *s_sv = NULL;
+static float     *s_sv_rad = NULL;         /* radius, AU (from absmag, once) */
+static int        s_sv_n = 0;
+static uint8_t    s_sv_mask[180][360];     /* Dec row x RA col, 1 = observed */
+static float      s_sv_dmin_ly = 0.0f, s_sv_dmax_ly = 0.0f, s_sv_mlim = 0.0f;
+
+static void survey_load(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stdout, "[Galaxy] no survey (%s): the deep sky is all "
+                        "procedural (tools/fetch_boss.py builds it)\n", path);
+        return;
+    }
+    uint32_t hdr[5];
+    float    fl[3];
+    if (fread(hdr, 4, 5, f) != 5 || fread(fl, 4, 3, f) != 3 ||
+        hdr[0] != SURVEYBIN_MAGIC || hdr[1] != 1 || hdr[3] != 360 || hdr[4] != 180 ||
+        fread(s_sv_mask, 1, sizeof s_sv_mask, f) != sizeof s_sv_mask) {
+        fprintf(stderr, "[Galaxy] %s: not a v1 SurveyBin\n", path);
+        fclose(f);
+        return;
+    }
+    s_sv = (SurveyRec *)malloc((size_t)hdr[2] * sizeof(SurveyRec));
+    if (!s_sv || fread(s_sv, sizeof(SurveyRec), hdr[2], f) != hdr[2]) {
+        fprintf(stderr, "[Galaxy] %s: truncated or out of memory\n", path);
+        free(s_sv); s_sv = NULL;
+        fclose(f);
+        return;
+    }
+    fclose(f);
+    s_sv_n = (int)hdr[2];
+    /* Radius from absolute magnitude through the impostors' own law, run
+     * backwards: M = GAL_M_REF - 5 log10(r / GAL_R_REF). */
+    s_sv_rad = (float *)malloc((size_t)s_sv_n * sizeof(float));
+    if (!s_sv_rad) { free(s_sv); s_sv = NULL; s_sv_n = 0; return; }
+    for (int i = 0; i < s_sv_n; i++)
+        s_sv_rad[i] = (float)(GAL_R_REF * pow(10.0, (GAL_M_REF - s_sv[i].absmag) / 5.0)
+                              * AU_PER_LY);
+    s_sv_dmin_ly = fl[0];  s_sv_dmax_ly = fl[1];  s_sv_mlim = fl[2];
+    fprintf(stdout, "[Galaxy] survey: %d SDSS objects, %.2f - %.2f Gly\n",
+            s_sv_n, s_sv_dmin_ly / 1e9, s_sv_dmax_ly / 1e9);
+}
+
+/* Would the survey have catalogued a galaxy of absolute magnitude M at world
+ * position p (AU)? Seen from the Sun: inside its shell, inside its footprint,
+ * brighter than its limit. */
+static int survey_covers(const double p_au[3], float absmag)
+{
+    if (!s_sv) return 0;
+    double d_ly = sqrt(p_au[0]*p_au[0] + p_au[1]*p_au[1] + p_au[2]*p_au[2]) / AU_PER_LY;
+    if (d_ly < s_sv_dmin_ly || d_ly > s_sv_dmax_ly) return 0;
+    double m = absmag + 5.0 * log10(d_ly / 3.2615638) - 5.0;
+    if (m >= s_sv_mlim) return 0;
+    /* GL -> ecliptic (x, y = GL z, z = GL y) -> equatorial J2000. */
+    const double eps = 23.4392911 * PI / 180.0, ce = cos(eps), se = sin(eps);
+    double lx = p_au[0], ly = p_au[2], lz = p_au[1];
+    double ex = lx, ey = ce * ly - se * lz, ez = se * ly + ce * lz;
+    double ra  = atan2(ey, ex) * 180.0 / PI;   if (ra < 0.0) ra += 360.0;
+    double dec = asin(ez / sqrt(ex*ex + ey*ey + ez*ez)) * 180.0 / PI;
+    int ci = (int)ra, cj = (int)(dec + 90.0);
+    if (ci > 359) ci = 359;
+    if (cj < 0) cj = 0;
+    if (cj > 179) cj = 179;
+    return s_sv_mask[cj][ci];
+}
+
 /* ── distant-galaxy impostors ─────────────────────────────────────────────
  *
  * A galaxy stops being worth raymarching long before it stops being worth
@@ -178,17 +266,6 @@ static int    s_imp_n = 0, s_imp_cap = 0;
 static const double GAL_CELL_MLY[GAL_CASCADES] = { 12.0, 55.0, 260.0, 1200.0, 5500.0 };
 #define GAL_REBUILD_MLY 4.0      /* camera travel that forces a rebuild      */
 #define GAL_IMPOSTOR_PX  1.5f    /* below this projected radius, draw a point */
-/* Brightness: the SAME magnitude law the stars use, not a separate invented
- * one. A galaxy gets an absolute magnitude from its size, an apparent
- * magnitude from its distance, and then star_field.vert's size curve and the
- * two-tier alpha. Visibility then falls out of the physics at every vantage --
- * a 2 Gly galaxy is correctly invisible from Earth AND correctly bright when
- * you are beside it -- with no distance-dependent exposure hack.
- *
- * M = GAL_M_REF - 5*log10(r / GAL_R_REF): luminosity goes as r^2, and a
- * 50 kly disc is about M_V -20.9 (the Milky Way). */
-#define GAL_M_REF   (-20.9f)
-#define GAL_R_REF   (5.0e4f)     /* light-years */
 #define GAL_IMPOSTOR_MINA 0.01f     /* identical floor to galaxy_stars.vert */
 #define GAL_IMPOSTOR_MINPX 4.0f     /* extended source: never a bare point   */
 
@@ -294,6 +371,8 @@ static void equatorial_to_gl(double ra_deg, double dec_deg, double out[3])
 
 void galaxy_init(void)
 {
+    if (!s_sv) survey_load("assets/catalogs/sdss_galaxies.bin");
+
     /* nebula.vert is a generic raymarch carrier (billboard / fullscreen with
      * the same uniform set) — reuse it; only the fragment stage is new. */
     s_shader = gl_shader_load("assets/shaders/nebula.vert",
@@ -839,6 +918,41 @@ void galaxy_set_params(int enabled, float density, int steps,
  * lattices contributing only their brightest members, as galaxy_stars.vert
  * already does for stars) is the next step and is what lets the search radius
  * grow without the count growing with it. */
+/* Top-k selection by a min-heap on (ang, index): O(n log k), where inserting
+ * n unsorted objects into a sorted k-list costs O(n k) -- ~100 ms for a
+ * survey shell of 1.2 M against a 1638 budget. */
+typedef struct { float ang; int idx; } AngIdx;
+static void heap_sift_down(AngIdx *h, int n, int i)
+{
+    for (;;) {
+        int l = 2 * i + 1, r = l + 1, m = i;
+        if (l < n && h[l].ang < h[m].ang) m = l;
+        if (r < n && h[r].ang < h[m].ang) m = r;
+        if (m == i) return;
+        AngIdx t = h[i]; h[i] = h[m]; h[m] = t;
+        i = m;
+    }
+}
+static int angidx_desc(const void *a, const void *b)
+{
+    float x = ((const AngIdx *)a)->ang, y = ((const AngIdx *)b)->ang;
+    return (x < y) - (x > y);
+}
+
+/* One candidate for the live galaxy set, procedural or real. */
+typedef struct { double ang, pos[3], radius; int type; float seed, z; } GalCand;
+
+/* Insert into [lo, cap) of best, kept sorted by angular radius (largest
+ * first); *nb is the level's fill cursor. */
+static void gal_cand_insert(GalCand *best, int *nb, int lo, int cap, const GalCand *c)
+{
+    if (*nb == cap && c->ang <= best[*nb - 1].ang) return;
+    int at = (*nb < cap) ? *nb : cap - 1;
+    while (at > lo && best[at - 1].ang < c->ang) { best[at] = best[at - 1]; at--; }
+    best[at] = *c;
+    if (*nb < cap) (*nb)++;
+}
+
 void galaxy_proc_update(const double cam[3])
 {
     if (!s_gal || s_gal_cap <= GALAXY_COUNT) return;
@@ -853,7 +967,7 @@ void galaxy_proc_update(const double cam[3])
 
     /* Insertion sort into a fixed top-N by angular radius. */
     /* static: GAL_PROC_MAX entries is large, too much for the stack */
-    static struct { double ang, pos[3], radius; int type; float seed, z; } best[GAL_PROC_MAX];
+    static GalCand best[GAL_PROC_MAX];
     int nb = 0;
 
     /* Budget PER LEVEL, not globally. A single top-N by angular size is always
@@ -861,6 +975,44 @@ void galaxy_proc_update(const double cam[3])
      * angular sizes, so they lose every comparison and the deep sky stays
      * empty however many are generated. Each shell keeps its own share. */
     const int lvl_budget = GAL_PROC_MAX / GAL_CASCADES;
+
+    /* Survey objects: distance, shell and angular radius in one parallel
+     * pass, then a counting sort into per-shell buckets. */
+    static int   *sv_lv = NULL, *sv_idx = NULL;
+    static float *sv_ang = NULL;
+    int sv_first[GAL_CASCADES + 2] = { 0 };
+    if (s_sv_n > 0 && !sv_lv) {
+        sv_lv  = (int *)malloc((size_t)s_sv_n * sizeof(int));
+        sv_idx = (int *)malloc((size_t)s_sv_n * sizeof(int));
+        sv_ang = (float *)malloc((size_t)s_sv_n * sizeof(float));
+        if (!sv_lv || !sv_idx || !sv_ang) {
+            free(sv_lv); free(sv_idx); free(sv_ang);
+            sv_lv = sv_idx = NULL; sv_ang = NULL;
+        }
+    }
+    if (sv_lv) {
+        double outer[GAL_CASCADES];
+        for (int lv = 0; lv < GAL_CASCADES; lv++)
+            outer[lv] = GAL_CELL_MLY[lv] * 1e6 * AU_PER_LY * GAL_SPAN_CELLS;
+        #pragma omp parallel for schedule(static)
+        for (int s = 0; s < s_sv_n; s++) {
+            const SurveyRec *r = &s_sv[s];
+            double rx = (double)r->pos_ly[0] * AU_PER_LY - cam[0];
+            double ry = (double)r->pos_ly[1] * AU_PER_LY - cam[1];
+            double rz = (double)r->pos_ly[2] * AU_PER_LY - cam[2];
+            double dist = sqrt(rx*rx + ry*ry + rz*rz);
+            int lv = 0;
+            while (lv < GAL_CASCADES && dist > outer[lv]) lv++;
+            sv_lv[s] = lv;                       /* GAL_CASCADES = beyond all */
+            if (dist < 1.0) dist = 1.0;
+            sv_ang[s] = (float)(s_sv_rad[s] / dist);
+        }
+        for (int s = 0; s < s_sv_n; s++) sv_first[sv_lv[s] + 1]++;
+        for (int lv = 0; lv <= GAL_CASCADES; lv++) sv_first[lv + 1] += sv_first[lv];
+        int fill[GAL_CASCADES + 1];
+        for (int lv = 0; lv <= GAL_CASCADES; lv++) fill[lv] = sv_first[lv];
+        for (int s = 0; s < s_sv_n; s++) sv_idx[fill[sv_lv[s]]++] = s;
+    }
 
     double inner_au = 0.0;
     for (int lv = 0; lv < GAL_CASCADES; lv++) {
@@ -900,26 +1052,74 @@ void galaxy_proc_update(const double cam[3])
 
                 double t = t_lo + (1.0 - t_lo) * gh_hash(cx, cy, cz, kk+5);
                 double r_ly = 3.0e3 * pow(8.0e4 / 3.0e3, t);
-                double r_au = r_ly * AU_PER_LY;
-                double ang  = r_au / dist;               /* angular radius, rad */
-
-                if (nb == lv_cap && ang <= best[nb-1].ang) continue;
-                int at = (nb < lv_cap) ? nb : lv_cap - 1;
-                while (at > lv_base && best[at-1].ang < ang) { best[at] = best[at-1]; at--; }
-                best[at].ang = ang;
-                best[at].pos[0]=px; best[at].pos[1]=py; best[at].pos[2]=pz;
-                best[at].radius = r_au;
+                GalCand c;
+                c.radius = r_ly * AU_PER_LY;
+                c.ang    = c.radius / dist;              /* angular radius, rad */
+                if (nb == lv_cap && c.ang <= best[nb - 1].ang) continue;
+                c.pos[0] = px; c.pos[1] = py; c.pos[2] = pz;
+                /* The survey has this one: a real galaxy stands here. */
+                if (survey_covers(c.pos, GAL_M_REF - 5.0f * log10f((float)(r_ly / GAL_R_REF))))
+                    continue;
                 double ht = gh_hash(cx, cy, cz, kk+6);
-                best[at].type = ht < 0.60 ? GAL_SPIRAL
-                              : (ht < 0.85 ? GAL_ELLIPTICAL : GAL_IRREGULAR);
-                best[at].seed = (float)(gh_hash(cx, cy, cz, kk+7) * 977.0);
+                c.type = ht < 0.60 ? GAL_SPIRAL
+                       : (ht < 0.85 ? GAL_ELLIPTICAL : GAL_IRREGULAR);
+                c.seed = (float)(gh_hash(cx, cy, cz, kk+7) * 977.0);
                 /* Cosmological redshift: z ~ d / (c/H0), Hubble distance
                  * ~14.4 Gly. This is what makes the deep field warm -- distant
                  * galaxies really are redder, and it is the colour gradient a
                  * flat tint cannot produce. */
-                best[at].z = (float)(dist / (AU_PER_LY * 14.4e9));
-                if (nb < lv_cap) nb++;
+                c.z = (float)(dist / (AU_PER_LY * 14.4e9));
+                gal_cand_insert(best, &nb, lv_base, lv_cap, &c);
             }
+        }
+
+        /* Real galaxies in this shell (SDSS), ranked with the procedural
+         * ones. Radius from the absolute magnitude through the same law the
+         * impostors use backwards; ELGs are star-forming discs, the rest
+         * massive ellipticals (QSO hosts included). Bucketed by shell once
+         * per rebuild (below the level loop's setup), so each level walks
+         * only its own objects. */
+        {
+            /* Survey top-(budget) for this shell by angular size, above
+             * whatever the procedural list already beats. */
+            const int K = lv_cap - lv_base;
+            static AngIdx heap[GAL_PROC_MAX];
+            int hn = 0;
+            float floor_ang = (nb == lv_cap) ? (float)best[nb - 1].ang : 0.0f;
+            for (int q = sv_first[lv]; q < sv_first[lv + 1]; q++) {
+                int s = sv_idx[q];
+                float ang = sv_ang[s];
+                if (ang <= floor_ang) continue;
+                if (hn < K) {
+                    heap[hn].ang = ang; heap[hn].idx = s; hn++;
+                    if (hn == K)
+                        for (int i = K / 2 - 1; i >= 0; i--) heap_sift_down(heap, K, i);
+                } else if (ang > heap[0].ang) {
+                    heap[0].ang = ang; heap[0].idx = s;
+                    heap_sift_down(heap, K, 0);
+                }
+            }
+            qsort(heap, (size_t)hn, sizeof *heap, angidx_desc);
+
+            /* Merge with the procedural list (already sorted, largest first)
+             * and keep the top K. */
+            static GalCand merged[GAL_PROC_MAX];
+            int ip = lv_base, is = 0, nm = 0;
+            while (nm < K && (ip < nb || is < hn)) {
+                int take_s = (is < hn) && (ip >= nb || heap[is].ang > best[ip].ang);
+                if (!take_s) { merged[nm++] = best[ip++]; continue; }
+                int s = heap[is++].idx;
+                const SurveyRec *r = &s_sv[s];
+                GalCand *c = &merged[nm++];
+                c->ang = sv_ang[s];
+                c->radius = s_sv_rad[s];
+                for (int k = 0; k < 3; k++) c->pos[k] = (double)r->pos_ly[k] * AU_PER_LY;
+                c->type = (r->tracer == 2) ? GAL_SPIRAL : GAL_ELLIPTICAL;
+                c->seed = (float)(gh_hash(s, 0, 0, 91) * 977.0);
+                c->z = r->z;
+            }
+            memcpy(&best[lv_base], merged, (size_t)nm * sizeof *merged);
+            nb = lv_base + nm;
         }
         inner_au = outer_au;
     }
