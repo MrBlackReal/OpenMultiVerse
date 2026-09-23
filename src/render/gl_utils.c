@@ -57,6 +57,8 @@ static char *inject_prelude(const char *src) {
     char prelude[4096];
     int plen = snprintf(prelude, sizeof(prelude),
         "#define DEPTH_FAR %.8e\n"
+        "#define STAR_FADE_MAG0 %.6f\n"
+        "#define STAR_FADE_FLOOR %.6f\n"
         "#define VEIL_DIFFUSE %.6f\n"
         "#define VEIL_PSF_GLSL %.6f\n"
         "#define VEIL_FLOOR_GLSL %.6f\n"
@@ -114,7 +116,7 @@ static char *inject_prelude(const char *src) {
         "    vec3 k = DUST_K;\n"
         "    return pow(vec3(10.0), -0.4 * av * (k - (k.r + k.g + k.b) / 3.0));\n"
         "}\n",
-        (double)RENDER_DEPTH_FAR, VEIL_DIFFUSE, VEIL_PSF, VEIL_FLOOR, VEIL_CORE_DEG, VEIL_CORE_DEG, VEIL_PSF, VEIL_FLOOR,
+        (double)RENDER_DEPTH_FAR, STAR_FADE_MAG0, STAR_FADE_FLOOR, VEIL_DIFFUSE, VEIL_PSF, VEIL_FLOOR, VEIL_CORE_DEG, VEIL_CORE_DEG, VEIL_PSF, VEIL_FLOOR,
         VEIL_LO, VEIL_HI,
         DUST_AG_PER_AV, DUST_KR, DUST_KG, DUST_KB, DUST_AV_PER_ZGR);
     if (plen < 0 || plen >= (int)sizeof(prelude)) plen = 0;  /* fall back to plain copy */

@@ -265,9 +265,9 @@ void main() {
 
     float size = clamp(7.0 - 0.45 * (m_cam + 1.0), 1.4, 7.0);
     float hdr  = (m_cam < 2.5) ? min(6.0, pow(10.0, 0.28 * (2.5 - m_cam))) : 1.0;
-    float a    = clamp(pow(10.0, -0.4 * (m_cam - 9.0)), 0.0, 1.0) * rim * u_gain;
+    float a    = clamp(pow(10.0, -0.4 * (m_cam - STAR_FADE_MAG0)), 0.0, 1.0) * rim * u_gain;
     float b    = hdr;
-    if (a < 0.01) return;
+    if (a < STAR_FADE_FLOOR) return;
 
     /* Population colour: warm in the bulge, blue-white in the arms, with a
      * per-star temperature spread; HII-knot members skew hot blue. */

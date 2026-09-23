@@ -258,6 +258,76 @@ static int      s_field_vbo_cap    = 0;      /* stars the VBO can hold          
  * float32 cancellation (a_pos - u_cam) that jittered the bulk field at galaxy
  * scale. Refreshed each time the VBO is rebuilt. */
 static double   s_field_ref[3]     = { 0.0, 0.0, 0.0 };
+
+/* The field VBO is sorted into BRICKS: absolute-magnitude band x octree leaf
+ * (at most FIELD_LEAF stars), each with its bounding box and its brightest
+ * star. The octree is adaptive because the catalog is anything but uniform:
+ * median 1.3 kly from the Sun, 99.9% within 15 kly, outliers to 268 kly -- a
+ * fixed 50 ly grid gave 177k cells of about one star each. Per frame a brick is
+ * skipped with no vertex work if it lies wholly inside the near handoff,
+ * wholly past the far-field horizon, or if its brightest star would be past
+ * the fade floor (m > 14) even at the brick's nearest point; the rest go out
+ * in one glMultiDrawArrays.
+ *
+ * Both halves matter. At the default horizon (1e6 AU, ~16 ly) the cut is
+ * spatial: the shader used to transform all 277k stars to keep the few
+ * hundred within reach. With a far horizon the cut is by magnitude, the
+ * stratified LOD SpaceEngine's luminosity-sorted octree levels give -- here
+ * for a stored catalog, which is 9 MB of VBO and needs no streaming. Dust
+ * only dims, so the magnitude test stays conservative with extinction on. */
+#define FIELD_BANDS   6
+#define FIELD_LEAF    1024
+static const float s_field_band_edge[FIELD_BANDS - 1] = { 0.0f, 2.0f, 4.0f, 6.0f, 8.0f };
+typedef struct {
+    int    first, count;    /* VBO range                               */
+    float  mag_min;         /* brightest intrinsic absolute magnitude  */
+    float  lo[3], hi[3];    /* bounding box, AU, field-ref frame       */
+} FieldBrick;
+static FieldBrick *s_field_brick   = NULL;
+static int         s_field_brick_n = 0;
+static GLint      *s_field_md_first = NULL;   /* glMultiDrawArrays scratch */
+static GLsizei    *s_field_md_count = NULL;
+
+typedef struct { int band; uint64_t morton; int star; } FieldSortKey;
+static int field_key_cmp(const void *a, const void *b)
+{
+    const FieldSortKey *x = (const FieldSortKey *)a, *y = (const FieldSortKey *)b;
+    if (x->band != y->band) return (x->band > y->band) - (x->band < y->band);
+    return (x->morton > y->morton) - (x->morton < y->morton);
+}
+
+/* Spread the low 21 bits of v three apart (Morton interleave). */
+static uint64_t morton_spread(uint64_t v)
+{
+    v &= 0x1fffff;
+    v = (v | v << 32) & 0x1f00000000ffffULL;
+    v = (v | v << 16) & 0x1f0000ff0000ffULL;
+    v = (v | v << 8)  & 0x100f00f00f00f00fULL;
+    v = (v | v << 4)  & 0x10c30c30c30c30c3ULL;
+    v = (v | v << 2)  & 0x1249249249249249ULL;
+    return v;
+}
+
+/* Octree leaves over keys[lo, hi), all one band and sorted by Morton code: a
+ * node's children are the contiguous runs sharing the next 3 bits. Emits each
+ * leaf as a [first, count) range into out; returns the new count. */
+static int field_octree_leaves(const FieldSortKey *keys, int lo, int hi, int shift,
+                               int *first, int *count, int n)
+{
+    if (hi - lo <= FIELD_LEAF || shift < 0) {
+        first[n] = lo;  count[n] = hi - lo;
+        return n + 1;
+    }
+    int a = lo;
+    while (a < hi) {
+        uint64_t child = keys[a].morton >> shift & 7;
+        int b = a;
+        while (b < hi && (keys[b].morton >> shift & 7) == child) b++;
+        n = field_octree_leaves(keys, a, b, shift - 3, first, count, n);
+        a = b;
+    }
+    return n;
+}
 static unsigned s_field_generation = 0;      /* g_universe_generation it was built for */
 
 /* Impact ejecta particles — additive GL_POINTS from collision system */
@@ -693,7 +763,42 @@ static void field_stars_draw(const float vp_camrel[16])
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         glEnable(GL_PROGRAM_POINT_SIZE);
-        glDrawArrays(GL_POINTS, 0, s_field_count);
+
+        /* Brick cull (see FieldBrick). Box distances are exact nearest /
+         * farthest points, so every test is conservative. */
+        const double AU_PER_PC = 206264.806;
+        const double m_cut = STAR_FADE_MAG0 - 2.5 * log10(STAR_FADE_FLOOR);
+        const double horizon = g_settings.farfield_horizon_au;
+        double cam[3] = { g_cam.pos[0] - s_field_ref[0], g_cam.pos[1] - s_field_ref[1],
+                          g_cam.pos[2] - s_field_ref[2] };
+        int submitted = 0, ranges = 0;
+        for (int b = 0; b < s_field_brick_n; b++) {
+            const FieldBrick *fb = &s_field_brick[b];
+            double n2 = 0.0, f2 = 0.0;
+            for (int k = 0; k < 3; k++) {
+                double lo = fb->lo[k] - cam[k], hi = fb->hi[k] - cam[k];
+                double nk = lo > 0.0 ? lo : (hi < 0.0 ? -hi : 0.0);
+                double fk = fabs(lo) > fabs(hi) ? fabs(lo) : fabs(hi);
+                n2 += nk * nk;  f2 += fk * fk;
+            }
+            double dmin = sqrt(n2), dmax = sqrt(f2);
+            if (dmax < near_dist || dmin >= horizon) continue;
+            if (dmin > 0.0 &&
+                fb->mag_min + 5.0 * log10(dmin / AU_PER_PC) - 5.0 > m_cut) continue;
+            /* Adjacent bricks share one range: fewer, longer draws. */
+            if (ranges > 0 && s_field_md_first[ranges - 1] + s_field_md_count[ranges - 1] == fb->first)
+                s_field_md_count[ranges - 1] += fb->count;
+            else {
+                s_field_md_first[ranges] = fb->first;
+                s_field_md_count[ranges] = fb->count;
+                ranges++;
+            }
+            submitted += fb->count;
+        }
+        if (ranges > 0)
+            glMultiDrawArrays(GL_POINTS, s_field_md_first, s_field_md_count, ranges);
+        if (profiler_enabled())
+            profiler_zone_add("  field stars submitted (k)", submitted / 1000.0);
         glDisable(GL_PROGRAM_POINT_SIZE);
         glDisable(GL_BLEND);
         glDepthMask(GL_TRUE);
@@ -2369,25 +2474,81 @@ static void field_stars_ensure(void)
     cx /= n; cy /= n; cz /= n;
     s_field_ref[0] = cx; s_field_ref[1] = cy; s_field_ref[2] = cz;
 
-    int w = 0;
+    /* Intrinsic absolute magnitude per star, its band, and its Morton code
+     * on a 2^21 grid over the catalog's bounding cube. */
+    float        *mag  = (float *)malloc((size_t)n * sizeof(float));
+    FieldSortKey *keys = (FieldSortKey *)malloc((size_t)n * sizeof(FieldSortKey));
+    int          *lf   = (int *)malloc((size_t)n * sizeof(int));
+    int          *lc   = (int *)malloc((size_t)n * sizeof(int));
+    if (!mag || !keys || !lf || !lc) {
+        free(mag); free(keys); free(lf); free(lc); free(buf);
+        return;
+    }
+    double ext = 0.0;                       /* half-size of the bounding cube */
+    for (int i = 0; i < n; i++) {
+        const FieldStar *fs = &g_field_stars[i];
+        double e0 = fabs((double)fs->pos_ly[0] * LY_RS - cx);
+        double e1 = fabs((double)fs->pos_ly[1] * LY_RS - cy);
+        double e2 = fabs((double)fs->pos_ly[2] * LY_RS - cz);
+        if (e0 > ext) ext = e0;
+        if (e1 > ext) ext = e1;
+        if (e2 > ext) ext = e2;
+    }
+    ext = ext * 1.0001 + 1.0;
+    /* Parallel: each star is independent and the dust sampler is read-only.
+     * The Sun->star dust columns dominate this one-time build (~1.5 s
+     * serial for the shipped catalog). */
+    #pragma omp parallel for schedule(dynamic, 2048)
     for (int i = 0; i < n; i++) {
         const FieldStar *fs = &g_field_stars[i];
         double Lr = ((double)fs->radius_km * 1000.0) / R_SUN_M;
         double L  = Lr * Lr;
         if (!(L > 1e-6)) L = 1e-6;
         float absmag = (float)(M_SUN - 2.5 * log10(L));   /* distance-independent */
+        double p[3] = { (double)fs->pos_ly[0] * LY_RS, (double)fs->pos_ly[1] * LY_RS,
+                        (double)fs->pos_ly[2] * LY_RS };
         /* Catalogue magnitude wins when the star carries one (StarBin v2): it
          * is what the sky actually shows, where the radius-based estimate is a
-         * guess from temperature. */
-        if (!isnan(fs->abs_mag)) {
-            /* A catalog magnitude is observed, so it already contains the dust
-             * between the Sun and the star; take it out once here, and the
-             * shader adds back the dust between the CAMERA and the star. */
-            double p[3] = { (double)fs->pos_ly[0] * LY_RS,
-                            (double)fs->pos_ly[1] * LY_RS,
-                            (double)fs->pos_ly[2] * LY_RS };
+         * guess from temperature. It is observed, so it already contains the
+         * dust between the Sun and the star; take that out once here, and the
+         * shader adds back the dust between the CAMERA and the star. */
+        if (!isnan(fs->abs_mag))
             absmag = (float)(fs->abs_mag - dust_field_ag_from_sun(p));
-        }
+        int b = 0;
+        while (b < FIELD_BANDS - 1 && absmag >= s_field_band_edge[b]) b++;
+        uint64_t q[3];
+        const double ref[3] = { cx, cy, cz };
+        for (int k = 0; k < 3; k++)
+            q[k] = (uint64_t)((p[k] - ref[k] + ext) / (2.0 * ext) * 2097151.0);
+        mag[i] = absmag;
+        keys[i].band = b;
+        keys[i].morton = morton_spread(q[0]) | morton_spread(q[1]) << 1 |
+                         morton_spread(q[2]) << 2;
+        keys[i].star = i;
+    }
+    qsort(keys, (size_t)n, sizeof *keys, field_key_cmp);
+
+    /* Octree leaves per band. */
+    int nb = 0;
+    for (int lo = 0; lo < n; ) {
+        int hi = lo;
+        while (hi < n && keys[hi].band == keys[lo].band) hi++;
+        nb = field_octree_leaves(keys, lo, hi, 60, lf, lc, nb);
+        lo = hi;
+    }
+
+    /* Fill the VBO in key order; one brick per leaf. */
+    free(s_field_brick);    free(s_field_md_first);    free(s_field_md_count);
+    s_field_brick    = (FieldBrick *)calloc((size_t)nb, sizeof(FieldBrick));
+    s_field_md_first = (GLint *)malloc((size_t)nb * sizeof(GLint));
+    s_field_md_count = (GLsizei *)malloc((size_t)nb * sizeof(GLsizei));
+    if (!s_field_brick || !s_field_md_first || !s_field_md_count) {
+        s_field_brick_n = 0;
+        free(mag); free(keys); free(lf); free(lc); free(buf);
+        return;
+    }
+    for (int w = 0; w < n; w++) {
+        const FieldStar *fs = &g_field_stars[keys[w].star];
         buf[w*8+0] = (float)((double)fs->pos_ly[0] * LY_RS - cx);
         buf[w*8+1] = (float)((double)fs->pos_ly[1] * LY_RS - cy);
         buf[w*8+2] = (float)((double)fs->pos_ly[2] * LY_RS - cz);
@@ -2395,9 +2556,29 @@ static void field_stars_ensure(void)
         buf[w*8+4] = fs->color[1] / 255.0f;
         buf[w*8+5] = fs->color[2] / 255.0f;
         buf[w*8+6] = 1.0f;
-        buf[w*8+7] = absmag;
-        w++;
+        buf[w*8+7] = mag[keys[w].star];
     }
+    for (int j = 0; j < nb; j++) {
+        FieldBrick *fb = &s_field_brick[j];
+        fb->first = lf[j];  fb->count = lc[j];
+        fb->mag_min = 1e9f;
+        for (int k = 0; k < 3; k++) { fb->lo[k] = 1e30f; fb->hi[k] = -1e30f; }
+        for (int w = fb->first; w < fb->first + fb->count; w++) {
+            if (buf[w*8+7] < fb->mag_min) fb->mag_min = buf[w*8+7];
+            for (int k = 0; k < 3; k++) {
+                if (buf[w*8+k] < fb->lo[k]) fb->lo[k] = buf[w*8+k];
+                if (buf[w*8+k] > fb->hi[k]) fb->hi[k] = buf[w*8+k];
+            }
+        }
+    }
+    s_field_brick_n = nb;
+    free(lf);
+    free(lc);
+    fprintf(stdout, "[Render] field bricks: %d (%d magnitude bands x octree "
+                    "leaves of <= %d)\n", s_field_brick_n, FIELD_BANDS, FIELD_LEAF);
+    free(mag);
+    free(keys);
+    int w = n;
     s_field_count = w;
 
     glBindVertexArray(s_field_vao);

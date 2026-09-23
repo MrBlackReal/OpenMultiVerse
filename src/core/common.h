@@ -102,6 +102,12 @@ extern double g_render_time;
  * keep it a round power-friendly magnitude. */
 #define RENDER_DEPTH_FAR  1.0e10f
 
+/* Star-dot visibility by apparent magnitude, shared by every star tier (and
+ * injected into GLSL by the gl_utils prelude): alpha = 10^(-0.4 (m - MAG0)),
+ * clamped to 1, and a dot fainter than FLOOR is not drawn -- m > 14. */
+#define STAR_FADE_MAG0   9.0
+#define STAR_FADE_FLOOR  0.01
+
 /* ------------------------------------------------------------------ system LOD (AU)
  * Distances at which rendering elements fade when flying away from the system. */
 #define SYS_TRAIL_FADE_START  (g_settings.sys_trail_fade_start)

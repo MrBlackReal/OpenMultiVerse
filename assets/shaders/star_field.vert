@@ -68,10 +68,20 @@ void main() {
     float hs   = u_horizon * 0.85;
     float fade = (d > hs) ? (1.0 - smoothstep(hs, u_horizon, d)) : 1.0;
 
-    /* Size bottoms out at m = 11.44; dimming past that point would not show,
-     * so a dust-buried star fades in alpha by the part the size floor hides.
-     * Without dust m == m0 and this is 1. */
-    fade *= pow(10.0, -0.4 * max(0.0, m - max(m0, 11.444)));
+    /* Magnitude fade, the same curve the procedural tier uses
+     * (galaxy_stars.vert), so a catalog star and a procedural one of equal
+     * apparent magnitude look alike -- and a catalog star far enough away to
+     * be invisible actually disappears, which is what lets render.c skip
+     * whole magnitude bands. The catalog stops at m ~ 9.5 seen from the Sun,
+     * so at home this is 1 or nearly (>= 0.64). Dust is already in m. */
+    float vis = clamp(pow(10.0, -0.4 * (m - STAR_FADE_MAG0)), 0.0, 1.0);
+    if (vis < STAR_FADE_FLOOR) {
+        gl_Position  = vec4(2.0, 2.0, 2.0, 1.0);
+        gl_PointSize = 0.0;
+        v_color      = vec4(0.0);
+        return;
+    }
+    fade *= vis;
 
     /* brightness in RGB; fade stays in alpha */
     vec3 col = a_color.rgb * gain * dust_redden(av);
