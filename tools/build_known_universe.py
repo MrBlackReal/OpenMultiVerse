@@ -193,7 +193,11 @@ def dedup_positional(bodies, arcsec=3.0, dist_frac=0.25):
     grid = {}
 
     def key(u):
-        return (int(math.floor(u[0] / r)), int(math.floor(u[1] / r)), int(math.floor(u[2] / r)))
+        return (
+            int(math.floor(u[0] / r)),
+            int(math.floor(u[1] / r)),
+            int(math.floor(u[2] / r)),
+        )
 
     out, dropped = [], 0
     for b in bodies:
@@ -202,7 +206,7 @@ def dedup_positional(bodies, arcsec=3.0, dist_frac=0.25):
             continue
         p = b.get("pos_ly", [0.0, 0.0, 0.0])
         d = math.sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2])
-        if d < 1e-9:                      # the Sun: no direction to match
+        if d < 1e-9:  # the Sun: no direction to match
             out.append(b)
             continue
         u = (p[0] / d, p[1] / d, p[2] / d)
@@ -213,7 +217,9 @@ def dedup_positional(bodies, arcsec=3.0, dist_frac=0.25):
             for dx in (-1, 0, 1):
                 for dy in (-1, 0, 1):
                     for dz in (-1, 0, 1):
-                        for (v, dv, sv) in grid.get((k[0] + dx, k[1] + dy, k[2] + dz), ()):
+                        for v, dv, sv in grid.get(
+                            (k[0] + dx, k[1] + dy, k[2] + dz), ()
+                        ):
                             if sv == src:
                                 continue
                             if math.dist(u, v) > r:
@@ -235,7 +241,7 @@ def dedup_positional(bodies, arcsec=3.0, dist_frac=0.25):
     if dropped:
         print(
             f"[known] dropped {dropped} cross-catalog duplicate stars "
-            f"(same sky position within {arcsec}\", distances within {dist_frac:.0%})"
+            f'(same sky position within {arcsec}", distances within {dist_frac:.0%})'
         )
     return out
 

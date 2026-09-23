@@ -1,5 +1,5 @@
 /*
- * star_veil.h — glare of a nearby star over the background (CINEMATIC.md §8.3a).
+ * star_veil.h — glare of a nearby star over the background (docs/CINEMATIC.md §8.3a).
  *
  * A background source (star, cluster, galaxy or nebula pixel) stays visible
  * only while it outshines the star's glare AT ITS OWN POSITION on the sky:
@@ -57,7 +57,7 @@ static inline float star_veil_vis(const double dir[3], const double sdir[3],
     if (L <= 0.0) return 1.0f;
     double c = (dir[0]*sdir[0] + dir[1]*sdir[1] + dir[2]*sdir[2]) / L;
     c = c < -1.0 ? -1.0 : (c > 1.0 ? 1.0 : c);
-    double th = acos(c) * (180.0 / M_PI);
+    double th = acos(c) * (180.0 / PI);
     if (th < VEIL_CORE_DEG) th = VEIL_CORE_DEG;
     double glare = e_psf * VEIL_PSF / (th * th) + e_floor * VEIL_FLOOR;
     double r = log2((lum > 1e-6 ? lum : 1e-6) / glare);

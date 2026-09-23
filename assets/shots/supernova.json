@@ -1,0 +1,17 @@
+// Supernova: a live core collapse, for the README gallery loop.
+//
+//   ./verse --cinematic --output supernova.mp4 --shot-script assets/shots/supernova.json \
+//           --res 1280x720 --fps 20 --samples 16 --no-audio
+//
+// HD 17092 (6.7 Msun) is the progenitor the benchmark tour detonates too. The
+// "detonate" key kills it as playback crosses t; the anchors then resolve to
+// "HD 17092 Remnant" at the same spot. The timescale ramps (the visible cloud
+// grows only ~0.35 AU per sim-day) while the camera pushes in, so the cloud
+// swells to fill the frame.
+{"name": "Supernova", "keys": [
+    {"t": 0.0, "anchor": "HD 17092", "offset": [66, 38, 80], "look_at": "HD 17092", "fov": 40, "timescale": 1.0, "shutter": 180, "ease": "linear"},
+    {"t": 0.8, "anchor": "HD 17092", "offset": [64, 37, 78], "look_at": "HD 17092", "fov": 40, "timescale": 1.0, "shutter": 180, "detonate": "HD 17092", "ease": "linear"},
+    {"t": 2.5, "anchor": "HD 17092", "offset": [58, 34, 71], "look_at": "HD 17092", "fov": 40, "timescale": 6.0, "shutter": 180, "ease": "linear"},
+    {"t": 6.0, "anchor": "HD 17092", "offset": [44, 26, 54], "look_at": "HD 17092", "fov": 40, "timescale": 40.0, "shutter": 180, "ease": "out"}
+  ]
+}

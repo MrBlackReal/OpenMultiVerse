@@ -11,9 +11,9 @@
 // the Milky Way face-on. Positions come from catalogue coordinates in the
 // simulator's frame; see the generator for the pacing rules.
 {"name": "Showcase", "keys": [
-    {"t": 0.0, "anchor": "Earth", "offset": [-9.649257203e-05, 4.470733736e-05, -0.0001942456408], "look_at": "Earth", "fov": 32, "aperture": 2.8, "focus": "Earth", "timescale": 0.02, "shutter": 180.0, "ease": "inout"},
-    {"t": 5.5, "anchor": "Earth", "offset": [-0.0001396422476, 4.886754131e-05, -0.0001284083772], "look_at": "Earth", "fov": 32, "aperture": 2.8, "focus": "Earth", "timescale": 0.02, "shutter": 180.0, "ease": "inout"},
-    {"t": 11.0, "anchor": "Earth", "offset": [-0.001072444109, 0.0004422666323, -0.0005352974713], "look_at": "Earth", "fov": 36, "aperture": 5.6, "focus": "Earth", "timescale": 0.02, "shutter": 180.0, "ease": "in"},
+    {"t": 0.0, "anchor": "Earth", "offset": [0.0001856282828, 7.858027842e-05, -9.169630261e-05], "look_at": "Earth", "fov": 32, "aperture": 2.8, "focus": "Earth", "timescale": 0.005, "shutter": 180.0, "ease": "inout"},
+    {"t": 5.5, "anchor": "Earth", "offset": [0.0001615408405, 6.497213583e-05, -8.977685488e-05], "look_at": "Earth", "fov": 32, "aperture": 2.8, "focus": "Earth", "timescale": 0.005, "shutter": 180.0, "ease": "inout"},
+    {"t": 11.0, "anchor": "Earth", "offset": [-0.001072444109, 0.0004422666323, -0.0005352974713], "look_at": "Earth", "fov": 36, "aperture": 5.6, "focus": "Earth", "timescale": 0.005, "shutter": 180.0, "ease": "in"},
     {"t": 13.5, "pos": [-0.1309025058, 0.00523388774, 0.9887751154], "yaw": 69.3715, "pitch": -1.8562, "fov": 40, "aperture": 0.0, "timescale": 0.05, "shutter": 120, "ease": "linear"},
     {"t": 16.0, "pos": [0.1789708698, 0.05137695004, 1.81195066], "yaw": 69.3715, "pitch": -2.4434, "fov": 40, "aperture": 0.0, "timescale": 0.05, "shutter": 90, "ease": "linear"},
     {"t": 18.5, "anchor": "Saturn", "offset": [-0.02092775779, 0.005778418036, -0.03863130788], "look_at": "Saturn", "fov": 38, "aperture": 0.0, "timescale": 0.05, "shutter": 120, "ease": "linear"},

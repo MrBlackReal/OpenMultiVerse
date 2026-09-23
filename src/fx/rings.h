@@ -7,6 +7,8 @@
  */
 #pragma once
 
+static const float TWO_PI = 6.28318530718f;
+
 /* rings_init — parse ring configs from the given universe.json path. */
 void rings_init(const char *path);
 

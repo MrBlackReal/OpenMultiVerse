@@ -979,7 +979,7 @@ static void menu_render_settings(void)
 
     igSpacing();
     if (igCollapsingHeader_TreeNodeFlags("Cinematic (look)", 0)) {
-        /* These are the film-out look controls (CINEMATIC.md §8). They live in
+        /* These are the film-out look controls (docs/CINEMATIC.md §8). They live in
          * g_settings and persist, because live --cinematic is the tuning
          * surface: what you dial in here is what films. */
         if (!cinematic_active())
@@ -1059,7 +1059,7 @@ static void menu_render_settings(void)
 
     igSpacing();
     if (igCollapsingHeader_TreeNodeFlags("Cinematic (shot)", 0)) {
-        /* Keyframed camera shots (CINEMATIC.md §9.3/§9.4). Authoring is
+        /* Keyframed camera shots (docs/CINEMATIC.md §9.3/§9.4). Authoring is
          * deliberately available in the NORMAL app, not only under
          * --cinematic: you fly to a framing you like and pin it with K. */
         static char s_shot_path[256] = "assets/shots/untitled.json";

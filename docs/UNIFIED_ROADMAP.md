@@ -1,4 +1,10 @@
-# OpenMultiVerse — Unified Roadmap
+# OpenMultiVerse — Unified Roadmap (superseded)
+
+> **Superseded. Do not use for status.** This is the original draft, kept for
+> history. The live roadmap is [UNIFIED_ROADMAP_REFINED.md](UNIFIED_ROADMAP_REFINED.md),
+> and the camera/film work (Layer 6) is [CINEMATIC.md](CINEMATIC.md). Many
+> items marked ⛔ here have since shipped, among them the stellar lifecycle,
+> supernovae, comets, galaxies, orbit prediction and the cinematic camera.
 
 Status:
 

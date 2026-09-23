@@ -1,5 +1,5 @@
 /*
- * cinema_cam.c — keyframed camera shots (see cinema_cam.h, CINEMATIC.md §9).
+ * cinema_cam.c — keyframed camera shots (see cinema_cam.h, docs/CINEMATIC.md §9).
  */
 #include "cinema_cam.h"
 #include "cinematic.h"
@@ -24,6 +24,7 @@ static int    s_playing;
 static int    s_snap;        /* a pre-shot snapshot is held (play or preview) */
 static int    s_previewing;  /* editor scrub: posed from the shot, clock stopped */
 static double s_time;        /* shot playback clock, seconds */
+static double s_event_t = -1.0;  /* "detonate" keys up to here have fired */
 static float  s_save_fov, s_save_aperture, s_save_focus_au;
 static int    s_save_focus_auto;
 static double s_save_timescale;
@@ -80,10 +81,24 @@ static double lerp_geom(double a, double b, double u)
 }
 
 /* World position of a key in AU, resolving an anchor body every call. */
+/* A shot's body by name. A star that died mid-shot (a "detonate" key) is
+ * retired and replaced by "<name> Remnant" at the same spot, so fall back to
+ * that: a shot framed on a star keeps framing what it became. */
+static int shot_body(const char *name)
+{
+    int i = body_find_named(name);
+    if (i < 0 && name[0]) {
+        char rem[64];
+        snprintf(rem, sizeof rem, "%.22s Remnant", name);   /* supernova.c's name */
+        i = body_find_named(rem);
+    }
+    return i;
+}
+
 static void key_position(const CineKey *k, double out[3])
 {
     if (k->anchor[0]) {
-        int i = body_find_named(k->anchor);
+        int i = shot_body(k->anchor);
         if (i >= 0) {
             out[0] = g_bodies[i].pos[0] * RS + k->pos[0];
             out[1] = g_bodies[i].pos[1] * RS + k->pos[1];
@@ -98,8 +113,8 @@ static void key_position(const CineKey *k, double out[3])
 
 static void dir_from_yaw_pitch(float yaw, float pitch, double out[3])
 {
-    double y = yaw   * (M_PI / 180.0);
-    double p = pitch * (M_PI / 180.0);
+    double y = yaw   * (PI / 180.0);
+    double p = pitch * (PI / 180.0);
     out[0] = cos(p) * cos(y);
     out[1] = sin(p);
     out[2] = cos(p) * sin(y);
@@ -118,7 +133,7 @@ static void normalize3(double v[3])
 static void key_direction(const CineKey *k, const double from[3], double out[3])
 {
     if (k->look_at[0]) {
-        int i = body_find_named(k->look_at);
+        int i = shot_body(k->look_at);
         if (i >= 0) {
             out[0] = g_bodies[i].pos[0] * RS - from[0];
             out[1] = g_bodies[i].pos[1] * RS - from[1];
@@ -315,6 +330,24 @@ void cinema_shot_preview_end(void)
 int cinema_shot_previewing(void) { return s_previewing; }
 
 
+/* Fire the "detonate" keys whose time lies in (s_event_t, t]. Driven from the
+ * shot clock (play / advance / set_time) and never from eval, so scrubbing a
+ * preview cannot kill stars, and film-out fires on the same frame every run. */
+static void fire_events(double t)
+{
+    for (int i = 0; i < s_nkeys; i++) {
+        const CineKey *k = &s_keys[i];
+        if (!k->detonate[0] || k->t <= s_event_t || k->t > t) continue;
+        int star = body_find_named(k->detonate);
+        if (star >= 0 && lifecycle_trigger_death(star) > 0)
+            fprintf(stdout, "[CineCam] t=%.2fs detonated %s\n", k->t, k->detonate);
+        else
+            fprintf(stderr, "[CineCam] t=%.2fs cannot detonate '%s' (not an "
+                            "evolvable star)\n", k->t, k->detonate);
+    }
+    s_event_t = t;
+}
+
 void cinema_shot_play(double from_t)
 {
     if (!cinema_shot_active()) {
@@ -323,6 +356,8 @@ void cinema_shot_play(double from_t)
     }
     cinema_shot_begin();
     s_time = from_t;
+    s_event_t = from_t - 1e-9;   /* a key exactly at from_t still fires */
+    fire_events(from_t);
 }
 
 void cinema_shot_stop(void)
@@ -333,12 +368,17 @@ void cinema_shot_stop(void)
 
 int    cinema_shot_playing(void) { return s_playing && cinema_shot_active(); }
 double cinema_shot_time(void)    { return s_time; }
-void   cinema_shot_set_time(double t) { s_time = t; }
+void   cinema_shot_set_time(double t)
+{
+    s_time = t;
+    if (cinema_shot_playing()) fire_events(t);
+}
 
 void cinema_shot_advance(double dt)
 {
     if (!cinema_shot_playing()) return;
     s_time += dt;
+    fire_events(s_time);
     if (s_time >= cinema_shot_duration()) {
         s_time = cinema_shot_duration();
         cinema_shot_stop();
@@ -397,8 +437,8 @@ void cinema_shot_eval(double t)
 
     /* Write back as yaw/pitch so cam_get_dir(), the HUD and the free-look
      * camera all agree with where the shot actually points. */
-    g_cam.yaw   = (float)(atan2(dir[2], dir[0]) * (180.0 / M_PI));
-    g_cam.pitch = (float)(asin(clampd(dir[1], -1.0, 1.0)) * (180.0 / M_PI));
+    g_cam.yaw   = (float)(atan2(dir[2], dir[0]) * (180.0 / PI));
+    g_cam.pitch = (float)(asin(clampd(dir[1], -1.0, 1.0)) * (180.0 / PI));
 
     /* ---- scalars ---------------------------------------------------------
      * Each end of the segment resolves its own value (see key_owner). With no
@@ -469,8 +509,8 @@ void cinema_shot_goto_key(int i)
     key_position(&s_keys[i], pos);
     key_direction(&s_keys[i], pos, dir);
     g_cam.pos[0] = pos[0]; g_cam.pos[1] = pos[1]; g_cam.pos[2] = pos[2];
-    g_cam.yaw   = (float)(atan2(dir[2], dir[0]) * (180.0 / M_PI));
-    g_cam.pitch = (float)(asin(clampd(dir[1], -1.0, 1.0)) * (180.0 / M_PI));
+    g_cam.yaw   = (float)(atan2(dir[2], dir[0]) * (180.0 / PI));
+    g_cam.pitch = (float)(asin(clampd(dir[1], -1.0, 1.0)) * (180.0 / PI));
 }
 
 /* ------------------------------------------------------------------ subject */
@@ -645,6 +685,7 @@ int cinema_shot_load(const char *path)
         snprintf(k->anchor,  sizeof k->anchor,  "%s", json_str(json_get(c, "anchor"),  ""));
         snprintf(k->look_at, sizeof k->look_at, "%s", json_str(json_get(c, "look_at"), ""));
         snprintf(k->subject, sizeof k->subject, "%s", json_str(json_get(c, "subject"), ""));
+        snprintf(k->detonate, sizeof k->detonate, "%s", json_str(json_get(c, "detonate"), ""));
 
         /* An anchored key carries an offset; a free key carries a position. */
         JsonNode *p = json_get(c, k->anchor[0] ? "offset" : "pos");
@@ -720,6 +761,7 @@ int cinema_shot_save(const char *path)
         if (k->shutter   >= 0.0f) fprintf(f, ", \"shutter\": %.3f", (double)k->shutter);
         if (k->cut)               fprintf(f, ", \"cut\": true");
         if (k->subject[0])        fprintf(f, ", \"subject\": \"%s\"", k->subject);
+        if (k->detonate[0])       fprintf(f, ", \"detonate\": \"%s\"", k->detonate);
         fprintf(f, ", \"ease\": \"%s\" }%s\n", ease_name(k->ease),
                 i == s_nkeys - 1 ? "" : ",");
     }

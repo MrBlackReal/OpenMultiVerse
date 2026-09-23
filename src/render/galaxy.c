@@ -338,7 +338,7 @@ void galaxy_render(const float vp_camrel[16],
 
         int fullscreen = needs_fullscreen(center, cam_fwd, radf);
 
-        /* See nebula.c: film-out buys extra march steps (CINEMATIC.md §8.4). */
+        /* See nebula.c: film-out buys extra march steps (docs/CINEMATIC.md §8.4). */
         int base_steps = (int)(s_base_steps * cinematic_quality_scale());
         int steps = base_steps;
         if (!fullscreen) {
@@ -602,7 +602,7 @@ void galaxy_spawn_agn(void)
         /* Active hosts: stretch the (physically tiny) jet into a galaxy-scale kpc
          * beam so it reads against the host from a distance, and aim it along the
          * galaxy's disc axis. The disk/torus stay Rs-sized (a compact bright
-         * nucleus). Target jet length ≈ 0.35 × the galaxy's radius, independent of
+         * nucleus). Target: one galaxy radius per lobe, independent of
          * BH mass; a scale of 1 (quiescent hosts) leaves the jet physical. */
         if (activity > 0.0f) {
             double rs_au    = b->radius / AU;               /* Rs in AU           */

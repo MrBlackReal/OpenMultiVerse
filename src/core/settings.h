@@ -128,7 +128,7 @@ typedef struct {
     double present_dt;         /* min seconds between overlay presents         */
     float  accent_r, accent_g, accent_b;
 
-    /* ---- cinematic renderer (CINEMATIC.md §8) -------------------------
+    /* ---- cinematic renderer (docs/CINEMATIC.md §8) -------------------------
      * The look layer, as opposed to the film-out *job* (resolution, fps,
      * duration, output path) which lives in g_cine. These are here because
      * live --cinematic is the tuning surface: the ImGui Look panel edits them

@@ -99,7 +99,7 @@ static double name_phase(const char *s)
  * galaxy both end up composed without per-case tuning. */
 static double frame_distance(double radius_au, double fov_deg, double fill)
 {
-    double t = tan(fov_deg * 0.5 * (M_PI / 180.0));
+    double t = tan(fov_deg * 0.5 * (PI / 180.0));
     if (t < 1e-6) t = 1e-6;
     if (fill < 0.05) fill = 0.05;
     double d = radius_au / (t * fill);
@@ -110,7 +110,7 @@ static double frame_distance(double radius_au, double fov_deg, double fill)
  * planet is lit and a disc is not seen exactly edge-on. */
 static void offset_dir(double phase, double out[3])
 {
-    double a = phase * 2.0 * M_PI;
+    double a = phase * 2.0 * PI;
     out[0] = cos(a) * 0.86;
     out[1] = 0.38;
     out[2] = sin(a) * 0.86;
@@ -142,7 +142,7 @@ static void offset_dir_axis(const Subject *sub, double phase, double tilt,
                     ax[2]*u[0] - ax[0]*u[2],
                     ax[0]*u[1] - ax[1]*u[0] };
 
-    double a = phase * 2.0 * M_PI;
+    double a = phase * 2.0 * PI;
     double c = cos(tilt), s2 = sin(tilt);
     for (int i = 0; i < 3; i++)
         out[i] = ax[i] * c + (u[i] * cos(a) + v[i] * sin(a)) * s2;
@@ -166,9 +166,9 @@ static void aim_yaw_pitch(const double from[3], const double to[3],
     double L = sqrt(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
     if (L < 1e-12) { *yaw = 0.0f; *pitch = 0.0f; return; }
     d[0] /= L; d[1] /= L; d[2] /= L;
-    *yaw   = (float)(atan2(d[2], d[0]) * (180.0 / M_PI));
+    *yaw   = (float)(atan2(d[2], d[0]) * (180.0 / PI));
     double c = d[1] < -1.0 ? -1.0 : (d[1] > 1.0 ? 1.0 : d[1]);
-    *pitch = (float)(asin(c) * (180.0 / M_PI));
+    *pitch = (float)(asin(c) * (180.0 / PI));
 }
 
 /* ------------------------------------------------------------ subject survey */

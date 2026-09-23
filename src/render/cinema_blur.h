@@ -1,6 +1,6 @@
 /*
  * cinema_blur.h — choose between full and camera-only motion blur
- * (CINEMATIC.md §4.1, §15).
+ * (docs/CINEMATIC.md §4.1, §15).
  *
  * Full motion blur advances the simulation in one slice per accumulation
  * sample, so moving bodies smear; that re-runs the integrator N times a frame

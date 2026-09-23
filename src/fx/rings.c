@@ -56,6 +56,8 @@
  *   § CONTACT  — swept ring/body hitboxes, despawn, tidal perturbation
  *   § GL       — VAO/VBO setup, distance LOD, render path
  *   § API      — public lifecycle, ticking, rendering, collision hooks
+ *
+ * => TWO_PI def lives in rings.h
  */
 #include "rings.h"
 #include "common.h"
@@ -201,7 +203,7 @@ static float clampf(float x, float lo, float hi)
 
 static float wrap_angle_pi(float a)
 {
-    const float TWO_PI = 6.28318530718f;
+    //const float TWO_PI = 6.28318530718f;
     while (a >  (float)PI) a -= TWO_PI;
     while (a < -(float)PI) a += TWO_PI;
     return a;
@@ -1295,7 +1297,7 @@ static int disc_probe_contact_sample(ParticleDisc *d, int other_idx,
     }
 
     {
-        const float TWO_PI = 6.28318530718f;
+        //const float TWO_PI = 6.28318530718f;
         const float SEG_W = TWO_PI / (float)RING_COLLISION_SEGMENTS;
         const float RADIAL_BIN_W = 1.0f / (float)RING_COLLISION_RADIAL_BINS;
         int radial_first = (int)floorf(inner_norm / RADIAL_BIN_W);
@@ -1966,7 +1968,7 @@ void rings_step_system(int root, double dt)
  */
 void rings_tick(double dt)
 {
-    const float TWO_PI = 6.28318530718f;
+    //const float TWO_PI = 6.28318530718f;
 
     for (int d = 0; d < s_n_discs; d++) {
         ParticleDisc *disc = &s_discs[d];

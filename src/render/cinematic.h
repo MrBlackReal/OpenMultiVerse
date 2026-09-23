@@ -1,5 +1,5 @@
 /*
- * cinematic.h — cinematic renderer + deterministic film-out (see CINEMATIC.md).
+ * cinematic.h — cinematic renderer + deterministic film-out (see docs/CINEMATIC.md).
  *
  * Two modes, selected purely by whether --output was given:
  *
@@ -12,7 +12,7 @@
  *                               ceil(duration x fps) frames and pipes them to an
  *                               encoder.
  *
- * ---- accumulation sampling (CINEMATIC.md §4) -------------------------------
+ * ---- accumulation sampling (docs/CINEMATIC.md §4) -------------------------------
  * Each output frame is the average of `samples` sub-frames, each rendered with
  * a jittered sub-pixel offset (and, from phase 2, a jittered lens position and
  * shutter time).  One integer controls antialiasing, depth of field and motion
@@ -111,7 +111,7 @@ int    cinematic_total_frames(void);
  * ray-reconstructed alike. */
 void cinematic_jitter(int s, float *ax, float *ay);
 
-/* ---- depth of field (CINEMATIC.md §8.1/§8.2) ------------------------------
+/* ---- depth of field (docs/CINEMATIC.md §8.1/§8.2) ------------------------------
  * Focus distance in AU for this frame: the nearest body when
  * settings.cine_focus_auto is set, else the manual cine_focus_au. Returns <= 0
  * when depth of field is off or nothing is in focus range, which callers must
@@ -146,7 +146,7 @@ void cinematic_lens_aim(double du, double dv, double focus,
                         const double fwd[3], const double right[3],
                         const double up[3], double out_dir[3]);
 
-/* ---- motion blur (CINEMATIC.md §4.1) --------------------------------------
+/* ---- motion blur (docs/CINEMATIC.md §4.1) --------------------------------------
  * Fraction of the frame interval the shutter is open (shutter angle / 360),
  * clamped to [0,1]. 0 means no motion blur: the sim advances once per output
  * frame as it did in phase 1. */
@@ -158,7 +158,7 @@ int cinematic_motion_blur_active(void);
 
 /* Raymarch step multiplier for the volumetric passes: settings.cine_quality
  * while filming, 1.0 otherwise. Film-out can afford detail that a live frame
- * cannot (CINEMATIC.md §8.4). */
+ * cannot (docs/CINEMATIC.md §8.4). */
 float cinematic_quality_scale(void);
 
 /* Accumulation lifecycle (no-ops when inactive or samples==1). */
@@ -173,7 +173,7 @@ void cinematic_frame_resolve(void);
 void cinematic_picture_band(float *top, float *bottom);
 
 /* ---- encoder --------------------------------------------------------------
- * Raw RGB frames are piped to an ffmpeg subprocess (CINEMATIC.md §7): the
+ * Raw RGB frames are piped to an ffmpeg subprocess (docs/CINEMATIC.md §7): the
  * project links SDL2/GLEW/GL only, and libavcodec would roughly double that for
  * one feature. If ffmpeg is not on PATH, frames are written as a numbered PPM
  * sequence and the command to finish the job is printed — a missing encoder

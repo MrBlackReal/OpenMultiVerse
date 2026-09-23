@@ -71,9 +71,9 @@ void settings_reset(void)
     g_settings.lens_spikes          = 0.0f;
     g_settings.lens_flare           = 0.25f;
     snprintf(g_settings.earth_day_texture, sizeof g_settings.earth_day_texture,
-             "%s", "assets/textures/earth/earth_day_5400.jpg");
+             "%s", "assets/textures/earth/earth_day_16384.jpg");
     snprintf(g_settings.earth_night_texture, sizeof g_settings.earth_night_texture,
-             "%s", "assets/textures/earth/earth_night_3600.jpg");
+             "%s", "assets/textures/earth/earth_night_8192.jpg");
     g_settings.earth_texture_max_px = 0;
     g_settings.flare_ghosts         = 1.0f;
     g_settings.flare_halo           = 1.0f;

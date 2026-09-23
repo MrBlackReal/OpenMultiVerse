@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 make_showcase.py — generate assets/shots/showcase.json, the simulator's
-reference showcase film (CINEMATIC.md §13.1).
+reference showcase film (docs/CINEMATIC.md §13.1).
 
     python3 tools/make_showcase.py            # writes assets/shots/showcase.json
 
@@ -26,13 +26,15 @@ motion sick):
   * the path is a centripetal Catmull-Rom spline (cinema_cam.c), which cannot
     loop or overshoot at a change of scale.
 """
+
 import json
 import math
 import os
 
 # ------------------------------------------------------------------ frame
-AU_PER_LY = 9.461e15 / 1.496e11          # core/common.h LY / AU
-J2000_EPS = 23.4392911                    # core/catalog.c
+AU_PER_LY = 9.461e15 / 1.496e11  # core/common.h LY / AU
+J2000_EPS = 23.4392911  # core/catalog.c
+
 
 def eq_to_gl(ra_deg, dec_deg, dist_ly):
     """Equatorial J2000 -> simulator GL frame, in AU (catalog.c)."""
@@ -45,20 +47,45 @@ def eq_to_gl(ra_deg, dec_deg, dist_ly):
     ze = math.sin(dec)
     x_ecl, y_ecl, z_ecl = xe, ye * ce + ze * se, -ye * se + ze * ce
     r = dist_ly * AU_PER_LY
-    return [x_ecl * r, z_ecl * r, y_ecl * r]          # GL: x, y=ecl z, z=ecl y
+    return [x_ecl * r, z_ecl * r, y_ecl * r]  # GL: x, y=ecl z, z=ecl y
 
-def add(*vs):  return [sum(c) for c in zip(*vs)]
-def sub(a, b): return [x - y for x, y in zip(a, b)]
-def mul(v, s): return [x * s for x in v]
-def norm(v):   return math.sqrt(sum(x * x for x in v))
-def unit(v):   n = norm(v); return [x / n for x in v]
+
+def add(*vs):
+    return [sum(c) for c in zip(*vs)]
+
+
+def sub(a, b):
+    return [x - y for x, y in zip(a, b)]
+
+
+def mul(v, s):
+    return [x * s for x in v]
+
+
+def norm(v):
+    return math.sqrt(sum(x * x for x in v))
+
+
+def unit(v):
+    n = norm(v)
+    return [x / n for x in v]
+
+
 def cross(a, b):
-    return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]
+    return [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+
 
 def yaw_pitch(frm, to):
     d = unit(sub(to, frm))
-    return (math.degrees(math.atan2(d[2], d[0])),
-            math.degrees(math.asin(max(-1.0, min(1.0, d[1])))))
+    return (
+        math.degrees(math.atan2(d[2], d[0])),
+        math.degrees(math.asin(max(-1.0, min(1.0, d[1])))),
+    )
+
 
 def basis(forward):
     """(forward, side, up) with `up` near ecliptic north."""
@@ -67,29 +94,44 @@ def basis(forward):
     up = cross(f, side)
     return f, side, up
 
+
 # ------------------------------------------------------------------ subjects
 # Planet positions at the start of the film (after the 2-year warm-up), from
 # the simulator's own log. Near keys are ANCHORED to the body, so these only
 # steer the transits and the lighting directions; the planets barely move at
 # the film's slow timescales.
-SUN    = [0.0, 0.0, 0.0]
-EARTH  = [-0.137945, -0.000133, 0.970066]
+SUN = [0.0, 0.0, 0.0]
+EARTH = [-0.137945, -0.000133, 0.970066]
 SATURN = [2.741115, -0.258953, 8.618133]
-R_EARTH  = 6371e3 / 1.496e11             # AU
+R_EARTH = 6371e3 / 1.496e11  # AU
 R_SATURN = 58232e3 / 1.496e11
 
-ACEN   = eq_to_gl(219.9021, -60.8340, 4.344)          # Alpha Cen A
-LAGOON = eq_to_gl(270.92, -24.38, 4100.0)             # nebula.c table
+ACEN = eq_to_gl(219.9021, -60.8340, 4.344)  # Alpha Cen A
+LAGOON = eq_to_gl(270.92, -24.38, 4100.0)  # nebula.c table
 LAGOON_R = 4100.0 * AU_PER_LY * math.radians(90.0 / 60.0 / 2.0)
-SGRA   = [x * AU_PER_LY for x in (-1457.805894, -2606.474905, -26505.352053)]
-POLE   = unit(eq_to_gl(192.859, 27.128, 1.0))         # galactic north pole
+SGRA = [x * AU_PER_LY for x in (-1457.805894, -2606.474905, -26505.352053)]
+POLE = unit(eq_to_gl(192.859, 27.128, 1.0))  # galactic north pole
 
 # ------------------------------------------------------------------ keys
 keys = []
 
-def key(t, *, pos=None, anchor=None, offset=None, look_at=None, look_pos=None,
-        subject=None, fov=45.0, aperture=0.0, focus=None, timescale=1.0,
-        shutter=180.0, ease="linear"):
+
+def key(
+    t,
+    *,
+    pos=None,
+    anchor=None,
+    offset=None,
+    look_at=None,
+    look_pos=None,
+    subject=None,
+    fov=45.0,
+    aperture=0.0,
+    focus=None,
+    timescale=1.0,
+    shutter=180.0,
+    ease="linear",
+):
     """One shot key. Transit keys aim with look_pos (a fixed direction) rather
     than look_at, so the title card only appears once a subject key is reached
     — not while the destination is still a dot. `subject` names static scenery
@@ -108,7 +150,7 @@ def key(t, *, pos=None, anchor=None, offset=None, look_at=None, look_pos=None,
     if subject:
         k["subject"] = subject
     k["fov"] = fov
-    k["aperture"] = aperture          # explicit: 0 = depth of field off
+    k["aperture"] = aperture  # explicit: 0 = depth of field off
     if focus:
         k["focus"] = focus
     k["timescale"] = timescale
@@ -116,22 +158,81 @@ def key(t, *, pos=None, anchor=None, offset=None, look_at=None, look_pos=None,
     k["ease"] = ease
     keys.append(k)
 
+
 # ---- 0-11 s  EARTH: slow push around the day side, terminator in view ----
-s_dir = unit(sub(SUN, EARTH))                         # toward the Sun
+s_dir = unit(sub(SUN, EARTH))  # toward the Sun
 f, side, up = basis(s_dir)
+
+
 def earth_off(a_sun, a_side, a_up, radii):
-    return mul(unit(add(mul(f, a_sun), mul(side, a_side), mul(up, a_up))),
-               radii * R_EARTH)
-TS_EARTH = 0.02          # ~0.5 h per second: clouds drift, Earth turns gently
-key(0.0,  anchor="Earth", offset=earth_off(0.80, 0.55, 0.20, 5.2),
-    look_at="Earth", fov=32, aperture=2.8, focus="Earth",
-    timescale=TS_EARTH, ease="inout")
-key(5.5,  anchor="Earth", offset=earth_off(0.55, 0.80, 0.25, 4.6),
-    look_at="Earth", fov=32, aperture=2.8, focus="Earth",
-    timescale=TS_EARTH, ease="inout")
-key(11.0, anchor="Earth", offset=earth_off(0.30, 0.90, 0.35, 30.0),
-    look_at="Earth", fov=36, aperture=5.6, focus="Earth",
-    timescale=TS_EARTH, ease="in")
+    return mul(
+        unit(add(mul(f, a_sun), mul(side, a_side), mul(up, a_up))), radii * R_EARTH
+    )
+
+
+# Earth's spin at the film's start is deterministic: the universe gives it no
+# initial rotation angle, the warm-up advances it by exactly WARMUP_DAYS, and
+# the film then adds TS_EARTH days per second. Europe is in late afternoon at
+# t=0, so the opening sits over Europe on its sunward side and the slow spin
+# carries it toward the terminator (city lights) as the camera pulls back.
+WARMUP_DAYS = 2.0 * 365.0  # settings.c warmup_years
+EARTH_DAY = 0.99727  # rotation_period_days in known_universe.json
+EARTH_OBL = math.radians(23.44)
+TS_EARTH = 0.005  # ~7 min per second: clouds drift, Europe stays in view
+
+
+def earth_site(lat_deg, lon_deg, t):
+    """World direction of a surface point (geographic lat/lon, east positive)
+    t seconds into the film: phong.frag's earth_uv inverted, then
+    local_surface_dir_to_world (spin about the pole, then the obliquity)."""
+    a = 2.0 * math.pi * (WARMUP_DAYS + TS_EARTH * t) / EARTH_DAY
+    la, lo = math.radians(lat_deg), -math.radians(lon_deg)  # EARTH_LON_SIGN -1
+    lx, ly, lz = math.cos(la) * math.cos(lo), math.sin(la), math.cos(la) * math.sin(lo)
+    tx = lx * math.cos(a) - lz * math.sin(a)
+    tz = lx * math.sin(a) + lz * math.cos(a)
+    co, so = math.cos(EARTH_OBL), math.sin(EARTH_OBL)
+    return unit([co * tx + so * ly, -so * tx + co * ly, tz])
+
+
+def europe_off(t, sun_bias, radii):
+    """Above central Europe, leaned toward the Sun so it sits on the lit side
+    of the frame rather than on the terminator."""
+    return mul(unit(add(earth_site(47.0, 10.0, t), mul(f, sun_bias))), radii * R_EARTH)
+
+
+key(
+    0.0,
+    anchor="Earth",
+    offset=europe_off(0.0, 0.35, 5.2),
+    look_at="Earth",
+    fov=32,
+    aperture=2.8,
+    focus="Earth",
+    timescale=TS_EARTH,
+    ease="inout",
+)
+key(
+    5.5,
+    anchor="Earth",
+    offset=europe_off(5.5, 0.55, 4.6),
+    look_at="Earth",
+    fov=32,
+    aperture=2.8,
+    focus="Earth",
+    timescale=TS_EARTH,
+    ease="inout",
+)
+key(
+    11.0,
+    anchor="Earth",
+    offset=earth_off(0.30, 0.90, 0.35, 30.0),
+    look_at="Earth",
+    fov=36,
+    aperture=5.6,
+    focus="Earth",
+    timescale=TS_EARTH,
+    ease="in",
+)
 
 # ---- 11-19 s  transit to SATURN, turning from Earth to face it ----------
 to_sat = unit(sub(SATURN, EARTH))
@@ -142,47 +243,119 @@ key(13.5, pos=p1, look_pos=SATURN, fov=40, timescale=0.05, shutter=120)
 p2 = add(EARTH, mul(to_sat, 0.9), mul(up, 0.08))
 key(16.0, pos=p2, look_pos=SATURN, fov=40, timescale=0.05, shutter=90)
 f_s, side_s, up_s = basis(unit(sub(SUN, SATURN)))
+
+
 def sat_off(a_sun, a_side, a_up, radii):
-    return mul(unit(add(mul(f_s, a_sun), mul(side_s, a_side), mul(up_s, a_up))),
-               radii * R_SATURN)
-key(18.5, anchor="Saturn", offset=add(mul(to_sat, -0.03), sat_off(0.6, 0.3, 0.2, 40)),
-    look_at="Saturn", fov=38, timescale=0.05, shutter=120)
+    return mul(
+        unit(add(mul(f_s, a_sun), mul(side_s, a_side), mul(up_s, a_up))),
+        radii * R_SATURN,
+    )
+
+
+key(
+    18.5,
+    anchor="Saturn",
+    offset=add(mul(to_sat, -0.03), sat_off(0.6, 0.3, 0.2, 40)),
+    look_at="Saturn",
+    fov=38,
+    timescale=0.05,
+    shutter=120,
+)
 
 # ---- 19-28 s  SATURN: slow orbit from the sunlit side round to backlit ----
 TS_SAT = 0.03
-key(21.5, anchor="Saturn", offset=sat_off(0.75, 0.45, 0.30, 26.0),
-    look_at="Saturn", fov=34, aperture=4.0, focus="Saturn",
-    timescale=TS_SAT, ease="inout")
-key(25.0, anchor="Saturn", offset=sat_off(0.05, 0.95, 0.35, 23.0),
-    look_at="Saturn", fov=34, aperture=4.0, focus="Saturn",
-    timescale=TS_SAT, ease="inout")
+key(
+    21.5,
+    anchor="Saturn",
+    offset=sat_off(0.75, 0.45, 0.30, 26.0),
+    look_at="Saturn",
+    fov=34,
+    aperture=4.0,
+    focus="Saturn",
+    timescale=TS_SAT,
+    ease="inout",
+)
+key(
+    25.0,
+    anchor="Saturn",
+    offset=sat_off(0.05, 0.95, 0.35, 23.0),
+    look_at="Saturn",
+    fov=34,
+    aperture=4.0,
+    focus="Saturn",
+    timescale=TS_SAT,
+    ease="inout",
+)
 # Backlit: the camera on the far side, the Sun just behind Saturn's limb.
-key(28.0, anchor="Saturn", offset=sat_off(-0.85, 0.25, 0.20, 26.0),
-    look_at="Saturn", fov=36, aperture=0.0, timescale=TS_SAT, ease="inout")
+key(
+    28.0,
+    anchor="Saturn",
+    offset=sat_off(-0.85, 0.25, 0.20, 26.0),
+    look_at="Saturn",
+    fov=36,
+    aperture=0.0,
+    timescale=TS_SAT,
+    ease="inout",
+)
 
 # ---- 28-36.5 s  pull straight back along the Sun line: no turn ----------
 # Saturn shrinks in front of the Sun over ~6 s, then the whole system does.
-key(31.0, pos=add(SATURN, mul(f_s, -0.12), mul(up_s, 0.02)),
-    look_at="Sun", fov=40, timescale=0.3, shutter=150)
-key(34.0, pos=add(SATURN, mul(f_s, -1.5), mul(up_s, 0.5)),
-    look_at="Sun", fov=45, timescale=1.0, shutter=150)
+key(
+    31.0,
+    pos=add(SATURN, mul(f_s, -0.12), mul(up_s, 0.02)),
+    look_at="Sun",
+    fov=40,
+    timescale=0.3,
+    shutter=150,
+)
+key(
+    34.0,
+    pos=add(SATURN, mul(f_s, -1.5), mul(up_s, 0.5)),
+    look_at="Sun",
+    fov=45,
+    timescale=1.0,
+    shutter=150,
+)
 a_dir = unit(ACEN)
 f_a, side_a, up_a = basis(a_dir)
-key(36.5, pos=add(mul(a_dir, 60.0), mul(up_a, 50.0)),
-    look_at="Sun", fov=48, timescale=1.0, shutter=120)
+key(
+    36.5,
+    pos=add(mul(a_dir, 60.0), mul(up_a, 50.0)),
+    look_at="Sun",
+    fov=48,
+    timescale=1.0,
+    shutter=120,
+)
 
 # ---- 36.5-41.5 s  interstellar: turn from the Sun toward Alpha Centauri ---
-key(39.0, pos=add(mul(a_dir, 2.5e4), mul(up_a, 5e3)),
-    look_pos=ACEN, fov=48, shutter=90)
+key(39.0, pos=add(mul(a_dir, 2.5e4), mul(up_a, 5e3)), look_pos=ACEN, fov=48, shutter=90)
 back = mul(a_dir, -1.0)
-key(41.5, anchor="Alpha Cen A", offset=add(mul(back, 1.8e3), mul(up_a, 400.0)),
-    look_at="Alpha Cen A", fov=45, shutter=120)
+key(
+    41.5,
+    anchor="Alpha Cen A",
+    offset=add(mul(back, 1.8e3), mul(up_a, 400.0)),
+    look_at="Alpha Cen A",
+    fov=45,
+    shutter=120,
+)
 
 # ---- 41.5-49 s  ALPHA CENTAURI: A and B in one frame, slow arc -----------
-key(44.5, anchor="Alpha Cen A", offset=add(mul(back, 70.0), mul(side_a, 30.0), mul(up_a, 22.0)),
-    look_at="Alpha Cen A", fov=42, ease="inout")
-key(49.0, anchor="Alpha Cen A", offset=add(mul(back, 25.0), mul(side_a, 60.0), mul(up_a, 30.0)),
-    look_at="Alpha Cen A", fov=42, ease="inout")
+key(
+    44.5,
+    anchor="Alpha Cen A",
+    offset=add(mul(back, 70.0), mul(side_a, 30.0), mul(up_a, 22.0)),
+    look_at="Alpha Cen A",
+    fov=42,
+    ease="inout",
+)
+key(
+    49.0,
+    anchor="Alpha Cen A",
+    offset=add(mul(back, 25.0), mul(side_a, 60.0), mul(up_a, 30.0)),
+    look_at="Alpha Cen A",
+    fov=42,
+    ease="inout",
+)
 
 # ---- 49-55.5 s  transit toward Sagittarius and the Lagoon nebula ---------
 d_l = unit(sub(LAGOON, ACEN))
@@ -196,45 +369,116 @@ key(55.5, pos=q, look_pos=LAGOON, fov=45, shutter=60)
 
 # ---- 55.5-61.5 s  LAGOON: a close pass along its face --------------------
 q = add(LAGOON, mul(d_l, -2.2 * LAGOON_R * 0.9), mul(side_l, 0.9 * LAGOON_R))
-key(58.0, pos=q, look_pos=LAGOON, subject="Lagoon (M8)", fov=45,
-    shutter=150, ease="inout")
-q = add(LAGOON, mul(d_l, -1.4 * LAGOON_R), mul(side_l, 1.3 * LAGOON_R),
-        mul(up_l, 0.4 * LAGOON_R))
-key(61.5, pos=q, look_pos=LAGOON, subject="Lagoon (M8)", fov=45,
-    shutter=150, ease="inout")
+key(
+    58.0,
+    pos=q,
+    look_pos=LAGOON,
+    subject="Lagoon (M8)",
+    fov=45,
+    shutter=150,
+    ease="inout",
+)
+q = add(
+    LAGOON,
+    mul(d_l, -1.4 * LAGOON_R),
+    mul(side_l, 1.3 * LAGOON_R),
+    mul(up_l, 0.4 * LAGOON_R),
+)
+key(
+    61.5,
+    pos=q,
+    look_pos=LAGOON,
+    subject="Lagoon (M8)",
+    fov=45,
+    shutter=150,
+    ease="inout",
+)
 
 # ---- 61.5-66.5 s  on toward the galactic centre --------------------------
 d_s = unit(sub(SGRA, LAGOON))
 f_c, side_c, up_c = basis(d_s)
 q = add(LAGOON, mul(side_l, 3.0 * LAGOON_R), mul(d_s, 3.0 * LAGOON_R))
-# The galactic interior is featureless haze: cross it quickly (CINEMATIC.md
+# The galactic interior is featureless haze: cross it quickly (docs/CINEMATIC.md
 # §13.1) and spend the time on the black hole instead.
 key(63.0, pos=q, look_pos=SGRA, fov=45, shutter=90)
 q = sub(SGRA, mul(d_s, 2.5e8))
 key(64.5, pos=q, look_pos=SGRA, fov=45, shutter=60)
-key(66.5, anchor="Sagittarius A*", offset=add(mul(d_s, -2e5), mul(up_c, 4e4)),
-    look_at="Sagittarius A*", fov=44, shutter=90)
+key(
+    66.5,
+    anchor="Sagittarius A*",
+    offset=add(mul(d_s, -2e5), mul(up_c, 4e4)),
+    look_at="Sagittarius A*",
+    fov=44,
+    shutter=90,
+)
 
 # ---- 66.5-77 s  SAGITTARIUS A*: in to 2.6 AU, a slow arc round the disc ---
 # The shadow and photon ring need the camera within a few AU (Rs ~0.08 AU).
-key(69.0, anchor="Sagittarius A*", offset=add(mul(d_s, -300.0), mul(up_c, 90.0)),
-    look_at="Sagittarius A*", fov=42, shutter=120)
-key(71.5, anchor="Sagittarius A*", offset=add(mul(d_s, -2.1), mul(side_c, 0.9), mul(up_c, 1.2)),
-    look_at="Sagittarius A*", fov=40, shutter=180, ease="inout")
-key(77.0, anchor="Sagittarius A*", offset=add(mul(d_s, -1.2), mul(side_c, 2.0), mul(up_c, 0.8)),
-    look_at="Sagittarius A*", fov=40, shutter=180, ease="inout")
+key(
+    69.0,
+    anchor="Sagittarius A*",
+    offset=add(mul(d_s, -300.0), mul(up_c, 90.0)),
+    look_at="Sagittarius A*",
+    fov=42,
+    shutter=120,
+)
+key(
+    71.5,
+    anchor="Sagittarius A*",
+    offset=add(mul(d_s, -2.1), mul(side_c, 0.9), mul(up_c, 1.2)),
+    look_at="Sagittarius A*",
+    fov=40,
+    shutter=180,
+    ease="inout",
+)
+key(
+    77.0,
+    anchor="Sagittarius A*",
+    offset=add(mul(d_s, -1.2), mul(side_c, 2.0), mul(up_c, 0.8)),
+    look_at="Sagittarius A*",
+    fov=40,
+    shutter=180,
+    ease="inout",
+)
 
 # ---- 77-90 s  rise out of the disc; the Milky Way face-on ----------------
 # Straight up the galactic pole from the centre, looking back down at it, so
 # the reveal lands centred on the galaxy; then a long, slow hold.
-key(79.5, anchor="Sagittarius A*", offset=add(mul(POLE, 3e3), mul(side_c, 40.0)),
-    look_at="Sagittarius A*", fov=44, shutter=120)
-key(82.0, anchor="Sagittarius A*", offset=add(mul(POLE, 3e7), mul(side_c, 2e6)),
-    look_at="Sagittarius A*", fov=48, shutter=60)
-key(84.5, anchor="Sagittarius A*", offset=add(mul(POLE, 3.2e9), mul(side_c, 4e8)),
-    look_at="Sagittarius A*", subject="Milky Way", fov=50, shutter=120)
-key(90.0, anchor="Sagittarius A*", offset=add(mul(POLE, 5.2e9), mul(side_c, 7e8)),
-    look_at="Sagittarius A*", subject="Milky Way", fov=50, shutter=180, ease="out")
+key(
+    79.5,
+    anchor="Sagittarius A*",
+    offset=add(mul(POLE, 3e3), mul(side_c, 40.0)),
+    look_at="Sagittarius A*",
+    fov=44,
+    shutter=120,
+)
+key(
+    82.0,
+    anchor="Sagittarius A*",
+    offset=add(mul(POLE, 3e7), mul(side_c, 2e6)),
+    look_at="Sagittarius A*",
+    fov=48,
+    shutter=60,
+)
+key(
+    84.5,
+    anchor="Sagittarius A*",
+    offset=add(mul(POLE, 3.2e9), mul(side_c, 4e8)),
+    look_at="Sagittarius A*",
+    subject="Milky Way",
+    fov=50,
+    shutter=120,
+)
+key(
+    90.0,
+    anchor="Sagittarius A*",
+    offset=add(mul(POLE, 5.2e9), mul(side_c, 7e8)),
+    look_at="Sagittarius A*",
+    subject="Milky Way",
+    fov=50,
+    shutter=180,
+    ease="out",
+)
 
 # ------------------------------------------------------------------ write
 HEADER = """// Showcase — 90 s, the reference film for the cinematic renderer.
@@ -251,6 +495,7 @@ HEADER = """// Showcase — 90 s, the reference film for the cinematic renderer.
 // simulator's frame; see the generator for the pacing rules.
 """
 
+
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
     out = os.path.join(here, "..", "assets", "shots", "showcase.json")
@@ -260,7 +505,10 @@ def main():
     body = body.replace("}]}", "}\n  ]\n}")
     with open(out, "w") as fh:
         fh.write(HEADER + body + "\n")
-    print("wrote %s (%d keys, %.1f s)" % (os.path.normpath(out), len(keys), keys[-1]["t"]))
+    print(
+        "wrote %s (%d keys, %.1f s)" % (os.path.normpath(out), len(keys), keys[-1]["t"])
+    )
+
 
 if __name__ == "__main__":
     main()

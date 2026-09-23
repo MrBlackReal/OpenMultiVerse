@@ -297,6 +297,8 @@ void post_set_autoexposure_hold(int hold)
     s_ae_hold = hold ? 1 : 0;
 }
 
+int post_autoexposure_held(void) { return s_ae_hold; }
+
 void post_get_bloom(int *enabled, float *threshold, float *intensity)
 {
     if (enabled)   *enabled   = s_enabled;

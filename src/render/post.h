@@ -53,6 +53,8 @@ void post_set_target(unsigned int fbo);
  * The cinematic renderer holds from the second sub-frame onward, so one output
  * frame is rendered at one exposure. */
 void post_set_autoexposure_hold(int hold);
+/* 1 while held (a sub-frame after the first): per-frame easing must not step. */
+int  post_autoexposure_held(void);
 
 void post_get_bloom(int *enabled, float *threshold, float *intensity);
 void post_set_bloom(int enabled, float threshold, float intensity);

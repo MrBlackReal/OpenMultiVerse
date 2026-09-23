@@ -243,7 +243,7 @@ void nebula_render(const float vp_camrel[16],
         /* Adaptive step count + cheap culling for the far billboard case. The
          * near/inside (fullscreen) case keeps the full step budget. */
         /* Film-out can afford detail a live frame cannot: more march steps
-         * means less banding in the FBM cloud (CINEMATIC.md §8.4). Scaling the
+         * means less banding in the FBM cloud (docs/CINEMATIC.md §8.4). Scaling the
          * base BEFORE the on-screen-size falloff keeps the distance LOD. */
         int base_steps = (int)(s_base_steps * cinematic_quality_scale());
         int steps = base_steps;

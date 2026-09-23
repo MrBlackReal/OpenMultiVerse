@@ -98,6 +98,8 @@ typedef struct {
     float  col[3];    /* chromaticity (max component 1)                     */
     const char *label;/* display name for body-less emitters (static str)   */
     int    nebula;    /* nebula index for nebula emitters, else -1          */
+    int    transient; /* 1 = supernova: a point source with no body         */
+    float  glare;     /* how much of it is a point (lens glare), 0..1       */
 } Emitter;
 
 static Emitter *s_em = NULL;
@@ -152,7 +154,10 @@ static Emitter *emitters_push(void)
         s_em  = (Emitter *)realloc(s_em, (size_t)ncap * sizeof(Emitter));
         s_cap = ncap;
     }
-    return &s_em[s_count++];
+    Emitter *e = &s_em[s_count++];
+    e->transient = 0;
+    e->glare     = 1.0f;
+    return e;
 }
 
 /* Emitter position (SI m): live body position, or the transient snapshot. */
@@ -438,6 +443,10 @@ void radiance_field_rebuild(void)
             }
             e->label  = "supernova";
             e->nebula = -1;
+            e->transient = 1;
+            /* Only the flash is point-like; the core and ejecta cloud are
+             * resolved glows the camera sees rather than glare it through. */
+            e->glare = w;
         }
     }
 
@@ -542,6 +551,8 @@ static inline void rf_topk_insert(int e, double irr, int k,
     }
     out[i].body   = s_em[e].body;
     out[i].nebula = s_em[e].nebula;
+    out[i].transient = s_em[e].transient;
+    out[i].glare     = s_em[e].glare;
     out[i].irr    = irr;
     emitter_pos(&s_em[e], out[i].pos);
     out[i].col[0] = s_em[e].col[0];

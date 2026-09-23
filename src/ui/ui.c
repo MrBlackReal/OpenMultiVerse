@@ -486,7 +486,7 @@ static void draw_tex(TextCache *tc, float x, float y, float h) {
     draw_quad(x, y, w, h);
 }
 
-/* ── cinematic lower-third (CINEMATIC.md §11.1) ───────────────────────────── */
+/* ── cinematic lower-third (docs/CINEMATIC.md §11.1) ───────────────────────────── */
 /* Its own fonts, opened at sizes proportional to the OUTPUT height and
  * reopened if that changes: the HUD fonts are fixed pixel sizes, which would
  * be upscaled (soft) on a 4K film. UTF-8 so names like "Omega/Swan" or a
@@ -1231,11 +1231,12 @@ void ui_render(void) {
     }
 
     /* Benchmark overlay — a centred title, progress bar, and live FPS readout
-     * while the scripted flythrough runs (and the summary while it lingers). */
+     * while the scripted flythrough runs (and the summary while it lingers).
+     * Hidden with the rest of the HUD so --benchmark-shots stills are clean. */
     {
         char stage[128], line[96];
         float prog = 0.0f;
-        if (benchmark_hud(stage, sizeof(stage), line, sizeof(line), &prog)) {
+        if (!g_hud_hidden && benchmark_hud(stage, sizeof(stage), line, sizeof(line), &prog)) {
             SDL_Color accent = {255, 235, 180, 235};
             const float TITLE_H = TH * 1.6f;
             const float PBW = W * 0.42f;

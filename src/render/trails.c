@@ -26,7 +26,8 @@
 #include "math3d.h"
 #include <stdlib.h>
 #include <string.h>
-#include "physics.h"   /* g_orbits_off */
+#include "physics.h"   /* g_orbits_off, physics_active_bodies */
+#include "settings.h"  /* g_settings.active_radius_ly */
 
 static GLuint *s_vao = NULL;
 static GLuint *s_vbo = NULL;
@@ -49,6 +50,8 @@ static double (*s_ref_pos)[3] = NULL;
 
 /* Scratch: linearised trail + live position, interleaved xyz + alpha. */
 static float s_scratch[(TRAIL_LEN + 1) * 4];
+
+static void trail_gl_alloc(int i);
 
 /* ---------------------------------------------------------------- public */
 
@@ -75,87 +78,213 @@ void trails_gl_init(void)
         s_last_count[i] = 0;
         s_emitted[i]    = 0;
 
-        /* Stars never draw a trail (the render loop skips is_star / NULL-trail
-         * bodies), so don't spend a ~0.25 MB dynamic VBO and a driver round-trip
-         * on each.  At galaxy scale that is tens of thousands of buffers — many
-         * GB of VRAM and seconds of init.  A zero handle is safe: it is never
-         * bound, and glDelete* ignores it. */
-        if (i < g_nbodies && (g_bodies[i].is_star || !g_bodies[i].trail)) {
-            s_vao[i] = 0;
-            s_vbo[i] = 0;
-            continue;
-        }
-
-        s_vao[i] = gl_vao_create();
-        s_vbo[i] = gl_vbo_create((TRAIL_LEN + 1) * 4 * sizeof(float),
-                                 NULL, GL_DYNAMIC_DRAW);
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE,
-                              4 * sizeof(float), (void*)0);
-        glEnableVertexAttribArray(1);
-        glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE,
-                              4 * sizeof(float), (void*)(3 * sizeof(float)));
-        glBindVertexArray(0);
+        /* No body owns a trail buffer at init any more — trails_render()
+         * allocates on entry to the active region (see trail_residency()).
+         * A zero handle is safe: it is never bound, and glDelete* ignores it. */
+        s_vao[i] = 0;
+        s_vbo[i] = 0;
+        if (i < g_nbodies && !g_bodies[i].is_star && g_bodies[i].trail)
+            trail_gl_alloc(i);
     }
 }
 
+/* Create this body's VAO + dynamic VBO.  Idempotent: a live handle is kept. */
+static void trail_gl_alloc(int i)
+{
+    if (s_vbo[i]) return;
+    s_vao[i] = gl_vao_create();
+    s_vbo[i] = gl_vbo_create((TRAIL_LEN + 1) * 4 * sizeof(float),
+                             NULL, GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE,
+                          4 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE,
+                          4 * sizeof(float), (void*)(3 * sizeof(float)));
+    glBindVertexArray(0);
+}
+
+/* Grow the per-body side tables to cover at least `need` indices.
+ *
+ * Capacity DOUBLES rather than growing to exactly `need`: promotion adds a star
+ * and its planets one at a time, and growing by one each call made this an
+ * O(n) copy per body.  Returns 0 if it could not grow, leaving s_n — and so
+ * every existing entry — untouched and valid.
+ *
+ * A partial realloc is safe: each successful realloc is stored back, so the
+ * array is merely larger than s_n claims and the next call retries the rest. */
+static int trails_grow(int need)
+{
+    if (need <= s_n) return 1;
+    int cap = s_n ? s_n : MAX_BODIES;
+    while (cap < need) cap *= 2;
+
+    GLuint *vao = (GLuint*)realloc(s_vao, (size_t)cap * sizeof(GLuint));
+    if (vao) s_vao = vao;
+    GLuint *vbo = (GLuint*)realloc(s_vbo, (size_t)cap * sizeof(GLuint));
+    if (vbo) s_vbo = vbo;
+    int *hd = (int*)realloc(s_last_head, (size_t)cap * sizeof(int));
+    if (hd) s_last_head = hd;
+    int *ct = (int*)realloc(s_last_count, (size_t)cap * sizeof(int));
+    if (ct) s_last_count = ct;
+    int *em = (int*)realloc(s_emitted, (size_t)cap * sizeof(int));
+    if (em) s_emitted = em;
+    double (*rp)[3] = (double(*)[3])realloc(s_ref_pos,
+                                            (size_t)cap * sizeof(*s_ref_pos));
+    if (rp) s_ref_pos = rp;
+    if (!vao || !vbo || !hd || !ct || !em || !rp) return 0;
+
+    for (int i = s_n; i < cap; i++) {
+        s_vao[i] = 0;  s_vbo[i] = 0;
+        s_last_head[i] = 0;  s_last_count[i] = 0;  s_emitted[i] = 0;
+        s_ref_pos[i][0] = s_ref_pos[i][1] = s_ref_pos[i][2] = 0.0;
+    }
+    s_n = cap;
+    return 1;
+}
+
+/* Make room for a body added at runtime (starsys promotion, a user-placed
+ * body, a supernova remnant).
+ *
+ * This used to bail on `body_idx >= MAX_BODIES` (128), which silently denied a
+ * trail to every one of those bodies: with a galaxy-scale catalog loaded they
+ * all land tens of thousands of indices above that cap, so a promoted planet
+ * got trail state but never a VBO and drew nothing.  MAX_BODIES is a legacy
+ * bound the rest of the engine has already moved off (render.c:2210,
+ * collision.c:144, physics.c:118); this was the last place it still capped a
+ * body index rather than a fixed cache.
+ *
+ * No GL object is created here — trail_acquire() makes one on demand when the
+ * body enters the active region. */
 void trails_add_body(int body_idx)
 {
-    if (!s_shader || body_idx < 0 || body_idx >= MAX_BODIES) return;
-    if (body_idx < s_n) return;
+    if (!s_shader || body_idx < 0) return;
+    trails_grow(body_idx + 1);
+}
 
-    int new_n = body_idx + 1;
-    GLuint *new_vao = (GLuint*)malloc(new_n * sizeof(GLuint));
-    GLuint *new_vbo = (GLuint*)malloc(new_n * sizeof(GLuint));
-    int *new_head = (int*)malloc(new_n * sizeof(int));
-    int *new_count = (int*)malloc(new_n * sizeof(int));
-    int *new_emit  = (int*)malloc(new_n * sizeof(int));
-    double (*new_ref)[3] = (double(*)[3])calloc(new_n, sizeof(*new_ref));
-    if (!new_vao || !new_vbo || !new_head || !new_count || !new_emit || !new_ref) {
-        free(new_vao); free(new_vbo); free(new_head); free(new_count);
-        free(new_emit); free(new_ref);
-        return;
-    }
-    if (s_n > 0) {
-        memcpy(new_vao, s_vao, s_n * sizeof(GLuint));
-        memcpy(new_vbo, s_vbo, s_n * sizeof(GLuint));
-        memcpy(new_head, s_last_head, s_n * sizeof(int));
-        memcpy(new_count, s_last_count, s_n * sizeof(int));
-        memcpy(new_emit, s_emitted, s_n * sizeof(int));
-        memcpy(new_ref, s_ref_pos, s_n * sizeof(*s_ref_pos));
-    }
-    free(s_vao); free(s_vbo); free(s_last_head); free(s_last_count);
-    free(s_emitted); free(s_ref_pos);
-    s_vao = new_vao;
-    s_vbo = new_vbo;
-    s_last_head = new_head;
-    s_last_count = new_count;
-    s_emitted = new_emit;
-    s_ref_pos = new_ref;
+/* ── trail residency ──────────────────────────────────────────────────────
+ *
+ * A trail buffer is allocated when its body enters the simulated region and
+ * released once it leaves.  Only bodies inside ACTIVE_RADIUS_LY ever record a
+ * sample — main.c drives trails_tick_system() per active system root — so a
+ * resident trail anywhere further out is 512 KiB of heap plus a 256 KiB
+ * GL_DYNAMIC_DRAW VBO holding a path that cannot change.  Allocating those at
+ * load cost ~3.2 GiB of heap and ~1.6 GiB of requested VRAM across the shipped
+ * catalog's ~6.3k non-star bodies.
+ *
+ * Release is hysteretic: a body keeps its trail for RESIDENCY_GRACE frames
+ * after it stops being active, so one hovering at the activation boundary does
+ * not thrash 768 KiB every frame.  Re-entry after that is a fresh trail, which
+ * is also the honest result — nothing was recorded while it was frozen.
+ */
+#define RESIDENCY_GRACE 120
 
-    for (int i = s_n; i < new_n; i++) {
-        s_last_head[i] = 0;
+typedef struct { int body; unsigned stamp; } TrailResident;
+static TrailResident *s_res = NULL;
+static int      s_res_n = 0, s_res_cap = 0;
+static unsigned s_res_frame = 0;
+
+static void trail_free_body(int i)
+{
+    if (i < 0 || i >= g_nbodies) return;
+    Body *b = &g_bodies[i];
+    free(b->trail);          b->trail = NULL;
+    free(b->trail_seg_len);  b->trail_seg_len = NULL;
+    b->trail_head = 0;
+    b->trail_count = 0;
+    b->trail_accum = 0.0;
+    b->trail_total_len = 0.0;
+    b->trail_frame_head = 0;
+    b->trail_frame_count = 0;
+    b->trail_frame_accum = 0.0;
+    b->trail_frame_total_len = 0.0;
+    if (i < s_n) {
+        if (s_vbo[i]) { glDeleteBuffers(1, &s_vbo[i]);      s_vbo[i] = 0; }
+        if (s_vao[i]) { glDeleteVertexArrays(1, &s_vao[i]); s_vao[i] = 0; }
+        s_last_head[i]  = 0;
         s_last_count[i] = 0;
-        s_emitted[i] = 0;
-        /* Skip GL resources for stars / trail-less bodies (see trails_gl_init). */
-        if (i < g_nbodies && (g_bodies[i].is_star || !g_bodies[i].trail)) {
-            s_vao[i] = 0;
-            s_vbo[i] = 0;
-            continue;
+        s_emitted[i]    = 0;
+    }
+}
+
+/* Give body `i` a trail if it lacks one, and refresh its residency stamp. */
+static void trail_acquire(int i)
+{
+    if (i < 0 || i >= g_nbodies) return;
+    Body *b = &g_bodies[i];
+    if (b->is_star || !b->alive) return;
+    if (i >= s_n && !trails_grow(i + 1)) return;
+
+    if (!b->trail) {
+        b->trail = (double(*)[3])calloc(TRAIL_LEN, 3 * sizeof(double));
+        b->trail_seg_len = (double*)calloc(TRAIL_LEN, sizeof(double));
+        if (!b->trail || !b->trail_seg_len) {   /* out of memory: stay trail-less */
+            free(b->trail);          b->trail = NULL;
+            free(b->trail_seg_len);  b->trail_seg_len = NULL;
+            return;
         }
-        s_vao[i] = gl_vao_create();
-        s_vbo[i] = gl_vbo_create((TRAIL_LEN + 1) * 4 * sizeof(float),
-                                 NULL, GL_DYNAMIC_DRAW);
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE,
-                              4 * sizeof(float), (void*)0);
-        glEnableVertexAttribArray(1);
-        glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE,
-                              4 * sizeof(float), (void*)(3 * sizeof(float)));
-        glBindVertexArray(0);
+        /* Seed the Hermite tangent from where the body is NOW, not from its
+         * load-time state — arbitrarily much sim time may have passed. */
+        b->trail_head = 0;  b->trail_count = 0;
+        b->trail_accum = 0.0;  b->trail_total_len = 0.0;
+        b->trail_fade = 1.0;
+        for (int k = 0; k < 3; k++) {
+            b->trail_prev_pos[k] = b->pos[k];
+            b->trail_prev_vel[k] = b->vel[k];
+            b->trail_frame_pos[k] = b->pos[k];
+            b->trail_frame_vel[k] = b->vel[k];
+            b->trail_frame_prev_pos[k] = b->pos[k];
+            b->trail_frame_prev_vel[k] = b->vel[k];
+        }
+        b->trail_frame_head = 0;  b->trail_frame_count = 0;
+        b->trail_frame_accum = 0.0;  b->trail_frame_total_len = 0.0;
+        s_last_head[i] = 0;  s_last_count[i] = 0;  s_emitted[i] = 0;
+        trail_gl_alloc(i);
     }
 
-    s_n = new_n;
+    for (int r = 0; r < s_res_n; r++)
+        if (s_res[r].body == i) { s_res[r].stamp = s_res_frame; return; }
+
+    if (s_res_n == s_res_cap) {
+        int cap = s_res_cap ? s_res_cap * 2 : 64;
+        TrailResident *t = (TrailResident*)realloc(s_res, (size_t)cap * sizeof(*t));
+        if (!t) return;
+        s_res = t;  s_res_cap = cap;
+    }
+    s_res[s_res_n].body = i;
+    s_res[s_res_n].stamp = s_res_frame;
+    s_res_n++;
+}
+
+/* Once per frame: acquire for everything in the simulated region, and drop
+ * residents that have been out of it for longer than the grace period. */
+static void trail_residency(void)
+{
+    s_res_frame++;
+
+    static int *near = NULL;  static int near_cap = 0;
+    const int NEAR_MAX = 8192;
+    if (near_cap < NEAR_MAX) {
+        int *t = (int*)realloc(near, (size_t)NEAR_MAX * sizeof(int));
+        if (!t) return;
+        near = t;  near_cap = NEAR_MAX;
+    }
+    double cam_m[3] = { g_cam.pos[0] * AU, g_cam.pos[1] * AU, g_cam.pos[2] * AU };
+    double r_m = g_settings.active_radius_ly * LY;
+    int nn = physics_active_bodies(cam_m, r_m, near, near_cap);
+    for (int j = 0; j < nn; j++) trail_acquire(near[j]);
+
+    for (int r = 0; r < s_res_n; ) {
+        int i = s_res[r].body;
+        int stale = (s_res_frame - s_res[r].stamp) > RESIDENCY_GRACE;
+        int gone  = (i >= g_nbodies) || !g_bodies[i].alive || g_bodies[i].is_star;
+        if (stale || gone) {
+            trail_free_body(i);
+            s_res[r] = s_res[--s_res_n];
+        } else {
+            r++;
+        }
+    }
 }
 
 void trails_remove_body(int body_idx)
@@ -237,6 +366,11 @@ void trails_render(const float vp[16])
 {
     if (!s_shader || g_orbits_off) return;
     s_drawn = s_culled = s_reup = 0; s_reup_verts = 0;
+
+    /* Before the fade early-out below: residency must be maintained even when
+     * trails are faded to nothing, or a body would record no path while out of
+     * sight and show an empty trail the moment it faded back in. */
+    trail_residency();
 
     /* Distance from camera to nearest star — controls LOD fade.
      * Computed in render units (AU).  Returns early if trails are fully faded. */
@@ -425,6 +559,9 @@ void trails_gl_shutdown(void)
     if (s_last_head)  { free(s_last_head);  s_last_head  = NULL; }
     if (s_last_count) { free(s_last_count); s_last_count = NULL; }
     if (s_ref_pos)    { free(s_ref_pos);    s_ref_pos    = NULL; }
+    if (s_emitted)    { free(s_emitted);    s_emitted    = NULL; }
+    if (s_res)        { free(s_res);        s_res = NULL; }
+    s_res_n = s_res_cap = 0;
     glDeleteProgram(s_shader);
     s_shader = 0;
     s_n = 0;

@@ -1,5 +1,5 @@
 /*
- * cinema_titles.h — --cinematic-info presentation overlay (CINEMATIC.md §11.1).
+ * cinema_titles.h — --cinematic-info presentation overlay (docs/CINEMATIC.md §11.1).
  *
  * Lower-thirds that fade in when the camera arrives somewhere new (name, kind
  * and distance, simulation date, a scale bar at the subject's depth) and a

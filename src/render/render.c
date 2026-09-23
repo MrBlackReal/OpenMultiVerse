@@ -470,6 +470,9 @@ static double smoothstepd(double edge0, double edge1, double x);
 
 static double s_veil_e      = 0.0;              /* E_psf,   0 = off */
 static double s_veil_f      = 0.0;              /* E_floor, 0 = off */
+static int    s_veil_sn     = 0;    /* this frame's glare is a supernova's   */
+static double s_veil_e_prev = 0.0;  /* last output frame's glare (eased)     */
+static double s_veil_f_prev = 0.0;
 static double s_veil_dir[3] = { 0.0, 0.0, -1.0 };
 static int    s_veil_root   = -1;
 
@@ -485,6 +488,24 @@ static void star_veil_update(const float cam_fwd[3], const float cam_right[3],
 {
     float col[3] = { 1.0f, 1.0f, 1.0f };
     star_veil_compute(cam_fwd, fov_deg, aspect, col);
+    /* A supernova's flash is brighter than the glare cap from its first
+     * instant, so its glare arrived in one frame: a hard cut from the dying
+     * star to a washed-out sky. Ease it in instead, as a camera's exposure
+     * would, stepping once per output frame (held across accumulation
+     * sub-frames, like auto-exposure in post.c). Only rises are eased, and
+     * only for a supernova, so cuts and fly-bys keep their instant glare. */
+    if (s_veil_sn) {
+        if (post_autoexposure_held()) {
+            if (s_veil_e > s_veil_e_prev) s_veil_e = s_veil_e_prev;
+            if (s_veil_f > s_veil_f_prev) s_veil_f = s_veil_f_prev;
+        } else {
+            const double k = 0.12;   /* ~80% of the way in ~13 frames */
+            if (s_veil_e > s_veil_e_prev) s_veil_e = s_veil_e_prev + (s_veil_e - s_veil_e_prev) * k;
+            if (s_veil_f > s_veil_f_prev) s_veil_f = s_veil_f_prev + (s_veil_f - s_veil_f_prev) * k;
+        }
+    }
+    s_veil_e_prev = s_veil_e;
+    s_veil_f_prev = s_veil_f;
     float view[3] = { 0.0f, 0.0f, 1.0f }, h = 0.0f;
     if (s_veil_e > 0.0 || s_veil_f > 0.0) {
         view[0] = (float)(s_veil_dir[0]*cam_right[0] + s_veil_dir[1]*cam_right[1] + s_veil_dir[2]*cam_right[2]);
@@ -501,12 +522,19 @@ static void star_veil_compute(const float cam_fwd[3], float fov_deg, float aspec
     s_veil_e = 0.0;
     s_veil_f = 0.0;
     s_veil_root = -1;
+    s_veil_sn = 0;
 
     double cam_m[3] = { g_cam.pos[0] * AU, g_cam.pos[1] * AU, g_cam.pos[2] * AU };
     RadianceContrib top[1];
     if (radiance_field_top(cam_m, -1, 1, top) < 1 || top[0].irr <= 0.0) return;
-    if (top[0].body < 0) return;          /* transient/nebula light: no disc */
+    /* Body-less light: a supernova's transient glares like the star it
+     * replaced (no disc, so no eclipse test below). Nebulae/galaxies are
+     * extended glows, never a point glare. Returning here for a supernova
+     * dropped the dying star's glare in one frame: the sky popped in at
+     * the very moment the flash should have washed it out. */
     int dom = top[0].body;
+    if (dom < 0 && !top[0].transient) return;
+    s_veil_sn = top[0].transient;
 
     /* Camera-relative in double (the standard recipe). */
     double rx = top[0].pos[0] * RS - g_cam.pos[0];
@@ -524,9 +552,9 @@ static void star_veil_compute(const float cam_fwd[3], float fov_deg, float aspec
     /* Eclipse: fraction of the star's disc left uncovered by nearer bodies.
      * The star's radius is projected to each occluder's distance so the
      * comparison is between two discs at the same depth. */
-    double rs_star = g_bodies[dom].radius * RS;
+    double rs_star = dom >= 0 ? g_bodies[dom].radius * RS : 0.0;
     double lit = 1.0;
-    for (int i = 0; i < g_nbodies && lit > 0.0; i++) {
+    for (int i = 0; i < g_nbodies && dom >= 0 && lit > 0.0; i++) {
         if (i == g_field_star_begin && g_field_star_end > g_field_star_begin) {
             i = g_field_star_end - 1;   /* frozen scenery never eclipses */
             continue;
@@ -555,16 +583,17 @@ static void star_veil_compute(const float cam_fwd[3], float fov_deg, float aspec
      * without bound. Uncapped, 60 AU from an accreting black hole put the
      * glare haze at thousands and the frame went solid white. */
     double rel  = fmin(top[0].irr / 1361.0, 10.0);
+    lit *= top[0].glare;                  /* a supernova glares only while it flashes */
     double ef   = STAR_VEIL_SCALE * w * lit * sqrt(rel);
     if (ef < 0.02) return;                /* too faint to hide anything */
     /* A black hole's light comes from its extended accretion disc, not a
      * compact disc at the centre — the centre is its dark shadow. A point
      * glare there buried the shadow and photon ring under a white blob, so
      * black holes set the exposure (floor) but cast no point glare. */
-    s_veil_e = g_bodies[dom].is_black_hole ? 0.0 : STAR_VEIL_PSF * w * lit * rel;
+    s_veil_e = (dom >= 0 && g_bodies[dom].is_black_hole) ? 0.0 : STAR_VEIL_PSF * w * lit * rel;
     s_veil_f = ef;
     s_veil_dir[0] = ux; s_veil_dir[1] = uy; s_veil_dir[2] = uz;
-    s_veil_root = body_root_star(dom);
+    s_veil_root = dom >= 0 ? body_root_star(dom) : -1;
     col_out[0] = top[0].col[0]; col_out[1] = top[0].col[1]; col_out[2] = top[0].col[2];
 }
 
@@ -2442,7 +2471,36 @@ void render_frame(const float view[16], const float proj[16],
         if (!s_dyn) { fprintf(stderr, "[render] dyn alloc failed\n"); exit(1); }
         s_dyn_cap = cap;
     }
+    /* Accumulation samples of one output frame (cinematic.c) share its sim
+     * state and differ only by a small camera offset, yet each walked all
+     * ~2e5 catalogue bodies. The frame's first sample does the full walk and
+     * keeps only the bodies any pass could still draw; the rest are past the
+     * far-field horizon (culled by the dot, glare and horizon fades) and
+     * sub-pixel (no sphere). Later samples reuse that list while the camera's
+     * travel plus the farthest any dropped body can have moved (twice the
+     * fastest one's speed over the sim time elapsed, so object motion blur
+     * slicing the sim is covered too) stays within `slack`. That keeps the
+     * test exact: a body more than horizon + slack away cannot come inside
+     * the horizon. Black holes are always kept (AGN jets use a longer
+     * horizon). */
+    static int   *s_keep = NULL;   static int s_keep_n, s_keep_cap, s_keep_nb;
+    static double s_keep_ren_t = -1.0, s_keep_sim_t, s_keep_cam[3], s_keep_slack;
+    static double s_keep_vmax;     /* m/s, fastest dropped body */
+    int build_keep = 0;
     int n_dyn = 0;
+    {
+        double kx = g_cam.pos[0] - s_keep_cam[0];
+        double ky = g_cam.pos[1] - s_keep_cam[1];
+        double kz = g_cam.pos[2] - s_keep_cam[2];
+        double drift = 2.0 * s_keep_vmax * fabs(g_sim_time - s_keep_sim_t) / AU;
+        if (s_keep_ren_t == g_render_time && s_keep_nb == g_nbodies &&
+            sqrt(kx*kx + ky*ky + kz*kz) + drift <= s_keep_slack) {
+            memcpy(s_dyn, s_keep, (size_t)s_keep_n * sizeof(int));
+            n_dyn = s_keep_n;
+            goto dyn_ready;
+        }
+    }
+    build_keep = g_settings.farfield_horizon_au > 0.0;
     for (int i = 0; i < g_field_star_begin && i < g_nbodies; i++) s_dyn[n_dyn++] = i;
     for (int i = g_field_star_end; i < g_nbodies; i++)            s_dyn[n_dyn++] = i;
     if (g_field_star_end > g_field_star_begin) {
@@ -2464,6 +2522,7 @@ void render_frame(const float view[16], const float proj[16],
         }
     }
 
+dyn_ready:
     /* Sparse clear (see above): only the dynamic set is ever read. */
     for (int di = 0; di < n_dyn; di++) {
         body_px[s_dyn[di]]          = 0.0f;
@@ -2638,7 +2697,32 @@ void render_frame(const float view[16], const float proj[16],
         {
             float ecl[6 * 4];
             int   necl = 0;
-            for (int j = 0; j < g_nbodies && necl < 6; j++) {
+            /* The scan is O(bodies) — ~2e5 non-field bodies with the
+             * catalogues loaded — per sphere per accumulation sample. A
+             * body's family does not change within one output frame (even
+             * when motion blur slices the sim across it), so the occluder
+             * INDICES are kept for the frame: a film's samples scan once.
+             * Positions are read fresh below, and a cached occluder that died
+             * mid-frame forces a rescan. */
+            enum { ECL_CACHE = 32 };   /* fully associative, round-robin */
+            static struct { int body, n, nb, j[6]; double ren_t; } s_ecl_c[ECL_CACHE];
+            static int s_ecl_init, s_ecl_next;
+            if (!s_ecl_init) { for (int k = 0; k < ECL_CACHE; k++) s_ecl_c[k].body = -1; s_ecl_init = 1; }
+            int ck;
+            for (ck = 0; ck < ECL_CACHE; ck++) if (s_ecl_c[ck].body == i) break;
+            int ecl_hit = ck < ECL_CACHE && s_ecl_c[ck].nb == g_nbodies &&
+                          s_ecl_c[ck].ren_t == g_render_time;
+            if (ck == ECL_CACHE) { ck = s_ecl_next; s_ecl_next = (s_ecl_next + 1) % ECL_CACHE; }
+            int ecl_j[6], necl_j = 0;
+            if (ecl_hit) {
+                necl_j = s_ecl_c[ck].n;
+                for (int k = 0; k < necl_j; k++) {
+                    ecl_j[k] = s_ecl_c[ck].j[k];
+                    if (!g_bodies[ecl_j[k]].alive) ecl_hit = 0;
+                }
+                if (!ecl_hit) necl_j = 0;
+            }
+            for (int j = 0; !ecl_hit && j < g_nbodies && necl_j < 6; j++) {
                 /* Skip the frozen field-star range wholesale — like every other
                  * hot per-body loop (trails/labels/rings/inspect).  A field star
                  * is never a plausible eclipse occluder, and scanning ~10^5-10^6
@@ -2652,6 +2736,18 @@ void render_frame(const float view[16], const float proj[16],
                 if (j != b->parent && g_bodies[j].parent != i &&
                     (b->parent < 0 || g_bodies[j].parent != b->parent))
                     continue;
+                if (visual_radius(j, 0.0f) <= 0.0f) continue;
+                ecl_j[necl_j++] = j;
+            }
+            if (!ecl_hit) {
+                s_ecl_c[ck].body  = i;
+                s_ecl_c[ck].n     = necl_j;
+                s_ecl_c[ck].nb    = g_nbodies;
+                s_ecl_c[ck].ren_t = g_render_time;
+                for (int k = 0; k < necl_j; k++) s_ecl_c[ck].j[k] = ecl_j[k];
+            }
+            for (int k = 0; k < necl_j; k++) {
+                int j = ecl_j[k];
                 float orad = visual_radius(j, 0.0f);
                 if (orad <= 0.0f) continue;
                 ecl[necl*4+0] = (float)((g_bodies[j].pos[0] - b->pos[0]) * RS);
@@ -2762,6 +2858,43 @@ void render_frame(const float view[16], const float proj[16],
         }
     }
     glBindVertexArray(0);
+
+    if (build_keep) {
+        /* First sample of the frame: see the s_keep comment above. */
+        if (n_dyn > s_keep_cap) {
+            int cap = s_keep_cap ? s_keep_cap : 1024;
+            while (cap < n_dyn) cap *= 2;
+            int *k = realloc(s_keep, (size_t)cap * sizeof(int));
+            if (k) { s_keep = k; s_keep_cap = cap; }
+        }
+        if (s_keep_cap >= n_dyn) {
+            double horizon = g_settings.farfield_horizon_au;
+            double slack   = 0.01 * horizon;
+            int kn = 0;
+            double v2max = 0.0;
+            for (int di = 0; di < n_dyn; di++) {
+                int i = s_dyn[di];
+                const Body *b = &g_bodies[i];
+                if (!b->alive) continue;
+                double d = info[i].dcam;
+                int keep = b->is_black_hole || d - slack <= horizon ||
+                           s_rs_sphere_alpha[i] > 0.0f ||
+                           body_px[i] * d / (d - slack) >= lod_body_lo;
+                if (keep) { s_keep[kn++] = i; continue; }
+                double v2 = b->vel[0]*b->vel[0] + b->vel[1]*b->vel[1] + b->vel[2]*b->vel[2];
+                if (v2 > v2max) v2max = v2;
+            }
+            s_keep_vmax  = sqrt(v2max);
+            s_keep_n     = kn;
+            s_keep_nb    = g_nbodies;
+            s_keep_ren_t = g_render_time;
+            s_keep_sim_t = g_sim_time;
+            s_keep_slack = slack;
+            s_keep_cam[0] = g_cam.pos[0];
+            s_keep_cam[1] = g_cam.pos[1];
+            s_keep_cam[2] = g_cam.pos[2];
+        }
+    }
 
     inspect_pick_center(vp_camrel, info);
 

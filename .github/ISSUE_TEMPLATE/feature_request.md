@@ -11,7 +11,7 @@ One-sentence description of the feature.
 Why is this useful? What problem does it solve?
 
 ### Proposed Approach
-How might it be implemented? Reference relevant files from ARCHITECTURE.md if applicable.
+How might it be implemented? Reference relevant files from docs/ARCHITECTURE.md if applicable.
 
 ### Alternatives Considered
 Other approaches you thought about and why you ruled them out.

@@ -21,7 +21,7 @@ TARGET  = verse
 
 SRCDIR  = src
 
-# Sources live in role-based subdirectories (see ARCHITECTURE.md §2). The list is
+# Sources live in role-based subdirectories (see docs/ARCHITECTURE.md §2). The list is
 # explicit rather than a `find`: it documents the layout, stays portable to
 # MSYS2 make, and makes adding a new layer a deliberate one-line edit.
 #   core/   state, units, data model      sim/    physics, collision, lifecycle

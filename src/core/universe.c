@@ -136,18 +136,18 @@ static void alloc_trail(Body *bo)
         bo->trail_emitting = 0;
         return;
     }
-    if (bo->trail)
-        memset(bo->trail, 0, TRAIL_LEN * 3 * sizeof(double));
-    else
-        bo->trail = (double(*)[3])calloc(TRAIL_LEN, 3 * sizeof(double));
-    if (bo->trail_seg_len)
-        memset(bo->trail_seg_len, 0, TRAIL_LEN * sizeof(double));
-    else
-        bo->trail_seg_len = (double*)calloc(TRAIL_LEN, sizeof(double));
-    if (!bo->trail || !bo->trail_seg_len) {
-        fprintf(stderr, "[universe] trail alloc failed\n");
-        exit(1);
-    }
+    /* Non-stars get their buffers ON DEMAND, not here.  Only bodies inside
+     * ACTIVE_RADIUS_LY ever record a sample — trails_tick_system() runs per
+     * active system root — so a body light-years away holds 512 KiB of heap
+     * (TRAIL_LEN double[3] + seg lengths) and a 256 KiB GL_DYNAMIC_DRAW VBO
+     * that can never change.  Across the shipped catalog's ~6.3k non-star
+     * bodies that is ~3.2 GiB of heap and ~1.6 GiB of requested VRAM.
+     * trails_render() now allocates when a body enters the active set and
+     * releases it after it leaves; NULL is already the safe state (stars have
+     * used it since load RAM went 2.34 GB -> 1.2 GB) because every consumer
+     * guards on b->trail. */
+    free(bo->trail);          bo->trail = NULL;
+    free(bo->trail_seg_len);  bo->trail_seg_len = NULL;
     bo->trail_head  = 0;
     bo->trail_count = 0;
     bo->trail_accum = 0.0;

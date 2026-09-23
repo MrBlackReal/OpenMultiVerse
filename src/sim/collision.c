@@ -1294,6 +1294,33 @@ static int nearest_star_to_body(int body_idx)
     return best;
 }
 
+/* nearest_star_to_body scans every body (~5e5 with the catalogues loaded),
+ * and the renderer asks once per drawn sphere per accumulation sample. Which
+ * star is nearest cannot change within one output frame (1/30 s of film, even
+ * when object motion blur slices the sim across it), so the answer is kept for
+ * the frame: a film's 32 samples scan once. The heat itself is still computed
+ * from current positions; a star that died mid-frame forces a rescan. */
+static int nearest_star_cached(int body_idx)
+{
+    /* Fully associative: a frame draws a handful of spheres, and a hashed
+     * slot let Earth and the Moon evict each other every call. */
+    enum { NS_CACHE = 32 };
+    static struct { int body, star, nb; double ren_t; } c[NS_CACHE];
+    static int init, next;
+    if (!init) { for (int k = 0; k < NS_CACHE; k++) c[k].body = -1; init = 1; }
+    int k;
+    for (k = 0; k < NS_CACHE; k++) if (c[k].body == body_idx) break;
+    if (k < NS_CACHE && c[k].nb == cnb() && c[k].ren_t == g_render_time &&
+        (c[k].star < 0 || (g_bodies[c[k].star].alive && g_bodies[c[k].star].is_star)))
+        return c[k].star;
+    if (k == NS_CACHE) { k = next; next = (next + 1) % NS_CACHE; }
+    c[k].body  = body_idx;
+    c[k].star  = nearest_star_to_body(body_idx);
+    c[k].nb    = cnb();
+    c[k].ren_t = g_render_time;
+    return c[k].star;
+}
+
 static double star_heat_factor_for_body(int body_idx, int *out_star_idx)
 {
     int star_idx;
@@ -1304,7 +1331,7 @@ static double star_heat_factor_for_body(int body_idx, int *out_star_idx)
     if (body_idx < 0 || body_idx >= cnb()) return 0.0;
     if (!g_bodies[body_idx].alive || g_bodies[body_idx].is_star) return 0.0;
 
-    star_idx = nearest_star_to_body(body_idx);
+    star_idx = nearest_star_cached(body_idx);
     if (star_idx < 0) return 0.0;
 
     dx = g_bodies[star_idx].pos[0] - g_bodies[body_idx].pos[0];

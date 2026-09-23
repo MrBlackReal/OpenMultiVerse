@@ -823,7 +823,10 @@ int supernova_render_events(SupernovaRenderEvent *out, int max_events,
         tail_fade = 1.0 - smoothstepd_local(0.60, 1.0, cloud_t);
         tail_fade = tail_fade * tail_fade * tail_fade;
 
-        flash_alpha = 1.28 * rise_and_fall(age, DAY * 0.012, DAY * 0.42)
+        /* The flash swells over ~0.3 day rather than landing in one frame:
+         * at film timescales (~1 day/s) a 0.012-day rise read as a hard cut
+         * from the star to the blast. Peak intensity is unchanged (~1.1). */
+        flash_alpha = 2.40 * rise_and_fall(age, DAY * 0.20, DAY * 0.60)
                     + 0.18 * exp(-age / (DAY * 2.2));
         core_alpha = 0.96 * rise_and_fall(age, DAY * 0.05, DAY * 7.5)
                    + 0.10 * exp(-age / (DAY * 32.0));

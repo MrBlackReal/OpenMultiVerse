@@ -13,7 +13,7 @@ void ui_notify_speed_change(void);
 void ui_render(void);
 void ui_shutdown(void);
 
-/* Cinematic lower-third (CINEMATIC.md §11.1): up to three lines and an
+/* Cinematic lower-third (docs/CINEMATIC.md §11.1): up to three lines and an
  * optional scale bar (bar_px long, labelled) in the lower left of the picture
  * band [band_top, band_bottom] (output pixels, y down — inside any letterbox).
  * Fades with alpha; draws nothing at 0. */

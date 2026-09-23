@@ -1,5 +1,5 @@
 /*
- * cinema_tour.h — procedural tour + auto-director (CINEMATIC.md §10).
+ * cinema_tour.h — procedural tour + auto-director (docs/CINEMATIC.md §10).
  * Phase 4 of that plan.
  *
  * This is what `--cinematic --output film.mp4` does when no --shot-script is
@@ -62,7 +62,7 @@ void cinema_tour_tick(double dt);
 const char *cinema_tour_subject(void);
 
 /* What the tour is presenting now: the current leg's subject, or the event a
- * director cutaway covers (CINEMATIC.md §11.1). 0 if none. */
+ * director cutaway covers (docs/CINEMATIC.md §11.1). 0 if none. */
 int cinema_tour_current_subject(CineSubject *out);
 
 void cinema_tour_shutdown(void);

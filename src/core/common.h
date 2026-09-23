@@ -47,7 +47,7 @@ extern double g_render_time;
 #define FOV    (g_settings.fov)
 
 /* ------------------------------------------------------------------ math */
-#define PI  3.14159265358979323846
+#define PI (3.14159265358979323846)
 
 /* ------------------------------------------------------------------ physics */
 #include "laws.h"                    /* per-universe constants → g_laws  */

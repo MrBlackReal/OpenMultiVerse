@@ -51,33 +51,30 @@ void main() {
      * The heading is the camera's velocity vector projected to screen space
      * (u_rel_center) — not necessarily the look axis, so strafing/looking off
      * the direction of travel offsets the focus.  Content is pulled toward that
-     * point; the shift tapers to zero at the frame edge (measured from the true
-     * screen centre) so we never sample past the texture border. */
-    float rel_r  = length(d) * 1.41421356;           /* 0 centre .. 1 corner   */
+     * point; the shift tapers to zero at the frame edge so we never sample past
+     * the texture border.
+     *
+     * The taper is CHEBYSHEV, not radial. A radial taper (length(d)) only
+     * reaches 1 at the corners, so along the edge midpoints it still leaves
+     * most of the shift standing at the border — suv then lands outside [0,1].
+     * Clamping the shift back to the border at that point does keep the sample
+     * legal, but it maps a whole band of screen pixels onto the same border
+     * texels: the compressed sky piles up there as a bright rectangular frame
+     * around the picture (the box in showcase_4k.mp4 at 1:17). max(|x|,|y|)
+     * reaches 1 on the entire border instead, so the shift genuinely vanishes
+     * there and no clamp is needed. */
+    vec2  e      = abs(d) * 2.0;                     /* 0 centre .. 1 per axis */
+    float edge_r = max(e.x, e.y);                    /* 1 on the whole border  */
     vec2  dc     = v_uv - u_rel_center;               /* vector from heading    */
     float head_r = length(dc) * 1.41421356;          /* 0 at heading .. ~1 far */
     vec2 suv = v_uv;
     if (u_rel_beta > 0.0) {
-        vec2 shift = dc * (u_rel_beta * 0.55 * (1.0 - rel_r));
-
-        /* The taper above is measured from the SCREEN CENTRE while the shift is
-         * measured from the HEADING POINT, and the two coincide only when
-         * travelling straight down the look axis. Whenever they differ — i.e.
-         * whenever the camera is actually manoeuvring — the taper does not
-         * reach zero before the frame edge, suv lands outside [0,1], and
-         * CLAMP_TO_EDGE smears the border texels into a visible blurred frame
-         * around the picture.
-         *
-         * Scale the shift back by whatever factor keeps the sample inside the
-         * texture. The aberration then weakens near the edge instead of
-         * sampling off it, which is the intended look and costs a multiply. */
-        vec2 lo = -v_uv, hi = vec2(1.0) - v_uv;
-        float k = 1.0;
-        if (shift.x >  hi.x) k = min(k, hi.x / shift.x);
-        if (shift.x <  lo.x) k = min(k, lo.x / shift.x);
-        if (shift.y >  hi.y) k = min(k, hi.y / shift.y);
-        if (shift.y <  lo.y) k = min(k, lo.y / shift.y);
-        suv = v_uv + shift * clamp(k, 0.0, 1.0);
+        /* Stays inside [0,1] by construction: toward the x=0 border the taper
+         * is at most 2·v_uv.x, so |shift.x| <= |dc.x|·β·0.55·2·v_uv.x, and with
+         * |dc.x| <= 0.78 (main.c clamps the heading offset to 0.28) and β <= 1
+         * that is <= 0.86·v_uv.x — always short of the border. Same each side,
+         * same for y. */
+        suv = v_uv + dc * (u_rel_beta * 0.55 * (1.0 - edge_r));
     }
 
     /* Chromatic aberration: split the channels radially, growing toward the

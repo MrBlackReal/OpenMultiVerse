@@ -50,6 +50,10 @@ static GLuint load_one(const char *path, int max_px, const char *what)
         return 0;
     }
     int w0 = w;
+    /* Never exceed what the GPU can hold: an oversize upload fails outright. */
+    GLint gl_max = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &gl_max);
+    if (gl_max > 0 && (max_px <= 0 || max_px > gl_max)) max_px = gl_max;
     px = downsample_to(px, &w, &h, max_px);
 
     GLuint tex;

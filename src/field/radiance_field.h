@@ -75,6 +75,8 @@ typedef struct {
     int    body;     /* g_bodies index, or -1 for a body-less emitter */
     int    nebula;   /* nebula index for nebula emitters, else -1 —   */
                      /* lets a nebula skip its own glow when sampling */
+    int    transient;/* 1 = supernova: a body-less point source       */
+    float  glare;    /* point-like share of its light, 0..1 (flash) */
     double irr;      /* incident flux from it, W/m²                   */
     double pos[3];   /* emitter position, SI m                        */
     float  col[3];   /* chromaticity (max component 1)                */

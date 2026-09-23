@@ -1,6 +1,6 @@
 /*
  * cinematic.c — cinematic renderer + deterministic film-out (see cinematic.h
- * for the API contract and CINEMATIC.md for the full design).
+ * for the API contract and docs/CINEMATIC.md for the full design).
  *
  * Phase 1 scope: the film-out pipeline end to end — fixed-timestep loop,
  * offscreen render at arbitrary resolution, accumulation buffer with sub-pixel
@@ -198,7 +198,7 @@ void cinematic_init(void)
 
     /* The dot-overlap dedup exists to stop far-field stars shimmering as they
      * cross each other; supersampling now resolves that properly, and the
-     * dedup only costs stars (CINEMATIC.md §8.4). Film-out only — a live
+     * dedup only costs stars (docs/CINEMATIC.md §8.4). Film-out only — a live
      * session keeps the interactive behaviour. main.c skips settings_save()
      * while filming, so this override never reaches settings.json. */
     if (g_cine.filming && s_nsub > 1) g_settings.dot_hide_px = 0.0f;
@@ -285,7 +285,7 @@ void cinematic_jitter(int s, float *ax, float *ay)
      * of the view angle through tan(fov/2) (times aspect horizontally), so a
      * sub-pixel offset is a sub-pixel *angle*. The small-angle approximation is
      * beyond generous at half a pixel. */
-    float tan_half = tanf((float)FOV * 0.5f * (float)(M_PI / 180.0));
+    float tan_half = tanf((float)FOV * 0.5f * (float)(PI / 180.0));
     float aspect   = (float)WIN_W / (float)WIN_H;
     *ax = (2.0f * jx / (float)WIN_W) * tan_half * aspect;
     *ay = (2.0f * jy / (float)WIN_H) * tan_half;
@@ -309,7 +309,7 @@ void cinematic_jitter(int s, float *ax, float *ay)
  * what a camera in a scale-continuous renderer should do. APERTURE_K is
  * calibrated so f/2.8 is roughly a 15-pixel background blur at 1080p / 45 FOV.
  *
- * This is a deliberate departure from "physically based" as CINEMATIC.md §8.1
+ * This is a deliberate departure from "physically based" as docs/CINEMATIC.md §8.1
  * originally framed it; the section records the reason.
  */
 #define APERTURE_K 0.032
@@ -339,6 +339,14 @@ static double focus_target_distance(void)
         double dy = g_bodies[i].pos[1] * RS - g_cam.pos[1];
         double dz = g_bodies[i].pos[2] * RS - g_cam.pos[2];
         double d  = sqrt(dx*dx + dy*dy + dz*dz);
+        /* Focus on the visible surface, not the centre: from d the visible
+         * hemisphere spans d - r (sub-camera point) to sqrt(d^2 - r^2) (the
+         * limb), all in front of the centre. Up close, centre focus throws
+         * the whole globe out of focus. Take the middle of that span; far
+         * away it converges to d. */
+        double r  = g_bodies[i].radius * RS;
+        if (r > 0.0 && d > r)
+            d = 0.5 * ((d - r) + sqrt(d*d - r*r));
         return d > 0.0 ? d : 0.0;
     }
     if (!s_focus_warned) {

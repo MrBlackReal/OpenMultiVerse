@@ -95,7 +95,7 @@ int g_win_w = DEFAULT_WIN_W;
 int g_win_h = DEFAULT_WIN_H;
 
 /* Window size to create. Normally the defaults; cinematic film-out overrides it
- * so the render resolution is independent of any desktop window (CINEMATIC.md
+ * so the render resolution is independent of any desktop window (docs/CINEMATIC.md
  * §6): WIN_W/WIN_H are what every pass — post.c's bloom chain, render.c's
  * volumetric slots — derives its own size from, so setting them once makes the
  * whole pipeline follow with no per-call-site viewport audit. */
@@ -871,7 +871,7 @@ static void handle_event(const SDL_Event *e, float dt, int *running) {
         case SDLK_k:
             /* Drop a cinematic keyframe at the current camera pose, or remove
              * the last one with Shift. Authoring happens in the NORMAL app —
-             * you fly to a framing you like and pin it (CINEMATIC.md §9.3).
+             * you fly to a framing you like and pin it (docs/CINEMATIC.md §9.3).
              * Keyframe drop rather than recording the raw flight path: a path
              * is jittery, enormous and uneditable; a spline through a dozen
              * deliberate poses is clean, small and hand-editable after. */
@@ -1262,7 +1262,7 @@ static void integrate_system_hot(int s, double sys_dt)
  *
  * Note this makes motion blur N times the SIMULATION cost, not just N times the
  * render cost: at high sample counts and large timescales the sim, not the
- * renderer, becomes the bottleneck (CINEMATIC.md §15). --shutter 0 opts out.
+ * renderer, becomes the bottleneck (docs/CINEMATIC.md §15). --shutter 0 opts out.
  */
 static void advance_simulation(float dt)
 {
@@ -1274,7 +1274,7 @@ static void advance_simulation(float dt)
          *
          * Film-out has no such concern: frame time is irrelevant offline, and
          * the cap silently truncates the per-frame sim advance that
-         * CINEMATIC.md §5 promises is exact. Left at 120, a film asking for a
+         * docs/CINEMATIC.md §5 promises is exact. Left at 120, a film asking for a
          * stellar-evolution timescale runs thousands of times slower than
          * requested, and every timescale past the cap renders identically.
          * Integrator accuracy is bounded by dt_outer, not by the number of
@@ -1486,7 +1486,7 @@ static void print_usage(const char *prog)
 "  --stellar-rate YRS      Years of stellar evolution per real second (aging,\n"
 "                          supernovae, accretion) — testable headless.\n"
 "\n"
-"Cinematic (see CINEMATIC.md):\n"
+"Cinematic (see docs/CINEMATIC.md):\n"
 "  --cinematic             Use the cinematic renderer (accumulation-sampled).\n"
 "                          On its own this only swaps the renderer: the window,\n"
 "                          free-look camera and menu behave exactly as before.\n"
@@ -1542,7 +1542,7 @@ static void print_usage(const char *prog)
 "  -h, --help              Show this help and exit.\n"
 "\n"
 "Data tooling lives in tools/ (fetch_catalogs.py, build_known_universe.py) and\n"
-"catalogtool; see ARCHITECTURE.md and CLAUDE.md for the full reference.\n",
+"catalogtool; see docs/ARCHITECTURE.md and CLAUDE.md for the full reference.\n",
         prog);
 }
 
@@ -1560,6 +1560,7 @@ int main(int argc, char **argv) {
     int         shot_frames    = 6;
     int         headless    = 0;
     int         run_bench   = 0;
+    int         cli_res_set = 0;
     int         cam_set     = 0;
     double      cam_pos[3]  = { 0.0, 0.0, 0.0 };
     float       cam_yaw = 0.0f, cam_pitch = 0.0f;
@@ -1627,7 +1628,7 @@ int main(int argc, char **argv) {
          * stays exactly where it was queried, keeping close-range shot framing
          * reproducible (warmup still runs, so orbits are settled first). */
         else if (!strcmp(argv[a], "--timescale") && a + 1 < argc) { cli_ts = atof(argv[++a]); cli_ts_set = 1; }
-        /* ---- cinematic renderer / film-out (CINEMATIC.md §3) -------------- */
+        /* ---- cinematic renderer / film-out (docs/CINEMATIC.md §3) -------------- */
         else if (!strcmp(argv[a], "--cinematic")) g_cine.enabled = 1;
         else if (!strcmp(argv[a], "--output") && a + 1 < argc) {
             snprintf(g_cine.output, sizeof g_cine.output, "%s", argv[++a]);
@@ -1639,6 +1640,7 @@ int main(int argc, char **argv) {
             int w = 0, h = 0;
             if (sscanf(argv[++a], "%dx%d", &w, &h) == 2 && w > 0 && h > 0) {
                 g_cine.width = w; g_cine.height = h;
+                cli_res_set = 1;
             } else {
                 fprintf(stderr, "%s: --res expects WxH (e.g. 1920x1080)\n", argv[0]);
                 return 2;
@@ -1744,6 +1746,11 @@ int main(int argc, char **argv) {
         s_init_w   = g_cine.width;
         s_init_h   = g_cine.height;
         g_hud_hidden = 1;        /* clean frames; --cinematic-info adds titles */
+    } else if (headless && cli_res_set) {
+        /* Headless stills (--shot, --benchmark-shots) capture the back buffer,
+         * so --res sizes the offscreen window they are read from. */
+        s_init_w = g_cine.width;
+        s_init_h = g_cine.height;
     }
 
     if (headless) {
@@ -2099,7 +2106,14 @@ int main(int argc, char **argv) {
         starsys_tick(g_cam.pos, (float)g_render_time);
         profiler_stage_end(PROFILER_STAGE_STARSYS);
 
-        /* Motion blur (CINEMATIC.md §4.1): the shutter is open for
+        /* A playing shot owns the timescale, so evaluate it before the sim
+         * steps. Otherwise each frame advances at the previous frame's rate,
+         * and the first frame at the universe's default rate: 1 day/s spun
+         * Earth 12 degrees before a 30 fps film's first frame. The camera is
+         * posed again below, once the anchors have moved. */
+        if (cinema_shot_playing()) cinema_shot_eval(cinema_shot_time());
+
+        /* Motion blur (docs/CINEMATIC.md §4.1): the shutter is open for
          * shutter_angle/360 of the frame interval, and the sim is sampled at
          * `nsub` instants across it. The frame still advances by exactly `dt`
          * in total — open_dt during the accumulation loop, the remainder once
@@ -2253,7 +2267,7 @@ int main(int argc, char **argv) {
             post_set_relativistic(rel_beta, rel_cx, rel_cy);
         }
 
-        /* Accumulation sampling (CINEMATIC.md §4). Outside cinematic mode
+        /* Accumulation sampling (docs/CINEMATIC.md §4). Outside cinematic mode
          * nsub is 1 and this is the original single pass, byte-identical:
          * the jitter, accumulate and resolve steps are all skipped and post
          * composites straight to the back buffer. In cinematic mode the frame

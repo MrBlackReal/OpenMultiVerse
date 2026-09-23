@@ -150,7 +150,7 @@ Everything in the engine resolves to one of three categories:
 
   * star clusters, spiral arms, accretion regions, galaxy cores
 
-**Status:** the first iteration is implemented as `src/cosmic_field.{c,h}` — a
+**Status:** the first iteration is implemented as `src/field/cosmic_field.{c,h}` — a
 queryable spatial field (uniform spatial hash over `g_bodies` + nebular fill)
 exposing `cosmic_field_sample(pos, radius) → {number/mass density, clumpiness,
 continuous fill, dominant DISCRETE/CONTINUOUS/HYBRID class}`. This was built
@@ -179,7 +179,7 @@ Introduce a shared lighting model:
 
 A unified representation for emitted, absorbed, scattered, and shifted light.
 
-**Status:** first iteration implemented as `src/radiance_field.{c,h}` — every
+**Status:** first iteration implemented as `src/field/radiance_field.{c,h}` — every
 light emitter reduces to one record (body, luminosity in watts, chromaticity):
 thermal stars via Stefan-Boltzmann (L = L☉·(R/R☉)²·(T/T☉)⁴, T estimated from
 the display colour's blue−red balance, calibrated so Sol → L☉; verified
@@ -299,7 +299,7 @@ Introduce a simulation graph that links object classes and fields:
   tidal consumptions — `collision.c finalize_absorb_body()` gained a `tidal`
   flag to tell the last two apart)
 
-**Status:** first iteration implemented as `src/field_graph.{c,h}`, following
+**Status:** first iteration implemented as `src/field/field_graph.{c,h}`, following
 the `cosmic_field`/`radiance_field` module pattern (O(N) throttled rebuild,
 main-thread only). Events snapshot participant **names** (body slots are
 reused, so per-body history matches index + name and drops — never
@@ -396,7 +396,7 @@ curves remain. Tunables under Menu → Visuals → Stars, persisted in
 
 ### Additions
 
-* spectral classification ✅ — `src/spectral.{c,h}`: physical T_eff from mass
+* spectral classification ✅ — `src/sim/spectral.{c,h}`: physical T_eff from mass
   (piecewise mass–temperature slope calibrated so Sol → G2V exactly;
   TRAPPIST-1 → M6V, its real L within 15%) shifted by lifecycle phase
   (subgiant IV, red giant III at ~3600 K, DA/PN/NS compact classes), with
@@ -746,9 +746,12 @@ requires a plunging trajectory (as in nature).
   (no horizon shadow). The `disk`/`torus`/jet machinery is ready to reuse.
 * **Jet termination lobes / gas interaction** ⛔ — jets don't yet inflate radio
   lobes or interact with surrounding gas.
-* **Background lensing uses procedural stars** ⛔ — the real starfield is GL points
-  drawn before the BH into the same FBO, so it isn't a sampleable texture at
-  BH-draw time. A true lensed background needs a star cubemap rendered up front.
+* **Background lensing uses the real sky** ✅ — when a hole's lensing zone is big
+  enough on screen to matter, `render.c` captures the distant background
+  (skybox stars, field stars, cluster glows, galaxies, nebulae; no foreground
+  bodies) once per frame into a 1024² cubemap around the camera, and `bh.frag`
+  samples it (`u_env`) wherever the scene snapshot has no data. Procedural stars
+  remain only as the fallback with post off.
 * **Dead-pole-on blazar seam** 🟡 — a faint rectangular discontinuity appears in
   the torus dust only when looking almost exactly down the axis (not the jets —
   survives skipping them; not the billboard edge — survives widening it). Every
@@ -761,7 +764,7 @@ requires a plunging trajectory (as in nature).
 
 ## 2.1 Stellar lifecycle system
 
-**Status:** ✅ (core) — `src/lifecycle.{c,h}`
+**Status:** ✅ (core) — `src/sim/lifecycle.{c,h}`
 
 ### Lifecycle states
 
@@ -815,7 +818,7 @@ O(N²). See ARCHITECTURE.md §8.1.
 fragmentation remains
 
 A comet is a normal body (`"type": "comet"` → `Body.is_comet`; the nucleus
-takes the ordinary dot/sphere/physics/label path).  `src/comet.{c,h}` +
+takes the ordinary dot/sphere/physics/label path).  `src/fx/comet.{c,h}` +
 `comet.vert/.frag` draw the volatile display: three additive elements per
 comet, camera-relative floats, per-fragment log depth (the ribbons span a
 large depth range).  Tails draw as crossed ribbon pairs so no viewing angle
@@ -1062,10 +1065,10 @@ corner case); lens-flare occlusion already agrees via the depth buffer.
   nucleus is a physically-sized point you **fly to** (culled past
   `farfield_horizon_au` from afar): approach a galactic centre and its disk +
   relativistic jets bloom inside the surrounding galaxy glow. Gated by the
-  `galaxy_agn` setting (default on). *Deferred:* an artistic galaxy-scale jet
-  (a `u_visual_scale` multiplier + full 3-D jet axis) for the kpc "beam across
-  the galaxy" poster — a follow-up on this proven base, since it would touch the
-  four AGN render passes.
+  `galaxy_agn` setting (default on). **Galaxy-scale jet — landed:** active
+  hosts get an `agn_visual_scale` multiplier that stretches the physically tiny
+  jet to one galaxy radius per lobe, aimed along the disc axis (`agn_axis`),
+  while the disk and torus stay Rs-sized (`galaxy.c`, AGN host spawn).
 
 ### Visual components
 
@@ -1085,7 +1088,7 @@ corner case); lens-flare occlusion already agrees via the depth buffer.
   real embedded AGN engine — a black-hole `Body` at the photometric centre; see
   the "active galactic nuclei" bullet above)
 
-**Status detail:** first iteration implemented as `src/galaxy.{c,h}` +
+**Status detail:** first iteration implemented as `src/render/galaxy.{c,h}` +
 `assets/shaders/galaxy.frag`, mirroring the nebula architecture: 10 real
 Local Group / nearby galaxies (SIMBAD/NED positions, distances, sizes,
 **inclinations** — the disc axis is tilted off the Earth sightline by the
@@ -1108,9 +1111,9 @@ so planets embed properly in the glow — better than the old full-res path,
 which blended the whole band over them. Full-res depth-tested fallback when
 bloom/post is off.
 **Remaining:** per-region galaxy light (the single integrated emitter is a
-point approximation), authored galaxies in universe JSON, and the deferred
-galaxy-scale artistic AGN jet (see the AGN bullet). *(AGN hosted inside a
-galaxy — landed; see the "active galactic nuclei" bullet.)*
+point approximation) and authored galaxies in universe JSON. *(AGN hosted
+inside a galaxy — landed, including the galaxy-scale jet: `galaxy.c` stretches
+an active host's jet to one galaxy radius per lobe, aimed along the disc axis.)*
 
 ---
 
@@ -1157,42 +1160,52 @@ galaxy — landed; see the "active galactic nuclei" bullet.)*
 
 ## 5.4 Orbit prediction system
 
-**Status:** ⛔ todo
+**Status:** 🟡 partial — `src/sim/orbit_predict.{c,h}`, toggled from the
+menu's Settings tab ("Orbit prediction") and skipped entirely by `--no-orbits`.
 
 ### Features
 
-* future trajectory ghost lines
-* decay / escape prediction
-* resonance detection visualization
+* future trajectory ghost lines ✅ — the selected/inspected body is
+  forward-integrated as a test particle under the *active* `g_laws` (so
+  `force_exp != 2`, `lambda` and PN show as precessing rosettes) against its
+  frozen parent chain, drawn camera-relative with the trail shaders
+* decay / escape prediction ✅ — specific orbital energy classifies the path as
+  bound (cyan), escaping (amber) or plunging into the parent; a, e, periapsis,
+  apoapsis and period are reported
+* resonance detection visualization ⛔
 
 ---
 
 # LAYER 6 — CAMERA & CINEMATIC SYSTEM
 
+> **Layers 6.1 and 6.2 are superseded by [CINEMATIC.md](CINEMATIC.md)**, the
+> design of record for the camera and film-out work (phases 1–5 done).
+
 ## 6.1 Cinematic camera mode
 
-**Status:** ⛔ todo
+**Status:** ✅ — `--cinematic` (CINEMATIC.md §2–§10)
 
 ### Features
 
-* automated orbit paths
-* spline-based motion
-* focus tracking
-* depth of field
-* slow zoom / dolly shots
+* automated orbit paths ✅ (procedural tour + auto-director, §10)
+* spline-based motion ✅ (centripetal Catmull-Rom shot scripts, §9.2)
+* focus tracking ✅ (`--focus NAME|AU|auto`, racks onto a moving body)
+* depth of field ✅ (accumulation-sampled thin lens, `--aperture`)
+* slow zoom / dolly shots ✅ (keyframed `fov` / anchors / eases)
 
 ---
 
 ## 6.2 Recording and presentation mode
 
-**Status:** ⛔ todo
+**Status:** ✅ — film-out `--cinematic --output PATH` (CINEMATIC.md §2.2, §7, §11)
 
 ### Features
 
-* UI suppression
-* highlight auto-events
-* title overlays
-* snapshot keyframes
+* UI suppression ✅ (film-out frames are clean; `--no-hud` / H for stills)
+* highlight auto-events ✅ (the director cuts to supernovae, collisions,
+  mergers and close approaches; shot keys can also `detonate` a star on cue)
+* title overlays ✅ (`--cinematic-info`: name, distance, date, scale bar)
+* snapshot keyframes ✅ (keyframe drop from the live camera + ImGui panel, §9.3–§9.4)
 
 ---
 
@@ -1255,8 +1268,8 @@ galaxy — landed; see the "active galactic nuclei" bullet.)*
    all landed; galaxy light distribution, glare adoption and relativistic
    shifts remain)
 5. Universe field graph 🟡 (graph + edges + event log + Inspect/headless
-   consumers landed; galaxy field nodes and the orbit-prediction/timeline
-   consumers remain)
+   consumers landed; galaxy field nodes and a timeline consumer remain.
+   Orbit prediction exists (§5.4) but reads bodies directly, not the graph)
 
 *(Note: #3 was built before #2 — continuous LOD needs a density/variance field, which #3 provides.)*
 
@@ -1278,19 +1291,20 @@ consumed by at least one real system; what remains in each is expansion
 11. Comets and minor bodies 🟡 (coma + ion/dust tails + physical sublimation
     landed 2026-07; tidal fragmentation remains)
 12. Binary / multi-star overlays
-13. Orbit prediction visuals
+13. Orbit prediction visuals 🟡 (ghost lines + bound/escape/plunge landed;
+    resonance detection remains)
 
 ## Phase D — Cosmic expansion
 
 14. Galaxy system 🟡 (catalogue galaxies as volumetric spiral/elliptical/
-    irregular structures with dust lanes + shear; AGN-in-host and per-region
-    light remain)
+    irregular structures with dust lanes + shear, AGN hosted in their galaxies
+    with galaxy-scale jets; per-region light and authored galaxies remain)
 15. Gravitational field visualization
 16. Gravitational waves
 
 ## Phase E — Experience layer
 
-17. Cinematic camera system
+17. Cinematic camera system ✅ (CINEMATIC.md)
 18. Universe timeline system
 19. Physics overlay debug layer
 

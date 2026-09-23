@@ -1,6 +1,6 @@
 /*
  * cinema_cam.h — keyframed camera shots for the cinematic renderer
- * (CINEMATIC.md §9). Phase 3 of that plan.
+ * (docs/CINEMATIC.md §9). Phase 3 of that plan.
  *
  * A *shot* is a list of keyframes, each pinning some subset of the camera state
  * at a time in seconds. Evaluating the shot at time t writes g_cam.pos/yaw/pitch
@@ -71,6 +71,9 @@ typedef struct {
     float    focus_au;                 /* <=0 = unset (with no focus_name)  */
     double   timescale;                /* <0  = unset                       */
     float    shutter;                  /* <0  = unset                       */
+    char     detonate[CINE_NAME_LEN];/* star to kill (supernova or planetary
+                                        * nebula) as playback crosses t; ""
+                                        * = none. Fires once per play. */
     CineEase ease;
     int      cut;    /* 1 = hard cut INTO this key: the camera jumps here
                       * instead of flying from the previous key, and the
@@ -141,7 +144,7 @@ void cinema_shot_preview_end(void);
 int  cinema_shot_previewing(void);
 
 /* What the camera is presenting right now — the thing a title card names
- * (CINEMATIC.md §11.1). Supplied by the tour (current leg or cutaway), by a
+ * (docs/CINEMATIC.md §11.1). Supplied by the tour (current leg or cutaway), by a
  * shot (the current key's look_at, else its anchor), or by the free camera. */
 typedef struct {
     char   name[CINE_NAME_LEN];

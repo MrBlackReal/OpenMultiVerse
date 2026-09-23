@@ -5,6 +5,22 @@ catalog) and the render/physics work that makes ~262k stars tractable. Covers
 what was done, the measured numbers, and the two open items (real-GPU frame rate
 and scene brightness).
 
+> **Current state (2026-09-22).** The measurements below were taken on the
+> 262k-star catalog of the time and are kept as recorded. Since then:
+> - The catalogs **ship in the repo**. `assets/catalogs/gaia_stars.bin` (StarBin)
+>   now loads **277,378 field stars** after de-duplication (13,786 skipped). The
+>   curated bodies moved out of the JSON into `known_universe_bodies.bin`
+>   (*BodyBin*, **210,255 bodies**). The manifest `known_universe.json` keeps
+>   only the laws, Solar System and curated black holes.
+> - The full source catalogs come from `tools/fetch_catalogs.py` (Gaia DR3
+>   nearby + field, NASA Exoplanet Archive, Hipparcos/Tycho-2 backfill).
+>   `tools/build_known_universe.py` rebuilds both binaries.
+> - `--benchmark` (scripted flythrough with per-stage fps) and `--profile`
+>   (per-stage **CPU** frame profiler) now exist.
+> - Both open items below are **still open**. There are no GPU timer queries
+>   (`GL_TIME_ELAPSED`) yet, and auto-exposure is still off by default
+>   (`settings.c`).
+
 All timings below are **headless software GL (llvmpipe)**, which measures the
 **CPU** side of the frame. That is what was being optimised; it does *not*
 reflect real-GPU frame rate (see "Open item: frame rate").
@@ -17,9 +33,9 @@ reflect real-GPU frame rate (see "Open item: frame rate").
   gaia-bin` emits a fixed-record `.bin`; a preset references it via an optional
   top-level `"star_catalog"` path; `universe.c load_star_catalog()` streams the
   stars into `g_bodies[]` at load with 0.1 ly positional de-dup against the JSON
-  stars. Missing file → skipped gracefully. The `.bin` is gitignored and
-  regenerated locally. `known_universe.json` uses it (266,536 Gaia DR3 stars
-  within 100 pc, ~12 MB).
+  stars. Missing file → skipped gracefully. `known_universe.json` uses it. At
+  the time: 266,536 Gaia DR3 stars within 100 pc, ~12 MB, gitignored. It now
+  ships in the repo; see "Current state" above.
 - **Field-star range** (`g_field_star_begin/end`, `g_universe_generation` in
   `universe.{h,c}`): the appended catalog stars form a contiguous "field" range —
   frozen scenery, drawn by a static GPU path, promoted into the per-frame dynamic
@@ -107,6 +123,8 @@ instead of punching black holes.
 
 ## Open item: frame rate (real GPU)
 
+**Status: open.** The per-pass GPU timers proposed below are not implemented.
+
 Reported: **~15 fps** on the real GPU with the 262k field.
 
 The static field draw is **not** the cause — drawing the 262k sprites costs
@@ -137,6 +155,9 @@ per-pass GPU milliseconds — the GPU-side equivalent of what perf did for the C
 
 ## Open item: scene brightness
 
+**Status: open.** `auto_exposure` still defaults to 0. None of the options
+below has been chosen.
+
 The denser field looks brighter, and it also brightens frame-over-frame.
 
 - **Exposure is fixed** (`tonemap_exposure = 0.76`, ACES) and **auto-exposure is
@@ -157,12 +178,14 @@ The built-in "brightness correction based on star count" already exists: the
 
 ## Regeneration & files
 
-- Rebuild the catalog: `make catalogtool && ./catalogtool gaia-bin <gaia.csv>
-  assets/catalogs/gaia_stars.bin` (the `.csv` is a Gaia DR3 100 pc export with
-  columns `source_id,ra,dec,parallax,pmra,pmdec,radial_velocity,teff`).
-- Touched (this perf pass): `src/render/render.c`, `src/physics.{c,h}`, `src/main.c`,
+- Rebuild the catalogs: `python3 tools/fetch_catalogs.py` then
+  `python3 tools/build_known_universe.py` (needs `./verse` and `./catalogtool`).
+  A single star catalog can still be packed by hand with
+  `./catalogtool gaia-bin <gaia.csv> assets/catalogs/gaia_stars.bin` (columns
+  `source_id,ra,dec,parallax,pmra,pmdec,radial_velocity,teff`).
+- Touched (this perf pass): `src/render/render.c`, `src/sim/physics.{c,h}`, `src/main.c`,
   `src/fx/rings.c`, `src/field/cosmic_field.c`, `src/field/field_graph.c`, `src/render/trails.c`,
   `src/core/body.c`, `src/field/radiance_field.c`, `src/render/labels.c`, `src/ui/inspect.c`,
-  `src/universe.{c,h}`, `assets/shaders/star_field.vert`.
-- **Not yet committed.** Suggested split: (a) compact binary catalog + loader,
-  (b) static field-star render path + per-frame scan fixes.
+  `src/core/universe.{c,h}`, `assets/shaders/star_field.vert`.
+- Committed (the compact catalog, loader, static field path and scan fixes
+  are all in `main`).
