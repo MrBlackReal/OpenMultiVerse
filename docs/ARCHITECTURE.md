@@ -876,9 +876,9 @@ point-draw cascades resolve the volume into individual stars. Six cubic
 lattices centred on the camera (cells 2 → 2048 ly, 20³ cells × 5 candidates
 each) hash stable star positions from absolute galaxy-frame cell coordinates
 (grid corner precomputed in double on the CPU — floats stay camera-relative);
-a candidate lives if a hash beats the local emission density evaluated by a
-port of `galaxy.frag`'s model (the two must stay in sync), so stars trace
-the same arms/bulge/knots as the glow. Luminosity is a power-law tail scaled
+a candidate lives if a hash beats the local emission density evaluated by
+the same `galaxy_sample()` the glow uses (`galaxy_model.glsl`, #included by
+both shaders), so stars trace the same arms/bulge/knots as the glow. Luminosity is a power-law tail scaled
 per cascade (~cell²) so every scale shows its brightest members; each
 cascade excludes the next-finer one's box and fades at its rim. Additive
 blend at log depth (occluded by planets, no depth writes), crossfaded in by

@@ -40,6 +40,39 @@ static char *read_file(const char *path) {
     return buf;
 }
 
+/* Expand `#include "file"` lines (one level, files under assets/shaders/).
+ * GLSL has no include; this is how galaxy.frag and galaxy_stars.vert share
+ * one galaxy model instead of hand-synced copies. Takes ownership of src and
+ * returns a new malloc'd string (or NULL if an included file is missing). */
+static char *resolve_includes(char *src) {
+    if (!src) return NULL;
+    for (;;) {
+        char *inc = strstr(src, "#include \"");
+        if (!inc) return src;
+        char *name = inc + 10;
+        char *close = strchr(name, '"');
+        if (!close) return src;
+        char path[256];
+        int nlen = (int)(close - name);
+        snprintf(path, sizeof path, "assets/shaders/%.*s", nlen, name);
+        char *body = read_file(path);
+        if (!body) { free(src); return NULL; }
+        char *eol = strchr(close, '\n');
+        size_t head = (size_t)(inc - src);
+        const char *tail = eol ? eol + 1 : close + 1;
+        size_t blen = strlen(body), tlen = strlen(tail);
+        char *out = (char *)malloc(head + blen + 1 + tlen + 1);
+        if (!out) { free(body); free(src); return NULL; }
+        memcpy(out, src, head);
+        memcpy(out + head, body, blen);
+        out[head + blen] = '\n';
+        memcpy(out + head + blen + 1, tail, tlen + 1);
+        free(body);
+        free(src);
+        src = out;                      /* loop: the file may hold several */
+    }
+}
+
 /* Splice a shared prelude of #defines right after the "#version ..." line so every
  * shader draws its constants from one place. Currently exposes DEPTH_FAR — the single
  * source of truth for the logarithmic-depth range (see RENDER_DEPTH_FAR in common.h),
@@ -169,8 +202,8 @@ static GLuint compile_shader(GLenum type, const char *src, const char *path) {
  * Shader objects are deleted after linking — only the program handle survives.
  * Returns the linked program, or 0 on any failure. */
 GLuint gl_shader_load(const char *vert_path, const char *frag_path) {
-    char *vraw = read_file(vert_path);
-    char *fraw = read_file(frag_path);
+    char *vraw = resolve_includes(read_file(vert_path));
+    char *fraw = resolve_includes(read_file(frag_path));
     if (!vraw || !fraw) { free(vraw); free(fraw); return 0; }
 
     /* Splice the shared prelude (DEPTH_FAR, …) after each stage's #version line. */
@@ -199,6 +232,36 @@ GLuint gl_shader_load(const char *vert_path, const char *frag_path) {
         glGetProgramInfoLog(prog, sizeof(log), NULL, log);
         fprintf(stderr, "[GL] program link error (%s / %s):\n%s\n",
                 vert_path, frag_path, log);
+        glDeleteProgram(prog);
+        return 0;
+    }
+    return prog;
+}
+
+/* A vertex-only program whose outputs `varyings` are captured by transform
+ * feedback (interleaved), for reading a shader's decisions back to the CPU.
+ * Draw with GL_RASTERIZER_DISCARD enabled. Returns 0 on failure. */
+GLuint gl_shader_load_capture(const char *vert_path, const char *const *varyings,
+                              int n_varyings) {
+    char *vraw = resolve_includes(read_file(vert_path));
+    if (!vraw) return 0;
+    char *vsrc = inject_prelude(vraw);
+    free(vraw);
+    if (!vsrc) return 0;
+    GLuint vs = compile_shader(GL_VERTEX_SHADER, vsrc, vert_path);
+    free(vsrc);
+    if (!vs) return 0;
+    GLuint prog = glCreateProgram();
+    glAttachShader(prog, vs);
+    glTransformFeedbackVaryings(prog, n_varyings, varyings, GL_INTERLEAVED_ATTRIBS);
+    glLinkProgram(prog);
+    glDeleteShader(vs);
+    GLint ok;
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[1024];
+        glGetProgramInfoLog(prog, sizeof(log), NULL, log);
+        fprintf(stderr, "[GL] capture program link error (%s):\n%s\n", vert_path, log);
         glDeleteProgram(prog);
         return 0;
     }

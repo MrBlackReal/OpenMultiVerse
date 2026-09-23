@@ -10,6 +10,11 @@
  */
 GLuint gl_shader_load(const char *vert_path, const char *frag_path);
 
+/* Vertex-only program with transform-feedback capture of `varyings`
+ * (interleaved); draw it with GL_RASTERIZER_DISCARD. 0 on failure. */
+GLuint gl_shader_load_capture(const char *vert_path, const char *const *varyings,
+                              int n_varyings);
+
 /*
  * Create a VAO bound to the calling code's subsequent attribute setup.
  * The VAO is left bound on return.

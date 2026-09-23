@@ -1,10 +1,13 @@
 /*
  * starsys.c — procedural star → real system promotion. See starsys.h.
  *
- * The first half of this file is a float-exact CPU port of the hash/noise/
- * density pipeline in assets/shaders/galaxy_stars.vert — the two MUST stay
- * in sync (same constants, same order of operations) or the promoted body
- * appears next to, instead of in place of, the point sprite it replaces.
+ * Which stars exist, where, and how bright is decided once, on the GPU, by
+ * galaxy_stars.vert; galaxy_star_candidates() reads that decision back for
+ * the cells around the camera. This file used to carry a float-exact CPU port
+ * of the shader's hash / noise / density pipeline, kept in step by hand; it
+ * also never saw the survey selection test or the magnitude fade, so it could
+ * promote a star the sky was not showing. Now there is nothing to keep in
+ * sync, and a promoted star is always one that was on screen.
  */
 #include "starsys.h"
 #include "body.h"
@@ -23,10 +26,6 @@
 #include <string.h>
 
 #define AU_PER_LY      63241.077
-#define SS_CELL_LY     2.0        /* finest cascade cell — sync GS_CELL_LY[0] */
-#define SS_PER_CELL    5          /* sync GS_PER_CELL                         */
-#define SS_ACCEPT      2.4f       /* sync the shader's density accept scale   */
-#define SS_ENTER_FRAC  1.35       /* sync GS_ENTER_FRAC (galaxy.c)            */
 #define SS_PROMOTE_AU  (1.1 * AU_PER_LY)   /* promote inside this radius      */
 #define SS_DEMOTE_AU   (2.6 * AU_PER_LY)   /* demote beyond it (hysteresis)   */
 #define SS_MAX         8          /* concurrently promoted systems            */
@@ -111,73 +110,7 @@ static Promoted s_prom[SS_MAX];
 static double   s_since_scan = 1e9;
 static int      s_enabled    = 1;
 
-/* ── shader port: hashes / noise / density (keep bit-for-bit in step) ────── */
-
-static float fract1(float x) { return x - floorf(x); }
-
-static float hash13f(float x, float y, float z)
-{
-    float px = fract1(x * 0.1031f);
-    float py = fract1(y * 0.1031f);
-    float pz = fract1(z * 0.1031f);
-    float d  = px * (py + 31.32f) + py * (pz + 31.32f) + pz * (px + 31.32f);
-    px += d; py += d; pz += d;
-    return fract1((px + py) * pz);
-}
-
-static void hash33f(float x, float y, float z, float out[3])
-{
-    float px = fract1(x * 0.1031f);
-    float py = fract1(y * 0.1030f);
-    float pz = fract1(z * 0.0973f);
-    float d  = px * (py + 33.33f) + py * (px + 33.33f) + pz * (pz + 33.33f);
-    px += d; py += d; pz += d;
-    out[0] = fract1((px + py) * pz);
-    out[1] = fract1((px + px) * py);
-    out[2] = fract1((py + px) * px);
-}
-
-static float vnoisef(float x, float y, float z)
-{
-    float ix = floorf(x), iy = floorf(y), iz = floorf(z);
-    float fx = x - ix, fy = y - iy, fz = z - iz;
-    fx = fx * fx * (3.0f - 2.0f * fx);
-    fy = fy * fy * (3.0f - 2.0f * fy);
-    fz = fz * fz * (3.0f - 2.0f * fz);
-    float c000 = hash13f(ix,        iy,        iz);
-    float c100 = hash13f(ix + 1.0f, iy,        iz);
-    float c010 = hash13f(ix,        iy + 1.0f, iz);
-    float c110 = hash13f(ix + 1.0f, iy + 1.0f, iz);
-    float c001 = hash13f(ix,        iy,        iz + 1.0f);
-    float c101 = hash13f(ix + 1.0f, iy,        iz + 1.0f);
-    float c011 = hash13f(ix,        iy + 1.0f, iz + 1.0f);
-    float c111 = hash13f(ix + 1.0f, iy + 1.0f, iz + 1.0f);
-    float x00 = c000 + (c100 - c000) * fx;
-    float x10 = c010 + (c110 - c010) * fx;
-    float x01 = c001 + (c101 - c001) * fx;
-    float x11 = c011 + (c111 - c011) * fx;
-    float y0  = x00 + (x10 - x00) * fy;
-    float y1  = x01 + (x11 - x01) * fy;
-    return y0 + (y1 - y0) * fz;
-}
-
-static float fbm3f(float x, float y, float z)
-{
-    float v = vnoisef(x, y, z) * 0.5f;
-    x = x * 2.03f + 3.7f; y = y * 2.03f + 1.9f; z = z * 2.03f + 2.6f;
-    v += vnoisef(x, y, z) * 0.25f;
-    x = x * 2.03f + 1.9f; y = y * 2.03f + 4.2f; z = z * 2.03f + 2.1f;
-    v += vnoisef(x, y, z) * 0.125f;
-    return v / 0.875f;
-}
-
-static float fbm2f(float x, float y, float z)
-{
-    float v = vnoisef(x, y, z) * 0.6f;
-    x = x * 2.11f + 4.1f; y = y * 2.11f + 2.3f; z = z * 2.11f + 3.4f;
-    v += vnoisef(x, y, z) * 0.3f;
-    return v / 0.9f;
-}
+/* ── small vector helpers ───────────────────────────────────────────────── */
 
 static void cross3(const float a[3], const float b[3], float out[3])
 {
@@ -195,90 +128,6 @@ static float norm3(float v[3])
 
 /* Port of galaxy_stars.vert star_density(): emission density at unit-sphere
  * position p for galaxy `gal` (no colour outputs — acceptance only). */
-static float density_cpu(int gal, const float p[3], float rr, float time_s)
-{
-    int   type = galaxy_type(gal);
-    float seed = galaxy_seed(gal);
-    float sv0 = seed * 7.0f, sv1 = seed * 3.0f, sv2 = -seed * 5.0f;
-
-    if (type == 1)                                   /* ELLIPTICAL */
-        return expf(-powf(rr / 0.42f, 0.62f) * 3.2f) * 1.5f;
-
-    float axis[3];
-    galaxy_axis(gal, axis);
-    float h  = p[0]*axis[0] + p[1]*axis[1] + p[2]*axis[2];
-    float pr[3] = { p[0] - axis[0]*h, p[1] - axis[1]*h, p[2] - axis[2]*h };
-    float r  = sqrtf(pr[0]*pr[0] + pr[1]*pr[1] + pr[2]*pr[2]);
-
-    float ref[3] = { 0.31f, 1.0f, 0.71f };
-    float t1[3], t2[3];
-    cross3(axis, ref, t1); norm3(t1);
-    cross3(axis, t1, t2);
-
-    if (type == 2) {                                 /* IRREGULAR */
-        /* Keep in step with galaxy_stars.vert: lump-warped envelope,
-         * off-centre stellar bar, patchy clumps + HII complexes. */
-        float x1 = pr[0]*t1[0] + pr[1]*t1[1] + pr[2]*t1[2];
-        float x2 = pr[0]*t2[0] + pr[1]*t2[1] + pr[2]*t2[2];
-        float lump = fbm2f(p[0]*2.1f + sv0*1.7f, p[1]*2.1f + sv1*1.7f,
-                           p[2]*2.1f + sv2*1.7f);
-        float env  = expf(-powf(r / (0.42f + 0.30f * lump), 2.2f)
-                          - powf(h / 0.30f, 2.0f));
-        float bar  = 1.5f * expf(-powf((x1 - 0.07f) / 0.34f, 2.0f)
-                                 - powf( x2          / 0.115f, 2.0f)
-                                 - powf( h           / 0.13f,  2.0f));
-        float n = fbm3f(p[0]*3.2f + sv0, p[1]*3.2f + sv1, p[2]*3.2f + sv2);
-        float k = (n - 0.48f) / (0.85f - 0.48f);
-        if (k < 0.0f) k = 0.0f;
-        if (k > 1.0f) k = 1.0f;
-        k = k * k * (3.0f - 2.0f * k);
-        float hn  = fbm2f(p[0]*4.6f - sv0, p[1]*4.6f - sv1, p[2]*4.6f - sv2);
-        float hii = (hn - 0.68f) / (0.86f - 0.68f);
-        if (hii < 0.0f) hii = 0.0f;
-        if (hii > 1.0f) hii = 1.0f;
-        hii = hii * hii * (3.0f - 2.0f * hii);
-        return env * (0.05f + 1.9f * k * k + 2.6f * hii) + bar;
-    }
-
-    /* SPIRAL */
-    float phi = atan2f(pr[0]*t2[0] + pr[1]*t2[1] + pr[2]*t2[2],
-                       pr[0]*t1[0] + pr[1]*t1[1] + pr[2]*t1[2]);
-
-    float rot  = time_s * 0.010f / (r > 0.10f ? r : 0.10f);
-    float ph   = phi + rot;
-    float wind = logf(r > 0.035f ? r : 0.035f) * 3.6f;
-    float armw = ph * 2.0f - wind;
-    float arm  = powf(0.5f + 0.5f * cosf(armw), 2.6f);
-
-    float rimf = (1.0f - rr) / (1.0f - 0.85f);       /* smoothstep(1,.85,rr) */
-    if (rimf < 0.0f) rimf = 0.0f;
-    if (rimf > 1.0f) rimf = 1.0f;
-    rimf = rimf * rimf * (3.0f - 2.0f * rimf);
-    float disc  = expf(-r / 0.30f)
-                * expf(-fabsf(h) / (0.035f + 0.09f * r * r)) * rimf;
-    float bulge = 2.4f * expf(-powf(rr / 0.14f, 2.0f));
-
-    float cr = cosf(rot), sr = sinf(rot);
-    float axp[3];
-    cross3(axis, pr, axp);
-    float prot[3] = { pr[0]*cr + axp[0]*sr + axis[0]*h,
-                      pr[1]*cr + axp[1]*sr + axis[1]*h,
-                      pr[2]*cr + axp[2]*sr + axis[2]*h };
-    float n  = fbm3f(prot[0]*4.6f + sv0, prot[1]*4.6f + sv1, prot[2]*4.6f + sv2);
-    float kn = (n - 0.55f) / (0.88f - 0.55f);
-    if (kn < 0.0f) kn = 0.0f;
-    if (kn > 1.0f) kn = 1.0f;
-    kn = kn * kn * (3.0f - 2.0f * kn);
-    kn *= arm;
-
-    /* Star-cloud mottling — same factor as galaxy_stars.vert/galaxy.frag. */
-    float cloud = 0.60f + 0.80f * fbm2f(prot[0]*3.1f + sv0*1.3f,
-                                        prot[1]*3.1f + sv1*1.3f,
-                                        prot[2]*3.1f + sv2*1.3f);
-
-    return disc * cloud * (0.38f + 2.8f * arm + 3.8f * kn) + bulge;
-}
-
 /* ── deterministic system generator ──────────────────────────────────────── */
 
 static unsigned s_rng;
@@ -511,7 +360,7 @@ static void restore(Promoted *p, const SystemDelta *d)
 }
 
 static void promote(int gal, long cx, long cy, long cz, int sub,
-                    const double star_au[3])
+                    const double star_au[3], float absmag)
 {
     /* A system whose star is gone stays gone. */
     SystemDelta *d = delta_find(gal, cx, cy, cz, sub);
@@ -535,14 +384,12 @@ static void promote(int gal, long cx, long cy, long cz, int sub,
         return;
     }
 
-    /* Star mass from the same luminosity hash the shader brightens it with
-     * (L ≈ M^3.5 main-sequence), so a brilliant sprite becomes a big star. */
-    float cfx = (float)cx, cfy = (float)cy, cfz = (float)cz;
-    float gseed = galaxy_seed(gal);
-    float hlum = hash13f(cfx*3.1f + (float)sub*17.3f - gseed,
-                         cfy*3.1f + (float)sub*17.3f - gseed,
-                         cfz*3.1f + (float)sub*17.3f - gseed);
-    double lum  = 0.04 + 260.0 * pow((double)hlum, 7.0);
+    /* Star mass from the absolute magnitude the shader DRAWS it with (drawn
+     * from the catalog's measured luminosity function), through the main-
+     * sequence L ~ M^3.5: a brilliant sprite becomes a big star, and the
+     * system matches the point it replaces. (This used an older luminosity
+     * hash the shader stopped using when the two-tier population landed.) */
+    double lum  = pow(10.0, -0.4 * ((double)absmag - 4.83));
     double msun = pow(lum, 1.0 / 3.5);
     if (msun < 0.08) msun = 0.08;
     if (msun > 40.0) msun = 40.0;
@@ -774,71 +621,30 @@ void starsys_tick(const double cam_au[3], float time_s)
 
     if (gain < 0.99f) return;
 
-    const double cell = SS_CELL_LY * AU_PER_LY;
-
+    /* The stars the finest cascade is drawing around the camera, straight
+     * from the shader: whatever exists, passes the survey selection, and is
+     * bright enough to show is exactly what can be promoted. */
+    enum { MAXC = 256 };
+    static GalaxyStarCandidate cand[MAXC];
     for (int g = 0; g < galaxy_count(); g++) {
-        double gp[3], gr = galaxy_radius_au(g);
-        if (gr <= 0.0) continue;
-        galaxy_position(g, gp);
-        double relx = cam_au[0] - gp[0];
-        double rely = cam_au[1] - gp[1];
-        double relz = cam_au[2] - gp[2];
-        double gd2 = relx*relx + rely*rely + relz*relz;
-        if (gd2 > (SS_ENTER_FRAC * gr) * (SS_ENTER_FRAC * gr)) continue;
+        int nc = galaxy_star_candidates(g, cam_au, time_s, cand, MAXC);
+        for (int c = 0; c < nc; c++) {
+            const GalaxyStarCandidate *k = &cand[c];
+            double ddx = k->pos_au[0] - cam_au[0];
+            double ddy = k->pos_au[1] - cam_au[1];
+            double ddz = k->pos_au[2] - cam_au[2];
+            if (ddx*ddx + ddy*ddy + ddz*ddz > SS_PROMOTE_AU * SS_PROMOTE_AU) continue;
 
-        long bx = (long)floor(relx / cell);
-        long by = (long)floor(rely / cell);
-        long bz = (long)floor(relz / cell);
-        float gseed = galaxy_seed(g);
-
-        for (long dz = -1; dz <= 1; dz++)
-        for (long dy = -1; dy <= 1; dy++)
-        for (long dx = -1; dx <= 1; dx++) {
-            long cx = bx + dx, cy = by + dy, cz = bz + dz;
-            float cfx = (float)cx, cfy = (float)cy, cfz = (float)cz;
-
-            for (int sub = 0; sub < SS_PER_CELL; sub++) {
-                /* Same candidate position hash as the shader. */
-                float h3[3];
-                hash33f(cfx + (float)sub*13.17f + gseed*0.173f,
-                        cfy + (float)sub*7.71f  + gseed*0.317f,
-                        cfz + (float)sub*3.39f  + gseed*0.531f, h3);
-                double sx = gp[0] + ((double)cx + (double)h3[0]) * cell;
-                double sy = gp[1] + ((double)cy + (double)h3[1]) * cell;
-                double sz = gp[2] + ((double)cz + (double)h3[2]) * cell;
-
-                double ddx = sx - cam_au[0];
-                double ddy = sy - cam_au[1];
-                double ddz = sz - cam_au[2];
-                if (ddx*ddx + ddy*ddy + ddz*ddz >
-                    SS_PROMOTE_AU * SS_PROMOTE_AU) continue;
-
-                /* Same existence test as the shader. */
-                float p[3] = { (float)((sx - gp[0]) / gr),
-                               (float)((sy - gp[1]) / gr),
-                               (float)((sz - gp[2]) / gr) };
-                float rr = sqrtf(p[0]*p[0] + p[1]*p[1] + p[2]*p[2]);
-                if (rr > 1.0f) continue;
-                float hsel = hash13f(cfx*1.7f + (float)sub*41.7f + gseed,
-                                     cfy*1.7f + (float)sub*41.7f + gseed,
-                                     cfz*1.7f + (float)sub*41.7f + gseed);
-                float acc = density_cpu(g, p, rr, time_s) * SS_ACCEPT;
-                if (acc > 1.0f) acc = 1.0f;
-                if (hsel > acc) continue;
-
-                /* Already promoted? */
-                int have = 0, free_slots = 0;
-                for (int i = 0; i < SS_MAX; i++) {
-                    if (!s_prom[i].active) { free_slots++; continue; }
-                    if (s_prom[i].gal == g && s_prom[i].cx == cx &&
-                        s_prom[i].cy == cy && s_prom[i].cz == cz &&
-                        s_prom[i].sub == sub) { have = 1; break; }
-                }
-                if (have || !free_slots) continue;
-
-                double star_au[3] = { sx, sy, sz };
-                promote(g, cx, cy, cz, sub, star_au);
+            /* Already promoted? */
+            int have = 0, free_slots = 0;
+            for (int i = 0; i < SS_MAX; i++) {
+                if (!s_prom[i].active) { free_slots++; continue; }
+                if (s_prom[i].gal == g && s_prom[i].cx == k->cell[0] &&
+                    s_prom[i].cy == k->cell[1] && s_prom[i].cz == k->cell[2] &&
+                    s_prom[i].sub == k->sub) { have = 1; break; }
             }
+            if (have || !free_slots) continue;
+            promote(g, k->cell[0], k->cell[1], k->cell[2], k->sub, k->pos_au, k->absmag);
         }
     }
 }
@@ -866,7 +672,7 @@ int starsys_selftest(void)
     galaxy_position(0, pos);
     for (cx = 1000; cx < 1400 && !p; cx++) {
         double at[3] = { pos[0] + (double)cx * 1e5, pos[1], pos[2] };
-        promote(0, cx, cy, cz, sub, at);
+        promote(0, cx, cy, cz, sub, at, 4.83f);
         for (int i = 0; i < SS_MAX; i++)
             if (s_prom[i].active && s_prom[i].cx == cx) {
                 if (s_prom[i].nbody >= 3) p = &s_prom[i];
@@ -933,7 +739,7 @@ int starsys_selftest(void)
 
     g_sim_time += dt;
     double at[3] = { pos[0] + (double)cx * 1e5, pos[1], pos[2] };
-    promote(0, cx, cy, cz, sub, at);
+    promote(0, cx, cy, cz, sub, at, 4.83f);
     Promoted *p2 = NULL;
     for (int i = 0; i < SS_MAX; i++)
         if (s_prom[i].active && s_prom[i].cx == cx) p2 = &s_prom[i];

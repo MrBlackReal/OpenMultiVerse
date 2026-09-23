@@ -117,6 +117,13 @@ typedef struct {
 static const double GS_CELL_LY[GS_CASCADES] = { 2, 8, 32, 128, 512, 2048 };
 #define GS_ENTER_FRAC 1.35   /* start resolving stars inside this × radius */
 
+/* The candidate query (galaxy_star_candidates): the finest cascade over the
+ * 3x3x3 cells around the camera, captured instead of drawn. */
+#define GS_QUERY_DIM    3
+#define GS_QUERY_POINTS (GS_QUERY_DIM * GS_QUERY_DIM * GS_QUERY_DIM * GS_PER_CELL)
+typedef struct { int32_t cell[4]; float star[4]; } GalaxyTfRecord;  /* v_tf_* */
+static GLuint s_star_query = 0, s_star_query_buf = 0;
+
 /* Live galaxy set: the catalogue rows first, then procedurally generated
  * galaxies rebuilt around the camera. galaxy_count() reports the whole set, so
  * every consumer -- crucially galaxy_render_stars(), which already takes its
@@ -227,11 +234,8 @@ static double gh_structure(double cx, double cy, double cz)
 
 static GLuint s_shader = 0, s_vao = 0, s_vbo = 0, s_ebo = 0;
 static GLuint s_star_shader = 0, s_star_vao = 0;
-static GLint  s_su_vp, s_su_cell_base, s_su_origin_rel, s_su_cell_size;
-static GLint  s_su_grid_dim, s_su_inner, s_su_outer, s_su_cam_in_gal;
-static GLint  s_su_radius, s_su_axis, s_su_seed, s_su_type, s_su_time;
-static GLint  s_su_gain, s_su_suppress, s_su_n_suppress;
-static GLint  s_su_lf_mag, s_su_mag_limit, s_su_cam_abs, s_su_q_max;
+/* Draw-only uniforms; the rest are set by star_cascade_uniforms(). */
+static GLint  s_su_vp, s_su_gain, s_su_suppress, s_su_n_suppress;
 
 /* Inverse CDF of the measured luminosity function: s_lf_mag[i] is the
  * absolute magnitude at quantile i/(LF_TABLE-1), bright end first. Built once
@@ -409,28 +413,26 @@ void galaxy_init(void)
                                    "assets/shaders/galaxy_stars.frag");
     if (s_star_shader) {
         s_su_vp         = glGetUniformLocation(s_star_shader, "u_vp");
-        s_su_cell_base  = glGetUniformLocation(s_star_shader, "u_cell_base");
-        s_su_origin_rel = glGetUniformLocation(s_star_shader, "u_origin_rel");
-        s_su_cell_size  = glGetUniformLocation(s_star_shader, "u_cell_size");
-        s_su_grid_dim   = glGetUniformLocation(s_star_shader, "u_grid_dim");
-        s_su_inner      = glGetUniformLocation(s_star_shader, "u_inner_half");
-        s_su_outer      = glGetUniformLocation(s_star_shader, "u_outer_half");
-        s_su_cam_in_gal = glGetUniformLocation(s_star_shader, "u_cam_in_gal");
-        s_su_radius     = glGetUniformLocation(s_star_shader, "u_radius_gal");
-        s_su_axis       = glGetUniformLocation(s_star_shader, "u_axis");
-        s_su_seed       = glGetUniformLocation(s_star_shader, "u_seed");
-        s_su_type       = glGetUniformLocation(s_star_shader, "u_type");
-        s_su_time       = glGetUniformLocation(s_star_shader, "u_time");
         s_su_gain       = glGetUniformLocation(s_star_shader, "u_gain");
-        s_su_lf_mag     = glGetUniformLocation(s_star_shader, "u_lf_mag");
-        s_su_mag_limit  = glGetUniformLocation(s_star_shader, "u_mag_limit");
-        s_su_cam_abs    = glGetUniformLocation(s_star_shader, "u_cam_abs");
-        s_su_q_max      = glGetUniformLocation(s_star_shader, "u_q_max");
         build_lf_table();
         s_su_suppress   = glGetUniformLocation(s_star_shader, "u_suppress");
         s_su_n_suppress = glGetUniformLocation(s_star_shader, "u_n_suppress");
         s_star_vao      = gl_vao_create();
         glBindVertexArray(0);
+
+        static const char *const tf[] = { "v_tf_cell", "v_tf_star" };
+        s_star_query = gl_shader_load_capture("assets/shaders/galaxy_stars.vert", tf, 2);
+        if (s_star_query) {
+            glGenBuffers(1, &s_star_query_buf);
+            glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, s_star_query_buf);
+            glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER,
+                         (GLsizeiptr)GS_QUERY_POINTS * sizeof(GalaxyTfRecord),
+                         NULL, GL_DYNAMIC_READ);
+            glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, 0);
+        } else {
+            fprintf(stdout, "[Galaxy] star query program failed; "
+                            "no procedural systems will promote\n");
+        }
     } else {
         fprintf(stdout, "[Galaxy] star shader load failed; "
                         "resolved stars disabled\n");
@@ -593,6 +595,48 @@ void galaxy_render(const float vp_camrel[16],
      * for galaxy_render_impostors(), which the caller draws separately. */
 }
 
+/* Set everything galaxy_stars.vert reads for galaxy i and cascade k on the
+ * bound program `prog` -- shared by the draw and the candidate query so the
+ * query sees exactly the stars that are drawn. grid_dim cells per side,
+ * centred on the camera's cell. */
+static void star_cascade_uniforms(GLuint prog, int i, int k, int grid_dim,
+                                  const double cam_pos[3], float time_s,
+                                  double inner, double outer)
+{
+    double gx = cam_pos[0] - s_gal[i].pos[0];
+    double gy = cam_pos[1] - s_gal[i].pos[1];
+    double gz = cam_pos[2] - s_gal[i].pos[2];
+    double cell = GS_CELL_LY[k] * AU_PER_LY;
+    long bx = (long)floor(gx / cell) - grid_dim / 2;
+    long by = (long)floor(gy / cell) - grid_dim / 2;
+    long bz = (long)floor(gz / cell) - grid_dim / 2;
+    double c3 = GS_CELL_LY[k] * GS_CELL_LY[k] * GS_CELL_LY[k];
+    double in_cell = (double)STELLAR_DENSITY_LY3 * c3;
+    double q_max = in_cell > 0.0 ? (double)GS_PER_CELL / in_cell : 1.0;
+    if (q_max > 1.0) q_max = 1.0;
+
+    glUniform1i(glGetUniformLocation(prog, "u_grid_dim"), grid_dim);
+    glUniform1f(glGetUniformLocation(prog, "u_time"), time_s);
+    glUniform1fv(glGetUniformLocation(prog, "u_lf_mag"), LF_TABLE, s_lf_mag);
+    glUniform1f(glGetUniformLocation(prog, "u_mag_limit"), CATALOG_MAG_LIMIT);
+    glUniform3f(glGetUniformLocation(prog, "u_cam_abs"), (float)cam_pos[0],
+                (float)cam_pos[1], (float)cam_pos[2]);
+    render_dust_uniforms(prog, (float)-cam_pos[0], (float)-cam_pos[1], (float)-cam_pos[2]);
+    glUniform3f(glGetUniformLocation(prog, "u_cam_in_gal"), (float)(gx / s_gal[i].radius),
+                (float)(gy / s_gal[i].radius), (float)(gz / s_gal[i].radius));
+    glUniform1f(glGetUniformLocation(prog, "u_radius_gal"), (float)s_gal[i].radius);
+    glUniform3fv(glGetUniformLocation(prog, "u_axis"), 1, s_gal[i].axis);
+    glUniform1f(glGetUniformLocation(prog, "u_seed"), s_gal[i].seed);
+    glUniform1i(glGetUniformLocation(prog, "u_type"), s_gal[i].type);
+    glUniform3i(glGetUniformLocation(prog, "u_cell_base"), (int)bx, (int)by, (int)bz);
+    glUniform3f(glGetUniformLocation(prog, "u_origin_rel"), (float)((double)bx * cell - gx),
+                (float)((double)by * cell - gy), (float)((double)bz * cell - gz));
+    glUniform1f(glGetUniformLocation(prog, "u_cell_size"), (float)cell);
+    glUniform1f(glGetUniformLocation(prog, "u_inner_half"), (float)inner);
+    glUniform1f(glGetUniformLocation(prog, "u_outer_half"), (float)outer);
+    glUniform1f(glGetUniformLocation(prog, "u_q_max"), (float)q_max);
+}
+
 void galaxy_render_stars(const float vp_camrel[16], const double cam_pos[3],
                          float gain, float time_s)
 {
@@ -601,21 +645,7 @@ void galaxy_render_stars(const float vp_camrel[16], const double cam_pos[3],
 
     glUseProgram(s_star_shader);
     glUniformMatrix4fv(s_su_vp, 1, GL_FALSE, vp_camrel);
-    glUniform1i(s_su_grid_dim, GS_GRID_DIM);
-    glUniform1f(s_su_time, time_s);
     glUniform1f(s_su_gain, gain);
-    glUniform1fv(s_su_lf_mag, LF_TABLE, s_lf_mag);
-    glUniform1f(s_su_mag_limit, CATALOG_MAG_LIMIT);
-    /* Dust dims both what the survey saw (Sun -> star) and what we draw
-     * (camera -> star); the Sun sits at -cam in this camera-relative frame. */
-    render_dust_uniforms(s_star_shader, (float)-cam_pos[0], (float)-cam_pos[1],
-                         (float)-cam_pos[2]);
-    /* The selection function is evaluated from the Sun (the survey's vantage),
-     * so the shader needs the camera's absolute position to recover each
-     * candidate's heliocentric distance. Float is ample: a ~100 AU rounding
-     * error at galactic-centre range shifts a distance modulus by ~1e-7 mag. */
-    glUniform3f(s_su_cam_abs, (float)cam_pos[0], (float)cam_pos[1],
-                              (float)cam_pos[2]);
 
     glEnable(GL_PROGRAM_POINT_SIZE);
     glEnable(GL_BLEND);
@@ -637,55 +667,27 @@ void galaxy_render_stars(const float vp_camrel[16], const double cam_pos[3],
 
         /* Hide sprites of stars currently promoted to real bodies. */
         {
-            int sup[8][4];
-            int nsup = starsys_suppressed(i, sup, 8);
+            int sup[32][4];
+            int nsup = starsys_suppressed(i, sup, 32);
             glUniform1i(s_su_n_suppress, nsup);
             if (nsup > 0)
                 glUniform4iv(s_su_suppress, nsup, &sup[0][0]);
         }
 
-        glUniform3f(s_su_cam_in_gal, (float)(gx / s_gal[i].radius),
-                                     (float)(gy / s_gal[i].radius),
-                                     (float)(gz / s_gal[i].radius));
-        glUniform1f (s_su_radius, (float)s_gal[i].radius);
-        glUniform3fv(s_su_axis, 1, s_gal[i].axis);
-        glUniform1f (s_su_seed, s_gal[i].seed);
-        glUniform1i (s_su_type, s_gal[i].type);
-
+        /* Cascades: cell sizes grow outward; each draws a Chebyshev shell
+         * and leaves the interior to the finer one. The uniform setup is
+         * shared with galaxy_star_candidates(), so what is promoted is
+         * exactly what is drawn. The quantile cut per cascade (u_q_max):
+         * a cell of edge c holds about STELLAR_DENSITY_LY3 * c^3 stars but
+         * emits only GS_PER_CELL candidates, so it draws from the brightest
+         * q_max fraction of the luminosity function -- true space density,
+         * not luminosity-boosted stand-ins. */
         double inner = 0.0;
         for (int k = 0; k < GS_CASCADES; k++) {
-            double cell  = GS_CELL_LY[k] * AU_PER_LY;
-            double outer = cell * 0.5 * (double)GS_GRID_DIM;
-
-            /* Lattice cell of the grid corner, absolute in galaxy frame:
-             * anchors the hashes so stars are stable world objects. */
-            long bx = (long)floor(gx / cell) - GS_GRID_DIM / 2;
-            long by = (long)floor(gy / cell) - GS_GRID_DIM / 2;
-            long bz = (long)floor(gz / cell) - GS_GRID_DIM / 2;
-
-            glUniform3i(s_su_cell_base, (int)bx, (int)by, (int)bz);
-            glUniform3f(s_su_origin_rel, (float)((double)bx * cell - gx),
-                                         (float)((double)by * cell - gy),
-                                         (float)((double)bz * cell - gz));
-            glUniform1f(s_su_cell_size, (float)cell);
-            glUniform1f(s_su_inner, (float)inner);
-            glUniform1f(s_su_outer, (float)outer);
-            {
-                /* Quantile cut for this cascade. A cell of edge c holds about
-                 * STELLAR_DENSITY_LY3 * c^3 stars but can emit only
-                 * GS_PER_CELL candidates, so draw from the brightest
-                 * q_max fraction of the luminosity function. The emitted
-                 * stars then sit at true space density instead of being
-                 * luminosity-boosted stand-ins. */
-                double c3 = GS_CELL_LY[k] * GS_CELL_LY[k] * GS_CELL_LY[k];
-                double in_cell = (double)STELLAR_DENSITY_LY3 * c3;
-                double q_max = in_cell > 0.0
-                             ? (double)GS_PER_CELL / in_cell : 1.0;
-                if (q_max > 1.0) q_max = 1.0;
-                glUniform1f(s_su_q_max, (float)q_max);
-            }
+            double outer = GS_CELL_LY[k] * AU_PER_LY * 0.5 * (double)GS_GRID_DIM;
+            star_cascade_uniforms(s_star_shader, i, k, GS_GRID_DIM, cam_pos, time_s,
+                                  inner, outer);
             glDrawArrays(GL_POINTS, 0, n_points);
-
             inner = outer;
         }
     }
@@ -694,6 +696,59 @@ void galaxy_render_stars(const float vp_camrel[16], const double cam_pos[3],
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
     glDisable(GL_PROGRAM_POINT_SIZE);
+}
+
+int galaxy_star_candidates(int i, const double cam_pos[3], float time_s,
+                           GalaxyStarCandidate *out, int max)
+{
+    if (!s_enabled || !s_stars_enabled || !s_star_query || i < 0 || i >= s_gal_n)
+        return 0;
+    double gx = cam_pos[0] - s_gal[i].pos[0];
+    double gy = cam_pos[1] - s_gal[i].pos[1];
+    double gz = cam_pos[2] - s_gal[i].pos[2];
+    if (sqrt(gx*gx + gy*gy + gz*gz) > GS_ENTER_FRAC * s_gal[i].radius) return 0;
+
+    glUseProgram(s_star_query);
+    star_cascade_uniforms(s_star_query, i, 0, GS_QUERY_DIM, cam_pos, time_s,
+                          0.0, 1e30);
+    /* Full weight, nothing suppressed: the caller decides what is already
+     * promoted; the gain only gates visibility, which promotion checks
+     * itself. */
+    glUniform1f(glGetUniformLocation(s_star_query, "u_gain"), 1.0f);
+    glUniform1i(glGetUniformLocation(s_star_query, "u_n_suppress"), 0);
+
+    glEnable(GL_RASTERIZER_DISCARD);
+    glBindVertexArray(s_star_vao);
+    glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, s_star_query_buf);
+    glBeginTransformFeedback(GL_POINTS);
+    glDrawArrays(GL_POINTS, 0, GS_QUERY_POINTS);
+    glEndTransformFeedback();
+    glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, 0);
+    glBindVertexArray(0);
+    glDisable(GL_RASTERIZER_DISCARD);
+
+    /* 135 records: the synchronous readback is a few microseconds of copy
+     * plus the wait for this one small draw, every SS_TICK_SEC. */
+    static GalaxyTfRecord rec[GS_QUERY_POINTS];
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, s_star_query_buf);
+    glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0, sizeof rec, rec);
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, 0);
+
+    const double cell = GS_CELL_LY[0] * AU_PER_LY;
+    int n = 0;
+    for (int r = 0; r < GS_QUERY_POINTS && n < max; r++) {
+        if (rec[r].cell[3] < 0) continue;            /* not drawn */
+        GalaxyStarCandidate *c = &out[n++];
+        for (int q = 0; q < 3; q++) {
+            c->cell[q] = rec[r].cell[q];
+            /* Same position the shader draws, in double from the integer
+             * cell: pos = galaxy + (cell + hash) * cell size. */
+            c->pos_au[q] = s_gal[i].pos[q] + ((double)rec[r].cell[q] + (double)rec[r].star[q]) * cell;
+        }
+        c->sub = rec[r].cell[3];
+        c->absmag = rec[r].star[3];
+    }
+    return n;
 }
 
 /* Draw the galaxies the volumetric pass was too small to march, as additive

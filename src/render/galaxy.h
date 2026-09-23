@@ -49,6 +49,24 @@ void galaxy_shutdown(void);
 void galaxy_render_stars(const float vp_camrel[16], const double cam_pos[3],
                          float gain, float time_s);
 
+/* A procedural star the star pass is drawing: its lattice cell and candidate
+ * index (the stable identity), world position, and the absolute magnitude it
+ * is drawn with. */
+typedef struct {
+    long   cell[3];
+    int    sub;
+    double pos_au[3];
+    float  absmag;
+} GalaxyStarCandidate;
+
+/* The stars galaxy i's finest cascade DRAWS in the 3x3x3 cells around the
+ * camera, read back from galaxy_stars.vert by transform feedback -- so
+ * starsys.c promotes exactly what is on screen, with no CPU copy of the
+ * density model, selection function or magnitude fade. Main thread, GL
+ * current. Returns the count written to out (at most max). */
+int galaxy_star_candidates(int i, const double cam_pos[3], float time_s,
+                           GalaxyStarCandidate *out, int max);
+
 /* Master toggle (shares the Visuals menu pattern with nebulae). */
 void galaxy_set_enabled(int enabled);
 int  galaxy_enabled(void);

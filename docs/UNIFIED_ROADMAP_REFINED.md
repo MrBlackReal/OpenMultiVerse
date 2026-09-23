@@ -107,10 +107,10 @@ surroundings become a galaxy, then the Local Group" — now works end to end:
 
 * **…and stars into real systems** (`starsys.c`): come within ~1 ly of a
   procedural star and it is *promoted* to a live body with a deterministic
-  planetary system — a float-exact CPU port of the shader's hash/density
-  pipeline finds exactly the star the sprite showed (the sprite is
-  suppressed via uniforms while the body exists), mass follows the same
-  luminosity hash that brightened it, colour comes from the spectral
+  planetary system — the star shader's own accept/reject decisions, read
+  back by transform feedback (`galaxy_star_candidates`), give exactly the
+  star the sprite showed (the sprite is suppressed via uniforms while the
+  body exists), mass follows the absolute magnitude it was drawn with, colour comes from the spectral
   pipeline, and planets spawn on circular orbits near the disc plane (rocky
   inside the snow line, giants outside, temperate worlds get atmospheres).
   **The density model lives in three synchronized ports** — `galaxy.frag`

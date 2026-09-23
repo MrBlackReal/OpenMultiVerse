@@ -32,10 +32,7 @@ uniform float u_inner_half;   /* Chebyshev radius handled by finer cascade  */
 uniform float u_outer_half;   /* this cascade's Chebyshev coverage radius   */
 uniform vec3  u_cam_in_gal;   /* camera position, unit-galaxy-radius coords */
 uniform float u_radius_gal;   /* galaxy bounding radius, AU                 */
-uniform vec3  u_axis;         /* disc spin axis (unit)                      */
 uniform float u_seed;
-uniform int   u_type;         /* 0 spiral, 1 elliptical, 2 irregular        */
-uniform float u_time;         /* shear clock — must match galaxy.frag       */
 uniform float u_gain;         /* global fade, 0..1                         */
 
 /* ── two-tier population ──────────────────────────────────────────────────
@@ -66,124 +63,35 @@ uniform float u_q_max;        /* per-cascade quantile cut: a coarse cell
                                * sampling is truncated to the bright end at
                                * the correct SPACE DENSITY rather than
                                * inflating luminosity to fake it            */
-uniform ivec4 u_suppress[8];  /* promoted stars (cell.xyz, candidate): these
+uniform ivec4 u_suppress[32]; /* promoted stars (cell.xyz, candidate): these
                                * exist as real bodies right now, so their
                                * point sprites are skipped (finest cascade
                                * only — promotion radius is ~1 ly)          */
 uniform int   u_n_suppress;
 
-out vec4 v_color;             /* rgb premultiplied-ish, a = coverage        */
+out vec4 v_color;
+
+/* This shader's own decision about each candidate, for starsys.c (which
+ * promotes the drawn stars near the camera to real systems). Read back by
+ * transform feedback from a capture-only program built from this same file
+ * (galaxy_star_candidates); the drawing program ignores them. w = the
+ * candidate index when the star is DRAWN, -1 otherwise. */
+flat out ivec4 v_tf_cell;     /* lattice cell xyz, candidate index            */
+out vec4       v_tf_star;     /* position hash in the cell (xyz), abs. mag    */             /* rgb premultiplied-ish, a = coverage        */
 
 #define GS_PER_CELL 5
 
 /* GLSL 330 has no log10; same helper star_field.vert uses. */
 float log10f(float x) { return log(x) * 0.4342944819032518; }
 
-float hash13(vec3 p) {
-    p = fract(p * 0.1031);
-    p += dot(p, p.yzx + 31.32);
-    return fract((p.x + p.y) * p.z);
-}
-
-vec3 hash33(vec3 p) {
-    p = fract(p * vec3(0.1031, 0.1030, 0.0973));
-    p += dot(p, p.yxz + 33.33);
-    return fract((p.xxy + p.yxx) * p.zyx);
-}
-
-float vnoise(vec3 p) {
-    vec3 i = floor(p);
-    vec3 f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    return mix(mix(mix(hash13(i + vec3(0,0,0)), hash13(i + vec3(1,0,0)), f.x),
-                   mix(hash13(i + vec3(0,1,0)), hash13(i + vec3(1,1,0)), f.x), f.y),
-               mix(mix(hash13(i + vec3(0,0,1)), hash13(i + vec3(1,0,1)), f.x),
-                   mix(hash13(i + vec3(0,1,1)), hash13(i + vec3(1,1,1)), f.x), f.y), f.z);
-}
-
-float fbm3(vec3 p) {
-    float v = vnoise(p) * 0.5;
-    p = p * 2.03 + vec3(3.7, 1.9, 2.6);  v += vnoise(p) * 0.25;
-    p = p * 2.03 + vec3(1.9, 4.2, 2.1);  v += vnoise(p) * 0.125;
-    return v / 0.875;
-}
-
-float fbm2(vec3 p) {
-    float v = vnoise(p) * 0.6;
-    p = p * 2.11 + vec3(4.1, 2.3, 3.4);  v += vnoise(p) * 0.3;
-    return v / 0.9;
-}
-
-/* Emission density at unit-sphere position p — a reduced port of
- * galaxy.frag's galaxy_sample() (no dust, no colour): the two must stay in
- * step or stars detach from the glow they are supposed to resolve. Also
- * returns the bulge weight and knot strength for the population colour. */
-float star_density(vec3 p, float rr, vec3 seedv, out float bulge_w, out float knots)
-{
-    bulge_w = 0.0;
-    knots   = 0.0;
-
-    if (u_type == 1) {                               /* ELLIPTICAL */
-        bulge_w = 1.0;
-        return exp(-pow(rr / 0.42, 0.62) * 3.2) * 1.5;
-    }
-
-    float h  = dot(p, u_axis);
-    vec3  pr = p - u_axis * h;
-    float r  = length(pr);
-    vec3  t1 = normalize(cross(u_axis, vec3(0.31, 1.0, 0.71)));
-    vec3  t2 = cross(u_axis, t1);
-    float phi = atan(dot(pr, t2), dot(pr, t1));
-
-    if (u_type == 2) {                               /* IRREGULAR */
-        /* Keep in step with galaxy.frag: lump-warped envelope, off-centre
-         * stellar bar, patchy clumps + HII complexes. */
-        float x1 = dot(pr, t1), x2 = dot(pr, t2);
-        float lump = fbm2(p * 2.1 + seedv * 1.7);
-        float env  = exp(-pow(r / (0.42 + 0.30 * lump), 2.2)
-                         - pow(h / 0.30, 2.0));
-        float bar  = 1.5 * exp(-pow((x1 - 0.07) / 0.34, 2.0)
-                               - pow( x2         / 0.115, 2.0)
-                               - pow( h          / 0.13,  2.0));
-        float n   = fbm3(p * 3.2 + seedv);
-        float k   = smoothstep(0.48, 0.85, n);
-        float hii = smoothstep(0.68, 0.86, fbm2(p * 4.6 - seedv));
-        float dens = env * (0.05 + 1.9 * k * k + 2.6 * hii) + bar;
-        knots   = k;
-        bulge_w = clamp(bar / max(dens, 1e-5), 0.0, 1.0);
-        return dens;
-    }
-
-    /* SPIRAL — same shear/arm/disc/bulge terms as the volume shader. */
-    float rot = u_time * 0.010 / max(r, 0.10);
-    float ph  = phi + rot;
-    float wind = log(max(r, 0.035)) * 3.6;
-    float armw = ph * 2.0 - wind;
-    float arm  = pow(0.5 + 0.5 * cos(armw), 2.6);
-
-    float disc  = exp(-r / 0.30) * exp(-abs(h) / (0.035 + 0.09 * r * r))
-                * smoothstep(1.0, 0.85, rr);
-    float bulge = 2.4 * exp(-pow(rr / 0.14, 2.0));
-
-    float cr = cos(rot), sr = sin(rot);
-    vec3  prot = pr * cr + cross(u_axis, pr) * sr + u_axis * h;
-    float n     = fbm3(prot * 4.6 + seedv);
-    float kn    = smoothstep(0.55, 0.88, n) * arm;
-
-    /* Star-cloud mottling — the stars ARE the clouds, so placement follows
-     * the same factor the volume glow uses. */
-    float cloud = 0.60 + 0.80 * fbm2(prot * 3.1 + seedv * 1.3);
-
-    knots   = kn;
-    bulge_w = clamp(bulge / max(disc * cloud * (0.38 + 2.8 * arm + 3.8 * kn)
-                                + bulge, 1e-5), 0.0, 1.0);
-    return disc * cloud * (0.38 + 2.8 * arm + 3.8 * kn) + bulge;
-}
+#include "galaxy_model.glsl"
 
 void main() {
     v_color      = vec4(0.0);
     gl_PointSize = 0.0;
     gl_Position  = vec4(0.0, 0.0, 2.0, 0.0);        /* rejected: clipped */
+    v_tf_cell    = ivec4(0, 0, 0, -1);
+    v_tf_star    = vec4(0.0);
 
     int cid = gl_VertexID / GS_PER_CELL;
     int sub = gl_VertexID - cid * GS_PER_CELL;
@@ -222,8 +130,15 @@ void main() {
     float rr = length(p);
     if (rr > 1.0) return;
     vec3  seedv = vec3(u_seed * 7.0, u_seed * 3.0, -u_seed * 5.0);
-    float bulge_w, knots;
-    float dens = star_density(p, rr, seedv, bulge_w, knots);
+    float bulge_w, knots, dens;
+    {
+        /* The volume's own model (galaxy_model.glsl), undusted: dust dims a
+         * star, it does not remove it. No early-out (0 / 0 thresholds): the
+         * acceptance test below needs the exact density. */
+        vec3 col_; float dens_d_, dust_;
+        galaxy_sample(p, rr, seedv, 0.0, 0.0, col_, dens_d_, dust_,
+                      dens, bulge_w, knots);
+    }
     if (hsel > clamp(dens * 2.4, 0.0, 1.0)) return;
 
     /* Absolute magnitude from the catalog's own luminosity function. The
@@ -281,6 +196,8 @@ void main() {
     col *= b * dust_redden(av_cam);
 
     v_color      = vec4(col, a);
+    v_tf_cell    = ivec4(cell, sub);
+    v_tf_star    = vec4(h3, absmag);
     gl_PointSize = size;
     gl_Position  = u_vp * vec4(pos, 1.0);
 }
