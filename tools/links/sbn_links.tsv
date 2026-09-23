@@ -1,0 +1,248 @@
+body	type	dataset	role	format	url	status	bytes
+67P/Churyumov–Gerasimenko	comet	Rosetta Shape Models of Comet 67P/C-G	primary	WRL	https://pdssbn.astro.umd.edu/holdings/ro-c-multi-5-67p-shape-v2.0/data/triplate/mspcd_lam/shap2/cg_mspcd_shap2_001m_cart.wrl	206	161131312
+67P/Churyumov–Gerasimenko	comet	Rosetta Shape Models of Comet 67P/C-G	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/67P/cg_mspcd_shap2_001m_cart.obj	206	49412414
+67P/Churyumov–Gerasimenko	comet	Rosetta Shape Models of Comet 67P/C-G	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/67p.png	206	144648
+67P/Churyumov–Gerasimenko	comet	Rosetta Shape Models of Comet 67P/C-G	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/67P/cg_mspcd_shap2_001m_cart.usdz	206	19759211
+81P/Wild 2	comet	Satdust NAVCAM 81P/Wild 2 Shape Model	primary	TAB	https://pdssbn.astro.umd.edu/holdings/sdu-c-navcam-5-wild2-shape-model-v2.1/data/wild2_cart_full.tab	206	1392840
+81P/Wild 2	comet	Satdust NAVCAM 81P/Wild 2 Shape Model	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/wild2/wild2_cart_full.tab.obj	206	568582
+81P/Wild 2	comet	Satdust NAVCAM 81P/Wild 2 Shape Model	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/wild2.png	206	131671
+81P/Wild 2	comet	Satdust NAVCAM 81P/Wild 2 Shape Model	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/wild2/wild2_cart_full.tab.usdz	206	186207
+103P/Hartley 2	comet	Shape Model of Hartley 2	primary	WRL	https://pdssbn.astro.umd.edu/holdings/dif-c-hriv_mri-5-hartley2-shape-v1.0/data/hartley2_2012_cart.wrl	206	3814120
+103P/Hartley 2	comet	Shape Model of Hartley 2	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/hartley2/hartley2_2012_cart.obj	206	1062351
+103P/Hartley 2	comet	Shape Model of Hartley 2	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/hartley2_2012_cart.png	206	70144
+103P/Hartley 2	comet	Shape Model of Hartley 2	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/hartley2/hartley2_2012_cart.usdz	206	259128
+9P/Tempel 1	comet	Deep Impact/Stardust-NExT Derived Shape Model	primary	WRL	https://pdssbn.astro.umd.edu/holdings/dif-c-hriv_its_mri-5-tempel1-shape-v2.0/data/tempel1_2012_cart.wrl	206	3871120
+9P/Tempel 1	comet	Deep Impact/Stardust-NExT Derived Shape Model	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/tempel1/tempel1_2012_cart.obj	206	2625388
+9P/Tempel 1	comet	Deep Impact/Stardust-NExT Derived Shape Model	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/tempel1_2012_cart.png	206	97826
+9P/Tempel 1	comet	Deep Impact/Stardust-NExT Derived Shape Model	preview-ar	USDZ	https://sbn.psi.edu/pds/previews/tempel1/tempel1_2012_cart.usdz	404	
+1P/Halley 1	comet	Stooke Small Body Shape Models	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_STOOKE_SHAPE_MODELS_V2_0/data/1682q1halley.tab	206	70226
+1998 KY26	asteroid	Stooke Small Body Shape Models	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_RADARSHAPE_MODELS_V2_0/data/1998ky26.tab	206	294720
+1998 KY26	asteroid	Stooke Small Body Shape Models	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/RADAR/1998ky26.tab.obj	206	294720
+1998 KY26	asteroid	Stooke Small Body Shape Models	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/1998ky26.png	206	73494
+1998 KY26	asteroid	Stooke Small Body Shape Models	preview-ar	USDZ	https://sbn.psi.edu/pds/RADAR/1998ky26.tab.usdz	404	
+99942 Apophis	asteroid	Radar shape model of asteroid (99942) Apophis	primary	OBJ	https://sbnarchive.psi.edu/pds4/non_mission/gbo.ast-apophis.jpl.radar.shape_model_v1.0/data/apophis_v233s7.obj	206	197868
+99942 Apophis	asteroid	Radar shape model of asteroid (99942) Apophis	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/99942apophis.png	206	712460
+486958 Arrokoth	asteroid	New Horizons Porter (2024) Arrokoth Shape Model Collection	primary	OBJ	https://pdssbn.astro.umd.edu/holdings/pds4-nh_derived:arrokoth_shapemodel_porter2024-v1.0/arrokoth_porter_2024_v01.obj	206	3686921
+486958 Arrokoth	asteroid	New Horizons Porter (2024) Arrokoth Shape Model Collection	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/arrokoth.porter_2024.png	206	392684
+486958 Arrokoth	asteroid	New Horizons Arrokoth Encounter Geology and Geophysical Maps and Shape Models	primary	OBJ	https://pdssbn.astro.umd.edu/holdings/nh-a-lorri_mvic-5-geophys-v1.0/data/shape_models/mu69_merged.obj	206	9066288
+486958 Arrokoth	asteroid	New Horizons Arrokoth Encounter Geology and Geophysical Maps and Shape Models	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/mu69_merged.png	206	311748
+Asteroid 153591	asteroid	Shape Model of Asteroid (153591) 2001 SN263	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_I0037_5_SHAPE153591_V1_0/data/a153591alpha.tab	206	144480
+Asteroid 153591	asteroid	Shape Model of Asteroid (153591) 2001 SN263	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/a153591/a153591alpha.tab.obj	206	144480
+Asteroid 153591	asteroid	Shape Model of Asteroid (153591) 2001 SN263	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/a153591.png	206	72625
+Asteroid 153591	asteroid	Shape Model of Asteroid (153591) 2001 SN263	preview-ar	USDZ	https://sbn.psi.edu/pds/a153591/a153591alpha.tab.usdz	404	
+Asteroid 52760	asteroid	Shape Model of Asteroid (153591) 2001 SN263	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_RADARSHAPE_MODELS_V2_0/data/52760.tab	206	1175136
+Asteroid 52760	asteroid	Shape Model of Asteroid (153591) 2001 SN263	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/RADAR/52760.tab.obj	206	1175136
+Asteroid 52760	asteroid	Shape Model of Asteroid (153591) 2001 SN263	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/52760.png	206	97291
+Asteroid 52760	asteroid	Shape Model of Asteroid (153591) 2001 SN263	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/RADAR/52760.tab.usdz	206	192393
+Asteroid 8567	asteroid	Shape and Rotation of (8567) 1996 HW1	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_I0037_5_SHAPE8567_V1_0/data/a8567.tab	206	175224
+Asteroid 8567	asteroid	Shape and Rotation of (8567) 1996 HW1	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/a8567/a8567.tab.obj	206	175224
+Asteroid 8567	asteroid	Shape and Rotation of (8567) 1996 HW1	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/asteroid_8567.png	206	67205
+Asteroid 8567	asteroid	Shape and Rotation of (8567) 1996 HW1	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/a8567/a8567.tab.usdz	206	25268
+1 Ceres	asteroid	Dawn Shape Models of Ceres	primary	ICQ	https://sbnarchive.psi.edu/pds3/dawn/fc/DWNCSPC_4_01/DATA/ICQ/CERES_SPC181019_1024.ICQ	206	390832562
+1 Ceres	asteroid	Dawn Shape Models of Ceres	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/ceres/CERES_SPC181019_0128.ICQ.obj	206	7418950
+1 Ceres	asteroid	Dawn Shape Models of Ceres	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/ceres.png	206	176089
+1 Ceres	asteroid	Dawn Shape Models of Ceres	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/ceres/CERES_SPC181019_0128.ICQ.usdz	206	1780034
+1 Ceres	asteroid	HST Images, Albedo Maps, and Shape of 1 Ceres	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_HSTACS_5_CERESHST_V1_0/data/shape/ceres_shap.tab	206	205
+1 Ceres	asteroid	Ceres SPC Shape and Regional Models	primary	TAB	https://sbnarchive.psi.edu/pds4/dawn/dwarf_planet-ceres.dawn.shape-models-maps_V1_0/data/global/ceres_512_p.tab	206	222124402
+1 Ceres	asteroid	Ceres SPC Shape and Regional Models	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/ceres/ceres_512_p.obj	206	126936028
+1620 Geographos	asteroid	Ceres SPC Shape and Regional Models	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_RADARSHAPE_MODELS_V2_0/data/1620geographos.tab	206	1179456
+1620 Geographos	asteroid	Ceres SPC Shape and Regional Models	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/RADAR/1620geographos.tab.obj	206	1179456
+1620 Geographos	asteroid	Ceres SPC Shape and Regional Models	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/1620geographos.png	206	64871
+1620 Geographos	asteroid	Ceres SPC Shape and Regional Models	preview-ar	USDZ	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_RADARSHAPE_MODELS_V2_0/data/1620geographos.tab.usdz	404	
+101955 Bennu	asteroid	Shape Model of Asteroid (101955) Bennu	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_I0037_5_BENNUSHAPE_V1_0/data/101955bennu.tab	206	165640
+101955 Bennu	asteroid	Shape Model of Asteroid (101955) Bennu	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/bennu/radar/101955bennu.tab.obj	206	165640
+101955 Bennu	asteroid	Shape Model of Asteroid (101955) Bennu	derived	DSK	https://sbn.psi.edu/pds/shape-models/files/dsk/BENNU_K3_NOL_V01.BDS	206	244736
+101955 Bennu	asteroid	Shape Model of Asteroid (101955) Bennu	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/101955bennu.png	206	66510
+101955 Bennu	asteroid	Shape Model of Asteroid (101955) Bennu	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/bennu/radar/101955bennu.tab.usdz	206	24578
+101955 Bennu	asteroid	OSIRIS-REx SPICE Archive	primary	DSK	https://naif.jpl.nasa.gov/pub/naif/pds/pds4/orex/orex_spice/spice_kernels/dsk/bennu_g_03170mm_spc_obj_0000n00000_v020.bds	206	9908224
+101955 Bennu	asteroid	OSIRIS-REx SPICE Archive	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/bennu/orex/bennu.orex.obj	206	14868960
+101955 Bennu	asteroid	OSIRIS-REx SPICE Archive	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/bennu.orex.png	206	683926
+101955 Bennu	asteroid	OSIRIS-REx SPICE Archive	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/bennu/orex/bennu.orex.usdz	206	1784012
+162173 Ryugu	asteroid	(JAXA) Hayabusa2 observations of the top-shape carbonaceous asteroid 162173 Ryugu	primary	OBJ	https://www.darts.isas.jaxa.jp/pub/hayabusa2/paper/Watanabe_2019/SHAPE_SFM_3M_v20180804.obj	URLError	
+162173 Ryugu	asteroid	(JAXA) Hayabusa2 observations of the top-shape carbonaceous asteroid 162173 Ryugu	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/Ryugu.png	206	300555
+21 Lutetia	asteroid	Rosetta Shape Model of Asteroid Lutetia	primary	WRL	https://pdssbn.astro.umd.edu/holdings/ro-a-osinac_osiwac-5-lutetia-shape-v1.0/data/lutetia_003m_cart.wrl	206	377499680
+21 Lutetia	asteroid	Rosetta Shape Model of Asteroid Lutetia	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/lutetia/lutetia_003k_cart.obj	206	92426
+21 Lutetia	asteroid	Rosetta Shape Model of Asteroid Lutetia	derived	DSK	https://sbn.psi.edu/pds/shape-models/files/dsk/LUTETIA_K3_FAR_V01.BDS	206	254976
+21 Lutetia	asteroid	Rosetta Shape Model of Asteroid Lutetia	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/lutetia.png	206	98194
+21 Lutetia	asteroid	Rosetta Shape Model of Asteroid Lutetia	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/lutetia/lutetia_003k_cart.usdz	206	30413
+216 Kleopatra	asteroid	Rosetta Shape Model of Asteroid Lutetia	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_RADARSHAPE_MODELS_V2_0/data/216kleopatra.tab	206	294720
+216 Kleopatra	asteroid	Rosetta Shape Model of Asteroid Lutetia	derived	OBJ	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_RADARSHAPE_MODELS_V2_0/data/216kleopatra.tab.obj	404	
+216 Kleopatra	asteroid	Rosetta Shape Model of Asteroid Lutetia	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/216kleopatra.png	206	58341
+243 Ida	asteroid	Rosetta Shape Model of Asteroid Lutetia	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_STOOKE_SHAPE_MODELS_V2_0/data/243ida.tab	206	70226
+243 Ida	asteroid	Rosetta Shape Model of Asteroid Lutetia	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_SHAPE_MODELS_V2_1/data/243ida.tab	206	527072
+253 Mathilde	asteroid	Rosetta Shape Model of Asteroid Lutetia	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_STOOKE_SHAPE_MODELS_V2_0/data/253mathilde.tab	206	70226
+253 Mathilde	asteroid	Rosetta Shape Model of Asteroid Lutetia	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_SHAPE_MODELS_V2_1/data/253mathilde.tab	206	236192
+253 Mathilde	asteroid	Rosetta Shape Model of Asteroid Lutetia	primary	TAB	https://sbnarchive.psi.edu/pds3/near/NEAR_A_5_COLLECTED_MODELS_V1_0/data/msi/253mathilde.tab	206	236192
+2063 Bacchus	asteroid	Rosetta Shape Model of Asteroid Lutetia	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_RADARSHAPE_MODELS_V2_0/data/2063bacchus.tab	206	294720
+2063 Bacchus	asteroid	Rosetta Shape Model of Asteroid Lutetia	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/RADAR/2063bacchus.tab.obj	206	294720
+2063 Bacchus	asteroid	Rosetta Shape Model of Asteroid Lutetia	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/2063bacchus.png	206	49292
+2063 Bacchus	asteroid	Rosetta Shape Model of Asteroid Lutetia	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/RADAR/2063bacchus.tab.usdz	206	50402
+2867 Steins	asteroid	Rosetta Shape Model of Asteroid Steins	primary	WRL	https://pdssbn.astro.umd.edu/holdings/ro-a-osinac_osiwac-5-steins-shape-v1.0/data/steins_cart.wrl	206	2470000
+2867 Steins	asteroid	Rosetta Shape Model of Asteroid Steins	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/steins/steins.obj	206	1627784
+2867 Steins	asteroid	Rosetta Shape Model of Asteroid Steins	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/steins.png	206	57487
+2867 Steins	asteroid	Rosetta Shape Model of Asteroid Steins	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/steins/steins.usdz	206	232241
+25143 Itokawa	asteroid	Gaskell Itokawa Shape Model	primary	TAB	https://sbnarchive.psi.edu/pds3/hayabusa/HAY_A_AMICA_5_ITOKAWASHAPE_V1_0/data/quad/quad512q.tab	206	60002570
+25143 Itokawa	asteroid	Gaskell Itokawa Shape Model	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/itokawa/ver64q.tab.obj	206	1614487
+25143 Itokawa	asteroid	Gaskell Itokawa Shape Model	derived	DSK	https://sbn.psi.edu/pds/shape-models/files/dsk/ITOKAWA_K50_GAS_V01.BDS	206	2692096
+25143 Itokawa	asteroid	Gaskell Itokawa Shape Model	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/itokawa.png	206	90496
+25143 Itokawa	asteroid	Gaskell Itokawa Shape Model	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/itokawa/ver64q.tab.usdz	206	424049
+25143 Itokawa	asteroid	Gaskell Itokawa Shape Model	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_RADARSHAPE_MODELS_V2_0/data/25143itokawa.tab	206	877920
+25143 Itokawa	asteroid	Gaskell Itokawa Shape Model	derived	DSK	https://sbn.psi.edu/pds/shape-models/files/dsk/ITOKAWA_K12_NEE_V01.BDS	206	675840
+4 Vesta	asteroid	Dawn Shape Models of Vesta	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/vesta/Vesta-256V.obj	206	7085311
+4 Vesta	asteroid	Dawn Shape Models of Vesta	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/vesta.png	206	208258
+4 Vesta	asteroid	Dawn Shape Models of Vesta	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/vesta/Vesta-256V.usdz	206	1781920
+4 Vesta	asteroid	Dawn Shape Models of Vesta	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_SHAPE_MODELS_V2_1/data/4vesta.tab	206	86432
+433 Eros	asteroid	Gaskell Eros Shape Model	primary	TAB	https://sbnarchive.psi.edu/pds3/near/NEAR_A_MSI_5_EROSSHAPE_V1_0/data/vertex/ver512q.tab	206	269310351
+433 Eros	asteroid	Gaskell Eros Shape Model	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/eros/ver64q.tab.obj	206	1622603
+433 Eros	asteroid	Gaskell Eros Shape Model	derived	DSK	https://sbn.psi.edu/pds/shape-models/files/dsk/EROS_M3_GAS_V01.BDS	206	111890432
+433 Eros	asteroid	Gaskell Eros Shape Model	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/eros.png	206	81909
+433 Eros	asteroid	Gaskell Eros Shape Model	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/eros/ver64q.tab.usdz	206	423498
+433 Eros	asteroid	Gaskell Eros Shape Model	primary	TAB	https://sbnarchive.psi.edu/pds3/near/NEAR_A_5_COLLECTED_MODELS_V1_0/data/msi/eros200700.tab	206	13848392
+4179 Toutatis	asteroid	Gaskell Eros Shape Model	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_RADARSHAPE_MODELS_V2_0/data/4179toutatis.tab	206	921408
+4179 Toutatis	asteroid	Gaskell Eros Shape Model	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/RADAR/4179toutatis.tab.obj	206	921408
+4179 Toutatis	asteroid	Gaskell Eros Shape Model	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/toutatis.png	206	66945
+4179 Toutatis	asteroid	Gaskell Eros Shape Model	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/RADAR/4179toutatis.tab.usdz	206	155329
+4769 Castalia	asteroid	Gaskell Eros Shape Model	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_RADARSHAPE_MODELS_V2_0/data/4769castalia.tab	206	294720
+4769 Castalia	asteroid	Gaskell Eros Shape Model	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/RADAR/4769castalia.tab.obj	206	294720
+4769 Castalia	asteroid	Gaskell Eros Shape Model	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/4769castalia.png	206	56408
+4769 Castalia	asteroid	Gaskell Eros Shape Model	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/RADAR/4769castalia.tab.usdz	206	50501
+6489 Golevka	asteroid	Gaskell Eros Shape Model	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_RADARSHAPE_MODELS_V2_0/data/6489golevka.tab	206	294720
+6489 Golevka	asteroid	Gaskell Eros Shape Model	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/RADAR/6489golevka.tab.obj	206	294720
+6489 Golevka	asteroid	Gaskell Eros Shape Model	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/6489golevka.png	206	68412
+6489 Golevka	asteroid	Gaskell Eros Shape Model	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/RADAR/6489golevka.tab.usdz	206	50338
+951 Gaspra	asteroid	Gaskell Eros Shape Model	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_STOOKE_SHAPE_MODELS_V2_0/data/951gaspra.tab	206	70226
+951 Gaspra	asteroid	Gaskell Eros Shape Model	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_SHAPE_MODELS_V2_1/data/951gaspra.tab	206	527072
+2100 Ra-Shalom	asteroid	Gaskell Eros Shape Model	primary	OBJ	https://sbnarchive.psi.edu/pds4/non_mission/gbo.ast.jpl.radar.shape_models_V1_0/data/a2100rashalom.obj	206	110080
+2100 Ra-Shalom	asteroid	Gaskell Eros Shape Model	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/a2100rashalom.png	206	115740
+2100 Ra-Shalom	asteroid	Gaskell Eros Shape Model	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/usd/a2100rashalom.usdz	206	20312
+4486 Mithra	asteroid	Gaskell Eros Shape Model	primary	OBJ	https://sbnarchive.psi.edu/pds4/non_mission/gbo.ast.jpl.radar.shape_models_V1_0/data/a4486mithra.obj	206	287872
+4486 Mithra	asteroid	Gaskell Eros Shape Model	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/a4486mithra.png	206	139656
+4486 Mithra	asteroid	Gaskell Eros Shape Model	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/usd/a4486mithra.usdz	206	56658
+4660 Nereus	asteroid	Gaskell Eros Shape Model	primary	OBJ	https://sbnarchive.psi.edu/pds4/non_mission/gbo.ast.jpl.radar.shape_models_V1_0/data/a4660nereus.obj	206	110080
+4660 Nereus	asteroid	Gaskell Eros Shape Model	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/a4660nereus.png	206	78312
+4660 Nereus	asteroid	Gaskell Eros Shape Model	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/usd/a4660nereus.usdz	206	20285
+10115 1992 SK	asteroid	Gaskell Eros Shape Model	primary	OBJ	https://sbnarchive.psi.edu/pds4/non_mission/gbo.ast.jpl.radar.shape_models_V1_0/data/a10115_1992sk.obj	206	48832
+10115 1992 SK	asteroid	Gaskell Eros Shape Model	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/a10115_1992sk.png	206	93563
+10115 1992 SK	asteroid	Gaskell Eros Shape Model	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/usd/a10115_1992sk.usdz	206	10156
+29075 1950 DA (Retrograde)	asteroid	Gaskell Eros Shape Model	primary	OBJ	https://sbnarchive.psi.edu/pds4/non_mission/gbo.ast.jpl.radar.shape_models_V1_0/data/a29075_1950da_retrogrademodel.obj	206	50358
+29075 1950 DA (Retrograde)	asteroid	Gaskell Eros Shape Model	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/a29075_1950da_retrogrademodel.png	206	111022
+29075 1950 DA (Retrograde)	asteroid	Gaskell Eros Shape Model	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/usd/a29075_1950da_retrogrademodel.usdz	206	10180
+29075 1950 DA (Prograde)	asteroid	Gaskell Eros Shape Model	primary	OBJ	https://sbnarchive.psi.edu/pds4/non_mission/gbo.ast.jpl.radar.shape_models_V1_0/data/a29075_1950da_progrademodel.obj	206	97792
+29075 1950 DA (Prograde)	asteroid	Gaskell Eros Shape Model	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/a29075_1950da_progrademodel.png	206	155837
+29075 1950 DA (Prograde)	asteroid	Gaskell Eros Shape Model	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/usd/a29075_1950da_progrademodel.usdz	206	23922
+33342 1998 WT24	asteroid	Gaskell Eros Shape Model	primary	OBJ	https://sbnarchive.psi.edu/pds4/non_mission/gbo.ast.jpl.radar.shape_models_V1_0/data/a33342_1998wt24.obj	206	383872
+33342 1998 WT24	asteroid	Gaskell Eros Shape Model	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/a33342_1998wt24.png	206	149415
+33342 1998 WT24	asteroid	Gaskell Eros Shape Model	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/usd/a33342_1998wt24.usdz	206	95630
+54509 YORP	asteroid	Gaskell Eros Shape Model	primary	OBJ	https://sbnarchive.psi.edu/pds4/non_mission/gbo.ast.jpl.radar.shape_models_V1_0/data/a54509_yorp.obj	206	27520
+54509 YORP	asteroid	Gaskell Eros Shape Model	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/a54509_yorp.png	206	438582
+54509 YORP	asteroid	Gaskell Eros Shape Model	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/usd/a54509_yorp.usdz	206	6538
+66391 1999 KW4 Alpha	asteroid	Gaskell Eros Shape Model	primary	OBJ	https://sbnarchive.psi.edu/pds4/non_mission/gbo.ast.jpl.radar.shape_models_V1_0/data/a66391_1999kw4_primary.obj	206	440128
+66391 1999 KW4 Alpha	asteroid	Gaskell Eros Shape Model	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/a66391_1999kw4_primary.png	206	158635
+66391 1999 KW4 Alpha	asteroid	Gaskell Eros Shape Model	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/usd/a66391_1999kw4_primary.usdz	206	79291
+66391 1999 KW4 Beta	asteroid	Gaskell Eros Shape Model	primary	OBJ	https://sbnarchive.psi.edu/pds4/non_mission/gbo.ast.jpl.radar.shape_models_V1_0/data/a66391_1999kw4_secondary.obj	206	110080
+66391 1999 KW4 Beta	asteroid	Gaskell Eros Shape Model	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/a66391_1999kw4_secondary.png	206	98607
+66391 1999 KW4 Beta	asteroid	Gaskell Eros Shape Model	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/usd/a66391_1999kw4_secondary.usdz	206	20394
+136617 1994 CC Alpha	asteroid	Gaskell Eros Shape Model	primary	OBJ	https://sbnarchive.psi.edu/pds4/non_mission/gbo.ast.jpl.radar.shape_models_V1_0/data/a136617_1994cc_primary.obj	206	191872
+136617 1994 CC Alpha	asteroid	Gaskell Eros Shape Model	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/a136617_1994cc_primary.png	206	153977
+136617 1994 CC Alpha	asteroid	Gaskell Eros Shape Model	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/usd/a136617_1994cc_primary.usdz	206	44068
+276049 2002 CE26 Alpha	asteroid	Gaskell Eros Shape Model	primary	OBJ	https://sbnarchive.psi.edu/pds4/non_mission/gbo.ast.jpl.radar.shape_models_V1_0/data/	200	
+276049 2002 CE26 Alpha	asteroid	Gaskell Eros Shape Model	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/a276046_2002ce26_primary.png	206	145247
+276049 2002 CE26 Alpha	asteroid	Gaskell Eros Shape Model	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/usd/a276046_2002ce26_primary.usdz	206	10153
+341843 2008 EV5	asteroid	Gaskell Eros Shape Model	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/a341843_2008ev5.png	206	161999
+341843 2008 EV5	asteroid	Gaskell Eros Shape Model	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/usd/a341843_2008ev5.usdz	206	49230
+Amalthea (Jupiter V)	satellite	Phoebe (Saturn IX)	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_STOOKE_SHAPE_MODELS_V2_0/data/j5amalthea.tab	206	70226
+Atlas (Saturn XV)	satellite	Phoebe (Saturn IX)	primary	TAB	https://sbnarchive.psi.edu/pds4/certified/saturn_satellite_shape_models_V1_0/data/atlas_30k_plt.tab	206	2024400
+Atlas (Saturn XV)	satellite	Phoebe (Saturn IX)	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/SATURN_SMALL_MOONS/atlas_30k_plt.tab.obj	206	1127404
+Atlas (Saturn XV)	satellite	Phoebe (Saturn IX)	derived	DSK	https://sbn.psi.edu/pds/shape-models/files/dsk/ATLAS_K30_THO_V01.BDS	206	1559552
+Atlas (Saturn XV)	satellite	Phoebe (Saturn IX)	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/atlas_30k_plt.png	206	42068
+Atlas (Saturn XV)	satellite	Phoebe (Saturn IX)	preview-ar	UDSZ	https://sbn.psi.edu/pds/shape-models/files/SATURN_SMALL_MOONS/atlas_30k_plt.tab.usdz	206	290953
+Calypso (Saturn XIV)	satellite	Phoebe (Saturn IX)	primary	TAB	https://sbnarchive.psi.edu/pds4/certified/saturn_satellite_shape_models_V1_0/data/calypso_30k_plt.tab	206	2120850
+Calypso (Saturn XIV)	satellite	Phoebe (Saturn IX)	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/SATURN_SMALL_MOONS/calypso_30k_plt.tab.obj	206	1184427
+Calypso (Saturn XIV)	satellite	Phoebe (Saturn IX)	derived	DSK	https://sbn.psi.edu/pds/shape-models/files/dsk/CALYPSO_K30_THO_V01.BDS	206	1759232
+Calypso (Saturn XIV)	satellite	Phoebe (Saturn IX)	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/calypso_30k_plt.png	206	62321
+Calypso (Saturn XIV)	satellite	Phoebe (Saturn IX)	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/SATURN_SMALL_MOONS/calypso_30k_plt.tab.usdz	206	306483
+Daphnis (Saturn XXXV)	satellite	Phoebe (Saturn IX)	primary	TAB	https://sbnarchive.psi.edu/pds4/certified/saturn_satellite_shape_models_V1_0/data/daphnis_30k_plt.tab	206	2019600
+Daphnis (Saturn XXXV)	satellite	Phoebe (Saturn IX)	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/SATURN_SMALL_MOONS/daphnis_30k_plt.tab.obj	206	1124670
+Daphnis (Saturn XXXV)	satellite	Phoebe (Saturn IX)	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/daphnis_30k_plt.png	206	70634
+Daphnis (Saturn XXXV)	satellite	Phoebe (Saturn IX)	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/SATURN_SMALL_MOONS/daphnis_30k_plt.tab.usdz	206	290243
+Deimos (Mars II)	satellite	Phoebe (Saturn IX)	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_SHAPE_MODELS_V2_1/data/m2deimos.tab	206	86432
+Dione (Saturn IV)	satellite	Gaskell Dione Shape Model	primary	TAB	https://sbnarchive.psi.edu/pds3/multi_mission/CO_SA_ISSNA_ISSWA_5_DIONESHAPE_V1_0/data/dione_ver512q.tab	206	269310408
+Dione (Saturn IV)	satellite	Gaskell Dione Shape Model	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/dione/dione_ver64q.tab.obj	206	1752471
+Dione (Saturn IV)	satellite	Gaskell Dione Shape Model	derived	DSK	https://sbn.psi.edu/pds/shape-models/files/dsk/DIONE_K50_GAS_V01.BDS	206	2835456
+Dione (Saturn IV)	satellite	Gaskell Dione Shape Model	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/dione.png	206	339660
+Dione (Saturn IV)	satellite	Gaskell Dione Shape Model	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/dione/dione_ver64q.tab.usdz	206	423575
+Dione (Saturn IV)	satellite	Dione SPC Shape Model and Assessment Products	primary	OBJ	https://sbnarchive.psi.edu/pds4/cassini/satellite-dione.cassini.shape-models-maps/data/global/dione_512_o.obj	206	283115640
+Epimetheus (Saturn XI)	satellite	Dione SPC Shape Model and Assessment Products	primary	TAB	https://sbnarchive.psi.edu/pds4/certified/saturn_satellite_shape_models_V1_0/data/epimetheus_30k_plt.tab	206	2087100
+Epimetheus (Saturn XI)	satellite	Dione SPC Shape Model and Assessment Products	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/SATURN_SMALL_MOONS/epimetheus_30k_plt.tab.obj	206	1164353
+Epimetheus (Saturn XI)	satellite	Dione SPC Shape Model and Assessment Products	derived	DSK	https://sbn.psi.edu/pds/shape-models/files/dsk/EPIMETHEUS_K30_THO_V01.BDS	206	1783808
+Epimetheus (Saturn XI)	satellite	Dione SPC Shape Model and Assessment Products	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/epimetheus_30k_plt.png	206	117468
+Epimetheus (Saturn XI)	satellite	Dione SPC Shape Model and Assessment Products	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/SATURN_SMALL_MOONS/epimetheus_30k_plt.tab.usdz	206	298157
+Epimetheus (Saturn XI)	satellite	Dione SPC Shape Model and Assessment Products	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_STOOKE_SHAPE_MODELS_V2_0/data/s11epimetheus.tab	206	70226
+Epimetheus (Saturn XI)	satellite	Dione SPC Shape Model and Assessment Products	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_SHAPE_MODELS_V2_1/data/s11epimetheus.tab	206	86432
+Helene (Saturn XII)	satellite	Dione SPC Shape Model and Assessment Products	primary	TAB	https://sbnarchive.psi.edu/pds4/certified/saturn_satellite_shape_models_V1_0/data/helene_30k_plt.tab	206	2024100
+Helene (Saturn XII)	satellite	Dione SPC Shape Model and Assessment Products	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/SATURN_SMALL_MOONS/helene_30k_plt.tab.obj	206	1127434
+Helene (Saturn XII)	satellite	Dione SPC Shape Model and Assessment Products	derived	DSK	https://sbn.psi.edu/pds/shape-models/files/dsk/HELENE_K30_THO_V01.BDS	206	1757184
+Helene (Saturn XII)	satellite	Dione SPC Shape Model and Assessment Products	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/helene_30k_plt.png	206	117047
+Helene (Saturn XII)	satellite	Dione SPC Shape Model and Assessment Products	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/SATURN_SMALL_MOONS/helene_30k_plt.tab.usdz	206	288517
+Hyperion (Saturn VII)	satellite	Dione SPC Shape Model and Assessment Products	primary	TAB	https://sbnarchive.psi.edu/pds4/certified/saturn_satellite_shape_models_V1_0/data/hyperion_30k_plt.tab	206	2195250
+Hyperion (Saturn VII)	satellite	Dione SPC Shape Model and Assessment Products	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/SATURN_SMALL_MOONS/hyperion_30k_plt.tab.obj	206	1228388
+Hyperion (Saturn VII)	satellite	Dione SPC Shape Model and Assessment Products	derived	DSK	https://sbn.psi.edu/pds/shape-models/files/dsk/HYPERION_K30_THO_V01.BDS	206	1838080
+Hyperion (Saturn VII)	satellite	Dione SPC Shape Model and Assessment Products	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/hyperion_30k_plt.png	206	83088
+Hyperion (Saturn VII)	satellite	Dione SPC Shape Model and Assessment Products	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/SATURN_SMALL_MOONS/hyperion_30k_plt.tab.usdz	206	311919
+Hyperion (Saturn VII)	satellite	Dione SPC Shape Model and Assessment Products	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_SHAPE_MODELS_V2_1/data/s7hyperion.tab	206	86432
+Janus (Saturn X)	satellite	Dione SPC Shape Model and Assessment Products	primary	TAB	https://sbnarchive.psi.edu/pds4/certified/saturn_satellite_shape_models_V1_0/data/janus_30k_plt.tab	206	2007000
+Janus (Saturn X)	satellite	Dione SPC Shape Model and Assessment Products	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/SATURN_SMALL_MOONS/janus_30k_plt.tab.obj	206	1117064
+Janus (Saturn X)	satellite	Dione SPC Shape Model and Assessment Products	derived	DSK	https://sbn.psi.edu/pds/shape-models/files/dsk/JANUS_K30_THO_V01.BDS	206	1752064
+Janus (Saturn X)	satellite	Dione SPC Shape Model and Assessment Products	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/janus_30k_plt.png	206	93944
+Janus (Saturn X)	satellite	Dione SPC Shape Model and Assessment Products	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/SATURN_SMALL_MOONS/janus_30k_plt.tab.usdz	206	284617
+Janus (Saturn X)	satellite	Dione SPC Shape Model and Assessment Products	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_SHAPE_MODELS_V2_1/data/s10janus.tab	206	86432
+Janus (Saturn X)	satellite	Dione SPC Shape Model and Assessment Products	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_STOOKE_SHAPE_MODELS_V2_0/data/s10janus.tab	206	70226
+Larissa (Neptune VII)	satellite	Dione SPC Shape Model and Assessment Products	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_STOOKE_SHAPE_MODELS_V2_0/data/n7larissa.tab	206	70226
+Mimas (Saturn I)	satellite	Gaskell Mimas Shape Model	primary	TAB	https://sbnarchive.psi.edu/pds3/multi_mission/CO_SA_ISSNA_5_MIMASSHAPE_V2_0/data/mimas_ver512q.tab	206	269310408
+Mimas (Saturn I)	satellite	Gaskell Mimas Shape Model	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/mimas/mimas_ver512q.tab.obj	206	125463806
+Mimas (Saturn I)	satellite	Gaskell Mimas Shape Model	derived	DSK	https://sbn.psi.edu/pds/shape-models/files/dsk/MIMAS_M3_GAS_V01.BDS	206	112461824
+Mimas (Saturn I)	satellite	Gaskell Mimas Shape Model	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/mimas.png	206	174742
+Mimas (Saturn I)	satellite	Gaskell Mimas Shape Model	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/mimas/mimas_ver512q.tab.usdz	206	29193057
+Mimas (Saturn I)	satellite	Mimas SPC Shape Model and Assessment Products	primary	OBJ	https://sbnarchive.psi.edu/pds4/cassini/satellite-mimas.cassini.shape-models-maps/data/mimas_512_o.obj	206	283115640
+Pan (Saturn XVIII)	satellite	Mimas SPC Shape Model and Assessment Products	primary	TAB	https://sbnarchive.psi.edu/pds4/certified/saturn_satellite_shape_models_V1_0/data/pan_30k_plt.tab	206	2060250
+Pan (Saturn XVIII)	satellite	Mimas SPC Shape Model and Assessment Products	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/SATURN_SMALL_MOONS/pan_30k_plt.tab.obj	206	1148494
+Pan (Saturn XVIII)	satellite	Mimas SPC Shape Model and Assessment Products	derived	DSK	https://sbn.psi.edu/pds/shape-models/files/dsk/PAN_K30_THO_V01.BDS	206	1726464
+Pan (Saturn XVIII)	satellite	Mimas SPC Shape Model and Assessment Products	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/pan_30k_plt.png	206	60222
+Pan (Saturn XVIII)	satellite	Mimas SPC Shape Model and Assessment Products	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/SATURN_SMALL_MOONS/pan_30k_plt.tab.usdz	206	297067
+Pandora (Saturn XVII)	satellite	Mimas SPC Shape Model and Assessment Products	primary	TAB	https://sbnarchive.psi.edu/pds4/certified/saturn_satellite_shape_models_V1_0/data/pandora_30k_plt.tab	206	2034450
+Pandora (Saturn XVII)	satellite	Mimas SPC Shape Model and Assessment Products	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/SATURN_SMALL_MOONS/pandora_30k_plt.tab.obj	206	1133446
+Pandora (Saturn XVII)	satellite	Mimas SPC Shape Model and Assessment Products	derived	DSK	https://sbn.psi.edu/pds/shape-models/files/dsk/PANDORA_K30_THO_V01.BDS	206	1691648
+Pandora (Saturn XVII)	satellite	Mimas SPC Shape Model and Assessment Products	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/pandora_30k_plt.png	206	73921
+Pandora (Saturn XVII)	satellite	Mimas SPC Shape Model and Assessment Products	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/SATURN_SMALL_MOONS/pandora_30k_plt.tab.usdz	206	292503
+Pandora (Saturn XVII)	satellite	Mimas SPC Shape Model and Assessment Products	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_STOOKE_SHAPE_MODELS_V2_0/data/s17pandora.tab	206	70226
+Phobos (Mars I)	satellite	Gaskell Phobos Shape Model	primary	TAB	https://sbnarchive.psi.edu/pds3/multi_mission/VO1_SA_VISA_VISB_5_PHOBOSSHAPE_V1_0/data/phobos_ver512q.tab	206	269310351
+Phobos (Mars I)	satellite	Gaskell Phobos Shape Model	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/phobos/phobos_ver512q.tab.obj	206	118894862
+Phobos (Mars I)	satellite	Gaskell Phobos Shape Model	derived	DSK	https://sbn.psi.edu/pds/shape-models/files/dsk/PHOBOS_M3_GAS_V01.BDS	206	111464448
+Phobos (Mars I)	satellite	Gaskell Phobos Shape Model	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/phobos.png	206	123387
+Phobos (Mars I)	satellite	Gaskell Phobos Shape Model	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/phobos/phobos_ver512q.tab.usdz	206	29204968
+Phobos (Mars I)	satellite	Gaskell Phobos Shape Model	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_SHAPE_MODELS_V2_1/data/m1phobos.tab	206	527072
+Phoebe (Saturn IX)	satellite	Gaskell Phoebe Shape Model	primary	TAB	https://sbnarchive.psi.edu/pds3/multi_mission/CO_SA_ISSNA_5_PHOEBESHAPE_V2_0/data/phoebe_ver512q.tab	206	269310408
+Phoebe (Saturn IX)	satellite	Gaskell Phoebe Shape Model	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/phoebe/phoebe_ver512q.tab.obj	206	123186882
+Phoebe (Saturn IX)	satellite	Gaskell Phoebe Shape Model	derived	DSK	https://sbn.psi.edu/pds/shape-models/files/dsk/PHOEBE_M3_GAS_V01.BDS	206	111564800
+Phoebe (Saturn IX)	satellite	Gaskell Phoebe Shape Model	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/phoebe.png	206	157292
+Phoebe (Saturn IX)	satellite	Gaskell Phoebe Shape Model	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/phoebe/phoebe_ver512q.tab.usdz	206	29198640
+Phoebe (Saturn IX)	satellite	Gaskell Phoebe Shape Model	primary	OBJ	https://sbnarchive.psi.edu/pds4/cassini/satellite-phoebe.cassini.shape-models-maps_V1_0/data/phoebe_512_o.obj	206	283484520
+Prometheus (Saturn XVI)	satellite	Gaskell Phoebe Shape Model	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_STOOKE_SHAPE_MODELS_V2_0/data/s16prometheus.tab	206	70226
+Prometheus (Saturn XVI)	satellite	Gaskell Phoebe Shape Model	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/SATURN_SMALL_MOONS/prometheus_30k_plt.tab.obj	206	1188210
+Prometheus (Saturn XVI)	satellite	Gaskell Phoebe Shape Model	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/prometheus_30k_plt.png	206	53190
+Prometheus (Saturn XVI)	satellite	Gaskell Phoebe Shape Model	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/SATURN_SMALL_MOONS/s16prometheus.tab.usdz	206	10153
+Prometheus (Saturn XVI)	satellite	Gaskell Phoebe Shape Model	primary	TAB	https://sbnarchive.psi.edu/pds4/certified/saturn_satellite_shape_models_V1_0/data/prometheus_30k_plt.tab	206	2127300
+Proteus (Neptune VIII)	satellite	Gaskell Phoebe Shape Model	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_STOOKE_SHAPE_MODELS_V2_0/data/n8proteus.tab	206	70226
+Telesto (Saturn XIII)	satellite	Gaskell Phoebe Shape Model	primary	TAB	https://sbnarchive.psi.edu/pds4/certified/saturn_satellite_shape_models_V1_0/data/telesto_30k_plt.tab	206	2070450
+Telesto (Saturn XIII)	satellite	Gaskell Phoebe Shape Model	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/SATURN_SMALL_MOONS/telesto_30k_plt.tab.obj	206	1154776
+Telesto (Saturn XIII)	satellite	Gaskell Phoebe Shape Model	derived	DSK	https://sbn.psi.edu/pds/shape-models/files/dsk/TELESTO_K30_THO_V01.BDS	206	1841152
+Telesto (Saturn XIII)	satellite	Gaskell Phoebe Shape Model	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/telesto_30k_plt.png	206	72926
+Telesto (Saturn XIII)	satellite	Gaskell Phoebe Shape Model	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/SATURN_SMALL_MOONS/telesto_30k_plt.tab.usdz	206	298511
+Tethys (Saturn III)	satellite	Gaskell Tethys Shape Model	primary	TAB	https://sbnarchive.psi.edu/pds3/multi_mission/CO_SA_ISSNA_5_TETHYSSHAPE_V1_0/data/tethys_ver512q.tab	206	269310408
+Tethys (Saturn III)	satellite	Gaskell Tethys Shape Model	derived	OBJ	https://sbn.psi.edu/pds/shape-models/files/tethys/tethys_ver512q.tab.obj	206	127096359
+Tethys (Saturn III)	satellite	Gaskell Tethys Shape Model	derived	DSK	https://sbn.psi.edu/pds/shape-models/files/dsk/TETHYS_M3_GAS_V01.BDS	206	112176128
+Tethys (Saturn III)	satellite	Gaskell Tethys Shape Model	preview	PNG	https://sbn.psi.edu/pds/shape-models/previews/tethys.png	206	204570
+Tethys (Saturn III)	satellite	Gaskell Tethys Shape Model	preview-ar	USDZ	https://sbn.psi.edu/pds/shape-models/files/tethys/tethys_ver512q.tab.usdz	206	29202576
+Tethys (Saturn III)	satellite	Tethys SPC Shape Model and Assessment Products	primary	OBJ	https://sbnarchive.psi.edu/pds4/cassini/satellite-tethys.cassini.shape-models-maps/data/global/tethys_512_o.obj	206	283115640
+Rhea (Saturn V)	satellite	Rhea SPC Shape Model and Assessment Products	primary	OBJ	https://sbnarchive.psi.edu/pds4/cassini/satellite-rhea.cassini.shape-models-maps/data/rhea_512_o.obj	206	283115640
+Thebe (Jupiter XIV)	satellite	Rhea SPC Shape Model and Assessment Products	primary	TAB	https://sbnarchive.psi.edu/pds3/non_mission/EAR_A_5_DDR_STOOKE_SHAPE_MODELS_V2_0/data/j14thebe.tab	206	70226

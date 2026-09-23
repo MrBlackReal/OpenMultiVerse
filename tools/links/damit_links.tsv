@@ -1,0 +1,8 @@
+kind	what	url	status	bytes
+archive	Complete DAMIT export, always the newest (~1.32 GB tar.gz, monthly; all lightcurve-inversion shape models + spin states)	https://damit.cuni.cz/projects/damit/exports/complete/latest	206	1413625138
+table	Asteroids (CSV)	https://damit.cuni.cz/projects/damit/exports/table/asteroids	200	611143
+table	Models: spin axis, period, epoch (CSV)	https://damit.cuni.cz/projects/damit/exports/table/asteroid_models	200	2022610
+table	Tumblers (CSV)	https://damit.cuni.cz/projects/damit/exports/table/tumblers	200	1606
+table	References (CSV)	https://damit.cuni.cz/projects/damit/exports/table/references	200	171354
+table	Models-References (CSV)	https://damit.cuni.cz/projects/damit/exports/table/asteroid_models_references	200	244068
+table	References-Tumblers (CSV)	https://damit.cuni.cz/projects/damit/exports/table/references_tumblers	200	112
