@@ -2142,15 +2142,28 @@ int main(int argc, char **argv) {
         /* Refresh the cosmic density field (throttled; rebuilds on body-set
          * change). Queried by the HUD and, later, continuous LOD. */
         profiler_stage_begin(PROFILER_STAGE_FIELDS);
-        cosmic_field_tick(dt);
+        {
+            /* Per-tick zones: this stage averages a few ms but spikes to ~90,
+             * and all three rebuild on a body-set change, so the aggregate
+             * cannot say which one hitches. */
+            double z0 = profiler_now_ms();
+            cosmic_field_tick(dt);
+            double z1 = profiler_now_ms();
 
-        /* Refresh emitter luminosities (throttled; they drift on the stellar
-         * clock). Queried by render.c body lighting and the HUD. */
-        radiance_field_tick(dt);
+            /* Refresh emitter luminosities (throttled; they drift on the
+             * stellar clock). Queried by render.c body lighting and the HUD. */
+            radiance_field_tick(dt);
+            double z2 = profiler_now_ms();
 
-        /* Refresh the field graph's harvested edges (throttled; rebuilds on
-         * body-set change). Queried by the Inspect panel's Relations view. */
-        field_graph_tick(dt);
+            /* Refresh the field graph's harvested edges (throttled; rebuilds
+             * on body-set change). Queried by the Inspect Relations view. */
+            field_graph_tick(dt);
+            double z3 = profiler_now_ms();
+
+            profiler_zone_add("  cosmic_field_tick", z1 - z0);
+            profiler_zone_add("  radiance_field_tick", z2 - z1);
+            profiler_zone_add("  field_graph_tick", z3 - z2);
+        }
         profiler_stage_end(PROFILER_STAGE_FIELDS);
 
         /* A shot owns the camera while it plays: pose it for this frame before

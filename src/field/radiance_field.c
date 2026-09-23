@@ -28,6 +28,7 @@
  * active the field rebuilds every tick so the flash decay is smooth.
  */
 #include "radiance_field.h"
+#include "profiler.h"
 #include "body.h"
 #include "universe.h"   /* g_field_star_begin/end */
 #include "physics.h"    /* physics_active_bodies (near field stars) */
@@ -120,6 +121,12 @@ static double s_since_rebuild = 0.0;
 static int    s_last_nbodies  = -1;
 static int    s_had_sn        = 0;   /* last rebuild harvested a supernova */
 #define REBUILD_PERIOD_SEC 0.5
+
+/* Irradiance cull thresholds (see radiance_field_rebuild). Relative: fraction
+ * of the brightest emitter's irradiance below which one cannot matter.
+ * Absolute: W/m^2 floor so empty space does not readmit the whole catalog. */
+#define RADIANCE_REL_FLOOR 1e-7
+#define RADIANCE_ABS_FLOOR 1e-12
 
 /* Thermal (photosphere) luminosity of a star-flagged body, W. */
 static double star_luminosity(const Body *b)
@@ -297,11 +304,17 @@ void radiance_field_shutdown(void)
 
 /* Push one star (body index i) as a radiance emitter, if it is a live star with
  * positive luminosity.  Shared by the non-field and near-field passes. */
-static void add_star_emitter(int i)
+/* Luminosity of body i as an emitter, or 0 if it is not one. */
+static double star_emitter_lum(int i)
 {
     const Body *b = &g_bodies[i];
-    if (!b->alive || !b->is_star) return;   /* is_black_hole ⇒ is_star */
-    double lum = b->is_black_hole ? bh_luminosity(b) : star_luminosity(b);
+    if (!b->alive || !b->is_star) return 0.0;   /* is_black_hole ⇒ is_star */
+    return b->is_black_hole ? bh_luminosity(b) : star_luminosity(b);
+}
+
+static void add_star_emitter_lum(int i, double lum)
+{
+    const Body *b = &g_bodies[i];
     if (lum <= 0.0) return;
     Emitter *e = emitters_push();
     e->body  = i;
@@ -312,6 +325,11 @@ static void add_star_emitter(int i)
     e->label  = NULL;
     e->nebula = -1;
     s_body_lum[i] = lum;
+}
+
+static void add_star_emitter(int i)
+{
+    add_star_emitter_lum(i, star_emitter_lum(i));
 }
 
 void radiance_field_rebuild(void)
@@ -333,12 +351,61 @@ void radiance_field_rebuild(void)
      * per body and per comet, each frame) O(that) — the dominant per-frame cost
      * at galaxy scale.  A field star you approach still becomes an emitter (and
      * can be the dominant light in deep field), refreshed on each rebuild. */
-    for (int i = 0; i < g_nbodies; i++) {
-        if (i >= g_field_star_begin && i < g_field_star_end) {
-            i = g_field_star_end - 1;   /* O(1) skip of the whole field range */
-            continue;
+    /* Irradiance cull.  The scan above is ~210k catalog bodies and ~204k of
+     * them are stars, so admitting them all produced 203,972 emitters -- the
+     * exact failure the comment above warns about, and the reason this stage
+     * spiked to ~50 ms every rebuild.
+     *
+     * The cull is by IRRADIANCE, not by frustum.  This is a lighting
+     * structure: a star behind the camera still lights what is in front of
+     * it, so culling by view would make a planet's illumination change as you
+     * turned around.  Irradiance (lum / d^2) is view-independent, and an
+     * emitter that cannot measurably light anything near the camera is one
+     * nothing can observe.
+     *
+     * Two passes: the first is arithmetic only and costs ~1 ms over 210k
+     * bodies; the second pays emitters_push + colour lookup for the few
+     * hundred that survive.  Both a relative floor (against the brightest
+     * emitter, so a nearby star correctly drowns the rest) and an absolute
+     * one (so genuinely empty space does not readmit everything). */
+    {
+        double cam_m[3] = { g_cam.pos[0] * AU, g_cam.pos[1] * AU,
+                            g_cam.pos[2] * AU };
+        double max_irr = 0.0;
+        for (int i = 0; i < g_nbodies; i++) {
+            if (i >= g_field_star_begin && i < g_field_star_end) {
+                i = g_field_star_end - 1;   /* O(1) skip of the field range */
+                continue;
+            }
+            double lum = star_emitter_lum(i);
+            s_body_lum[i] = lum;            /* scratch; pass 2 re-reads it */
+            if (lum <= 0.0) continue;
+            double dx = g_bodies[i].pos[0] - cam_m[0];
+            double dy = g_bodies[i].pos[1] - cam_m[1];
+            double dz = g_bodies[i].pos[2] - cam_m[2];
+            double d2 = dx * dx + dy * dy + dz * dz;
+            double irr = lum / (d2 > 1.0 ? d2 : 1.0);
+            if (irr > max_irr) max_irr = irr;
         }
-        add_star_emitter(i);
+        double floor_irr = max_irr * RADIANCE_REL_FLOOR;
+        if (floor_irr < RADIANCE_ABS_FLOOR) floor_irr = RADIANCE_ABS_FLOOR;
+        for (int i = 0; i < g_nbodies; i++) {
+            if (i >= g_field_star_begin && i < g_field_star_end) {
+                i = g_field_star_end - 1;
+                continue;
+            }
+            double lum = s_body_lum[i];
+            if (lum <= 0.0) continue;
+            double dx = g_bodies[i].pos[0] - cam_m[0];
+            double dy = g_bodies[i].pos[1] - cam_m[1];
+            double dz = g_bodies[i].pos[2] - cam_m[2];
+            double d2 = dx * dx + dy * dy + dz * dz;
+            if (lum / (d2 > 1.0 ? d2 : 1.0) < floor_irr) {
+                s_body_lum[i] = 0.0;        /* culled: not an emitter */
+                continue;
+            }
+            add_star_emitter_lum(i, lum);
+        }
     }
     if (g_field_star_end > g_field_star_begin) {
         double cam_m[3] = { g_cam.pos[0] * AU, g_cam.pos[1] * AU, g_cam.pos[2] * AU };
@@ -453,6 +520,7 @@ void radiance_field_rebuild(void)
     s_since_rebuild = 0.0;
     s_last_nbodies  = g_nbodies;
 
+    profiler_zone_add("  radiance emitters", (double)s_count);
     radiance_field_grid_build();
 }
 

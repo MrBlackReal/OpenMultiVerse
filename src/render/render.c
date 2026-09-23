@@ -856,7 +856,10 @@ static void env_capture(float sf_fade)
                       ENV_SIZE, ENV_SIZE, (float)g_render_time, 0);
         /* The galaxy's resolved stars: far from the Sun (e.g. at Sgr A*) they
          * are nearly all the stars there are to lens. */
-        galaxy_render_stars(vp, g_cam.pos, 1.0f - sf_fade, (float)g_render_time);
+        /* Gain is no longer the skybox crossfade: the selection function in
+         * galaxy_stars.vert decides per star whether the catalog already
+         * covers it, so there is no radius to fade across. */
+        galaxy_render_stars(vp, g_cam.pos, 1.0f, (float)g_render_time);
         nebula_render(vp, right, up, fwd, g_cam.pos, 1.0f, 1.0f, ENV_SIZE, ENV_SIZE);
         field_stars_draw(vp);
         clusters_render(vp);
@@ -2285,9 +2288,10 @@ static void field_stars_ensure(void)
     s_field_generation = g_universe_generation;
     s_field_count = 0;
 
-    int begin = g_field_star_begin, end = g_field_star_end;
-    int n = (end > begin) ? end - begin : 0;
-    if (n <= 0) return;
+    /* Built from the compact store, not from Body slots: the bulk catalog is
+     * no longer materialised as bodies (universe.h FieldStar). */
+    int n = g_field_star_n;
+    if (n <= 0 || !g_field_stars) return;
 
     float *buf = (float *)malloc((size_t)n * 8 * sizeof(float));
     if (!buf) return;
@@ -2297,35 +2301,34 @@ static void field_stars_ensure(void)
     /* First pass: centroid of the live field stars (double), used as the shared
      * reference so stored positions carry only their offset FROM it, not the
      * galaxy's absolute ~1e10 AU coordinate. */
+    const double LY_RS = LY * RS;     /* store is light-years; VBO is render units */
     double cx = 0.0, cy = 0.0, cz = 0.0;
-    int nlive = 0;
-    for (int i = begin; i < end; i++) {
-        Body *b = &g_bodies[i];
-        if (!b->alive || !b->is_star) continue;
-        cx += b->pos[0] * RS; cy += b->pos[1] * RS; cz += b->pos[2] * RS;
-        nlive++;
+    for (int i = 0; i < n; i++) {
+        const FieldStar *fs = &g_field_stars[i];
+        cx += (double)fs->pos_ly[0] * LY_RS;
+        cy += (double)fs->pos_ly[1] * LY_RS;
+        cz += (double)fs->pos_ly[2] * LY_RS;
     }
-    if (nlive > 0) { cx /= nlive; cy /= nlive; cz /= nlive; }
+    cx /= n; cy /= n; cz /= n;
     s_field_ref[0] = cx; s_field_ref[1] = cy; s_field_ref[2] = cz;
 
     int w = 0;
-    for (int i = begin; i < end; i++) {
-        Body *b = &g_bodies[i];
-        if (!b->alive || !b->is_star) continue;
-        double Lr = (double)b->radius / R_SUN_M;
+    for (int i = 0; i < n; i++) {
+        const FieldStar *fs = &g_field_stars[i];
+        double Lr = ((double)fs->radius_km * 1000.0) / R_SUN_M;
         double L  = Lr * Lr;
         if (!(L > 1e-6)) L = 1e-6;
         float absmag = (float)(M_SUN - 2.5 * log10(L));   /* distance-independent */
         /* Catalogue magnitude wins when the star carries one (StarBin v2): it
          * is what the sky actually shows, where the radius-based estimate is a
          * guess from temperature. */
-        if (b->has_abs_mag) absmag = b->abs_mag;
-        buf[w*8+0] = (float)(b->pos[0] * RS - cx);
-        buf[w*8+1] = (float)(b->pos[1] * RS - cy);
-        buf[w*8+2] = (float)(b->pos[2] * RS - cz);
-        buf[w*8+3] = b->col[0];
-        buf[w*8+4] = b->col[1];
-        buf[w*8+5] = b->col[2];
+        if (!isnan(fs->abs_mag)) absmag = fs->abs_mag;
+        buf[w*8+0] = (float)((double)fs->pos_ly[0] * LY_RS - cx);
+        buf[w*8+1] = (float)((double)fs->pos_ly[1] * LY_RS - cy);
+        buf[w*8+2] = (float)((double)fs->pos_ly[2] * LY_RS - cz);
+        buf[w*8+3] = fs->color[0] / 255.0f;
+        buf[w*8+4] = fs->color[1] / 255.0f;
+        buf[w*8+5] = fs->color[2] / 255.0f;
         buf[w*8+6] = 1.0f;
         buf[w*8+7] = absmag;
         w++;
@@ -2462,7 +2465,6 @@ void render_frame(const float view[16], const float proj[16],
      * per-frame loops iterate ~thousands instead of the full ~hundreds of
      * thousands. */
     static int *s_dyn = NULL;      static int s_dyn_cap = 0;
-    static int *s_nearf = NULL;    static int s_nearf_cap = 0;
     int dyn_room = g_nbodies + 1;
     if (dyn_room > s_dyn_cap) {
         int cap = s_dyn_cap ? s_dyn_cap : 1024;
@@ -2504,22 +2506,16 @@ void render_frame(const float view[16], const float proj[16],
     for (int i = 0; i < g_field_star_begin && i < g_nbodies; i++) s_dyn[n_dyn++] = i;
     for (int i = g_field_star_end; i < g_nbodies; i++)            s_dyn[n_dyn++] = i;
     if (g_field_star_end > g_field_star_begin) {
-        /* Field stars within NEAR_DOT_DIST → promote to the dynamic set. Reuses
-         * the movement-gated near-system cache, so this is not a full scan. */
-        const int NEARF_MAX = 16384;
-        if (s_nearf_cap < NEARF_MAX) {
-            s_nearf = realloc(s_nearf, (size_t)NEARF_MAX * sizeof(int));
-            if (!s_nearf) { fprintf(stderr, "[render] nearf alloc failed\n"); exit(1); }
-            s_nearf_cap = NEARF_MAX;
-        }
+        /* The bulk catalog is records now (universe.h FieldStar), so there is
+         * no field body to promote. Instead materialise the few within
+         * NEAR_DOT_DIST into the reserved pool slots, then feed whichever of
+         * those are live into the dynamic set. The query runs against the
+         * frozen cell partition, so this is not a full scan. */
         double cam_m[3] = { g_cam.pos[0] * AU, g_cam.pos[1] * AU, g_cam.pos[2] * AU };
         double near_r_m = (double)g_settings.near_dot_dist_ly * LY;
-        int nn = physics_active_bodies(cam_m, near_r_m, s_nearf, s_nearf_cap);
-        for (int j = 0; j < nn; j++) {
-            int b = s_nearf[j];
-            if (b >= g_field_star_begin && b < g_field_star_end)
-                s_dyn[n_dyn++] = b;
-        }
+        universe_field_pool_update(cam_m, near_r_m);
+        for (int b = g_field_star_begin; b < g_field_star_end; b++)
+            if (g_bodies[b].alive) s_dyn[n_dyn++] = b;
     }
 
 dyn_ready:
@@ -3121,7 +3117,7 @@ dyn_ready:
      * following the same density model as the glow above, crossfaded in as
      * the painted neighbourhood skybox fades out. Always full-res (cheap
      * points, correct depth test against opaque geometry). */
-    galaxy_render_stars(vp_camrel, g_cam.pos, 1.0f - sf_fade,
+    galaxy_render_stars(vp_camrel, g_cam.pos, 1.0f,
                         (float)g_render_time);
 
     if (zt_name) profiler_zone_add(zt_name, profiler_now_ms() - zt0);

@@ -36,12 +36,36 @@ uniform vec3  u_axis;         /* disc spin axis (unit)                      */
 uniform float u_seed;
 uniform int   u_type;         /* 0 spiral, 1 elliptical, 2 irregular        */
 uniform float u_time;         /* shear clock — must match galaxy.frag       */
-uniform float u_gain;         /* global fade (skybox crossfade), 0..1       */
-uniform float u_lum_scale;    /* per-cascade: a coarse cell's candidates
-                               * represent the brightest stars of a much
-                               * larger volume, so luminosity grows ~ with
-                               * cell area — keeps each cascade's apparent
-                               * brightness distribution scale-invariant    */
+uniform float u_gain;         /* global fade, 0..1                         */
+
+/* ── two-tier population ──────────────────────────────────────────────────
+ * These stars are the COMPLEMENT of the real catalog, not an alternative to
+ * it. Each candidate draws a physical absolute magnitude from the catalog's
+ * own measured luminosity function (tools/derive_lf.py -> stellar_lf.h), then
+ * is discarded if the catalog could have detected it — because in that case a
+ * real, measured star already occupies that part of the sky. What survives is
+ * exactly what the survey missed: too faint, or too far, or (once the dust
+ * cube lands) too reddened.
+ *
+ * That replaces the old radius crossfade, which faded procedural stars in by
+ * distance from the origin and so had no physical meaning where the two
+ * populations overlapped. There is now no radius and no crossfade.
+ *
+ * u_lf_mag is the luminosity function's inverse CDF indexed by LOG10
+ * quantile: u_lf_mag[i] is the absolute magnitude at
+ * q = 10^(LF_LOGQ_MIN + i/(LF_TABLE-1) * -LF_LOGQ_MIN). Log spacing matters —
+ * a coarse cascade cuts at q_max ~ 1e-7, which a linear table cannot
+ * resolve.                                                                 */
+#define LF_TABLE 32
+#define LF_LOGQ_MIN (-9.0)
+uniform float u_lf_mag[LF_TABLE];
+uniform float u_mag_limit;    /* catalog detection limit, apparent mag      */
+uniform vec3  u_cam_abs;      /* camera absolute position, AU (Sun at 0)    */
+uniform float u_q_max;        /* per-cascade quantile cut: a coarse cell
+                               * carries only its brightest few members, so
+                               * sampling is truncated to the bright end at
+                               * the correct SPACE DENSITY rather than
+                               * inflating luminosity to fake it            */
 uniform ivec4 u_suppress[8];  /* promoted stars (cell.xyz, candidate): these
                                * exist as real bodies right now, so their
                                * point sprites are skipped (finest cascade
@@ -51,6 +75,9 @@ uniform int   u_n_suppress;
 out vec4 v_color;             /* rgb premultiplied-ish, a = coverage        */
 
 #define GS_PER_CELL 5
+
+/* GLSL 330 has no log10; same helper star_field.vert uses. */
+float log10f(float x) { return log(x) * 0.4342944819032518; }
 
 float hash13(vec3 p) {
     p = fract(p * 0.1031);
@@ -199,18 +226,41 @@ void main() {
     float dens = star_density(p, rr, seedv, bulge_w, knots);
     if (hsel > clamp(dens * 2.4, 0.0, 1.0)) return;
 
-    /* Power-law luminosity: most stars faint, a rare tail of supergiants.
-     * Apparent brightness in inverse-square, with luminosity scaled to the
-     * cascade cell so far cascades show only their brightest members. */
-    float lum  = (0.04 + 260.0 * pow(hlum, 7.0)) * u_lum_scale;
-    float dist = max(length(pos), 1.0);
-    float dly  = dist / 63241.077;                   /* AU → ly */
-    float b    = lum / max(dly * dly, 1e-4);
+    /* Absolute magnitude from the catalog's own luminosity function. The
+     * hash is remapped into [0, u_q_max] so a coarse cascade draws only from
+     * the bright tail — its cell volume holds far more stars than the
+     * GS_PER_CELL candidates it can emit, so it must represent the brightest
+     * of them at true space density. */
+    float q  = max(hlum * u_q_max, 1e-9);
+    float t  = clamp((log10f(q) - LF_LOGQ_MIN) / (-LF_LOGQ_MIN), 0.0, 1.0);
+    float fi = t * float(LF_TABLE - 1);
+    int   i0 = int(fi);
+    int   i1 = min(i0 + 1, LF_TABLE - 1);
+    float absmag = mix(u_lf_mag[i0], u_lf_mag[i1], fi - float(i0));
 
-    float size = clamp(sqrt(b) * 4.0, 0.0, 6.0);
-    float a    = clamp(b * 8.0, 0.0, 1.0) * rim * u_gain;
-    if (size < 0.35 || a < 0.01) return;
-    if (size < 1.0) { a *= size; size = 1.0; }       /* sub-pixel → dimmer */
+    const float AU_PER_PC = 206264.806;
+
+    /* SELECTION FUNCTION — measured from the Sun, not the camera, because
+     * that is where the survey observed from. If the catalog could have seen
+     * this star, a real one is already there and this candidate must not be
+     * drawn, or the sky is double-populated. */
+    vec3  from_sun = pos + u_cam_abs;
+    float d_sun_pc = max(length(from_sun) / AU_PER_PC, 1e-6);
+    float m_sun    = absmag + 5.0 * log10f(d_sun_pc) - 5.0;
+    if (m_sun < u_mag_limit) return;
+
+    /* Apparent magnitude at the CAMERA drives what we draw. Size and HDR gain
+     * are star_field.vert's curves verbatim, so a procedural star and a
+     * catalog star of equal apparent magnitude render identically — the two
+     * tiers have to be one population on screen. */
+    float d_cam_pc = max(length(pos) / AU_PER_PC, 1e-6);
+    float m_cam    = absmag + 5.0 * log10f(d_cam_pc) - 5.0;
+
+    float size = clamp(7.0 - 0.45 * (m_cam + 1.0), 1.4, 7.0);
+    float hdr  = (m_cam < 2.5) ? min(6.0, pow(10.0, 0.28 * (2.5 - m_cam))) : 1.0;
+    float a    = clamp(pow(10.0, -0.4 * (m_cam - 9.0)), 0.0, 1.0) * rim * u_gain;
+    float b    = hdr;
+    if (a < 0.01) return;
 
     /* Population colour: warm in the bulge, blue-white in the arms, with a
      * per-star temperature spread; HII-knot members skew hot blue. */
@@ -219,8 +269,9 @@ void main() {
     col = mix(col, vec3(0.70, 0.78, 1.00), knots * 0.5);
 
     /* HDR lift for the rare bright members — the bloom pass blazes them in
-     * their own colour, matching the body-dot/skybox overbright treatment. */
-    col *= 1.0 + min(b * 0.10, 4.0);
+     * their own colour. star_field.vert applies exactly this gain to catalog
+     * stars (col = a_color.rgb * gain), so the two tiers overbright alike. */
+    col *= b;
 
     v_color      = vec4(col, a);
     gl_PointSize = size;

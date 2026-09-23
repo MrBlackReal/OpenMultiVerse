@@ -2,6 +2,7 @@
  * body.h — Body data structure and orbital mechanics
  */
 #pragma once
+#include <stdint.h>
 #include "common.h"
 
 /* Stellar lifecycle phase. Drives radius/colour and death events.
@@ -114,16 +115,45 @@ typedef struct {
     double trail_frame_vel[3];    /* body velocity at frame start             */
     double trail_frame_prev_pos[3];/* previous curve anchor at frame start    */
     double trail_frame_prev_vel[3];/* previous curve velocity at frame start  */
+
+    /* Slot generation, bumped every time universe_add_body() reuses this slot
+     * for a different body. An array index alone cannot tell "the body I meant"
+     * from "whatever moved into its slot after it was absorbed"; index plus
+     * generation can, in O(1). See BodyHandle below. */
+    uint32_t generation;
 } Body;
+
+/* A reference that survives slot reuse.
+ *
+ * The codebase currently guards stale indices in four ad-hoc ways -- comparing
+ * names before demoting a promoted system (starsys.c), dropping orphaned rings
+ * on reuse (rings.h), snapshotting participant names into field-graph events
+ * (field_graph.h), and repairing parent/tidal_hole links on absorption
+ * (collision.c). Each solves the same problem locally and none composes. A
+ * handle makes the check uniform and cheap, so new call sites get it for free
+ * rather than inventing a fifth guard. */
+typedef struct {
+    int      index;       /* g_bodies slot, or -1 for "none"   */
+    uint32_t generation;  /* Body.generation when taken        */
+} BodyHandle;
+
+/* Take a handle to body `i` (pass -1 for a null handle). */
+BodyHandle body_handle(int i);
+
+/* Resolve a handle to a live slot index, or -1 if the body it referred to is
+ * gone or its slot has since been reused by a different body. */
+int body_handle_resolve(BodyHandle h);
 
 /* g_bodies is a heap-allocated array that grows via realloc.
  * g_nbodies is the high-water slot count, not the number of alive bodies.
  * Absorbed slots stay addressable for stable indices and may be reused by
  * universe_add_body() once their Body.alive flag is clear.
  * g_bodies_cap is the current allocated capacity.
- * MAX_BODIES (common.h) is also the compile-time bound for per-frame arrays
- * in render/labels/physics/collision, so runtime-added body indices stay
- * below that value. */
+ * MAX_BODIES (common.h) sizes some fixed per-frame caches (labels.c slots),
+ * but it does NOT bound body indices: universe_add_body() grows g_bodies past
+ * it, and starsys promotion routinely lands bodies in the hundreds of
+ * thousands. Code indexing a MAX_BODIES array by body index must range-check
+ * rather than assume. */
 extern Body *g_bodies;
 extern int   g_nbodies;
 extern int   g_bodies_cap;

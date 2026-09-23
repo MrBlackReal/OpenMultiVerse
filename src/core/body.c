@@ -273,6 +273,23 @@ int nearest_star_idx(void)
  * at most once, so it can never exceed g_nbodies hops. If corrupt data forms a
  * loop (e.g. a stale build where the Body layout disagrees between translation
  * units), we bail out with -1 instead of spinning forever. */
+BodyHandle body_handle(int i)
+{
+    BodyHandle h = { -1, 0 };
+    if (i < 0 || i >= g_nbodies) return h;
+    h.index = i;
+    h.generation = g_bodies[i].generation;
+    return h;
+}
+
+int body_handle_resolve(BodyHandle h)
+{
+    if (h.index < 0 || h.index >= g_nbodies) return -1;
+    const Body *b = &g_bodies[h.index];
+    if (!b->alive || b->generation != h.generation) return -1;
+    return h.index;
+}
+
 int body_root_star(int i)
 {
     int steps = 0;

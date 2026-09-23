@@ -45,6 +45,7 @@
  *   The root_star_of() helper walks this chain upward until parent == -1.
  */
 #include "universe.h"
+#include "cosmic_field.h"
 #include "body.h"
 #include "physics.h"
 #include "rings.h"
@@ -372,6 +373,16 @@ static int find_reusable_body_slot(void)
      * a large universe (e.g. a supernova progenitor that was just retired) are
      * reused instead of growing the array unbounded. */
     for (int i = 0; i < g_nbodies; i++) {
+        /* Never hand out a field-pool slot. Those dead slots are reserved for
+         * materialising nearby catalog stars; the header's rule that runtime
+         * additions "append past g_field_star_end and are therefore never
+         * mistaken for field stars" depends on this. Before the bulk catalog
+         * became records the range held only live bodies, so the question
+         * never arose. */
+        if (i >= g_field_star_begin && i < g_field_star_end) {
+            i = g_field_star_end - 1;
+            continue;
+        }
         if (!g_bodies[i].alive) return i;
     }
     return -1;
@@ -430,6 +441,57 @@ static int root_star_of(int i) { return body_root_star(i); }
 int g_universe_is_snapshot = 0;
 int g_field_star_begin = 0;
 int g_field_star_end   = 0;
+
+/* Compact field-star store (universe.h). The bulk catalog lives here instead
+ * of in g_bodies; see the header for why. */
+FieldStar *g_field_stars = NULL;
+int        g_field_star_n = 0;
+static int s_field_star_cap = 0;
+
+/* Body slots reserved for materialising nearby field stars (see the pool
+ * comment in universe_load). s_pool_rec[k] is the store record occupying pool
+ * slot g_field_star_begin + k, or -1 when the slot is free. */
+#define FIELD_POOL_MAX 512
+static int s_pool_rec[FIELD_POOL_MAX];
+
+static void field_store_reset(void)
+{
+    free(g_field_stars);
+    g_field_stars = NULL;
+    g_field_star_n = 0;
+    s_field_star_cap = 0;
+}
+
+/* Append one record. Capacity doubles: the catalog is millions of rows, so a
+ * per-row realloc would be O(n^2) copying. */
+static int field_store_push(const StarBinRecord *r,
+                            double px, double py, double pz)
+{
+    if (g_field_star_n == s_field_star_cap) {
+        int cap = s_field_star_cap ? s_field_star_cap * 2 : 65536;
+        FieldStar *t = (FieldStar *)realloc(g_field_stars,
+                                            (size_t)cap * sizeof(FieldStar));
+        if (!t) return 0;
+        g_field_stars = t;
+        s_field_star_cap = cap;
+    }
+    FieldStar *fs = &g_field_stars[g_field_star_n++];
+    fs->pos_ly[0] = (float)px;
+    fs->pos_ly[1] = (float)py;
+    fs->pos_ly[2] = (float)pz;
+    fs->vel_kms[0] = r->vel_kms[0];
+    fs->vel_kms[1] = r->vel_kms[1];
+    fs->vel_kms[2] = r->vel_kms[2];
+    fs->mass_kg   = r->mass_kg;
+    fs->radius_km = r->radius_km;
+    fs->abs_mag   = r->abs_mag;
+    fs->color[0]  = r->color[0];
+    fs->color[1]  = r->color[1];
+    fs->color[2]  = r->color[2];
+    fs->flags     = r->flags;
+    fs->source_id = r->source_id;
+    return 1;
+}
 unsigned g_universe_generation = 0;
 
 /* Path of the source universe JSON most recently passed to universe_load().
@@ -991,26 +1053,14 @@ static void load_star_catalog(const char *path)
                     if (dup) { skipped++; continue; }
                 }
 
-                ensure_capacity(g_nbodies + 1);
-                Body *bo = &g_bodies[g_nbodies];
-                body_defaults(bo);
-                star_catalog_name(r->source_id, bo->name, sizeof bo->name);
-                if (!isnan(r->abs_mag)) { bo->has_abs_mag = 1; bo->abs_mag = r->abs_mag; }
-                bo->mass   = r->mass_kg;
-                bo->radius = (double)r->radius_km * 1000.0;
-                bo->pos[0] = px * LY; bo->pos[1] = py * LY; bo->pos[2] = pz * LY;
-                bo->vel[0] = (double)r->vel_kms[0] * 1000.0;
-                bo->vel[1] = (double)r->vel_kms[1] * 1000.0;
-                bo->vel[2] = (double)r->vel_kms[2] * 1000.0;
-                bo->col[0] = r->color[0] / 255.0f;
-                bo->col[1] = r->color[1] / 255.0f;
-                bo->col[2] = r->color[2] / 255.0f;
-                bo->is_star = 1;
-                bo->obliquity = 0.0;
-                bo->rotation_rate = 2.0 * PI / (25.0 * DAY);   /* convert_gaia default */
-                accretion_init_body(bo);
-                alloc_trail(bo);                               /* NULL for stars */
-                g_nbodies++;
+                /* Into the compact store, not a Body slot. A field star is
+                 * frozen scenery read by exactly two bulk consumers (the
+                 * static VBO and the frozen cell partition); full body state
+                 * is materialised into the pool only when one comes near. */
+                if (!field_store_push(r, px, py, pz)) {
+                    fprintf(stderr, "[universe] field-star store alloc failed\n");
+                    break;
+                }
                 added++;
             }
             remaining -= (uint32_t)got;
@@ -1604,7 +1654,20 @@ void universe_load(const char *path)
      * GPU path (render.c), promoted into the dynamic path only when near. */
     g_field_star_begin = g_nbodies;
     load_star_catalog(json_str(json_get(root, "star_catalog"), ""));
+    /* The catalog itself went into the compact store. Reserve a small pool of
+     * dead Body slots inside the range so a star the camera approaches can be
+     * materialised with full body state (sphere, label, lighting, HUD) while
+     * the other millions stay 48-byte records. */
+    if (g_field_star_n > 0) {
+        for (int i = 0; i < FIELD_POOL_MAX; i++) {
+            ensure_capacity(g_nbodies + 1);
+            body_defaults(&g_bodies[g_nbodies]);
+            g_bodies[g_nbodies].alive = 0;
+            g_nbodies++;
+        }
+    }
     g_field_star_end = g_nbodies;
+    for (int i = 0; i < FIELD_POOL_MAX; i++) s_pool_rec[i] = -1;
 
     /* Parent links are already resolved; make names unique so the downstream
      * name-keyed subsystems (rings, asteroid belts, build-mode rebind, labels)
@@ -1649,6 +1712,7 @@ int universe_add_body(const BodyCreateSpec *spec)
     }
 
     bo = &g_bodies[idx];
+    uint32_t gen = bo->generation;
     if (reused_slot) {
         old_trail = bo->trail;
         old_trail_seg_len = bo->trail_seg_len;
@@ -1658,6 +1722,11 @@ int universe_add_body(const BodyCreateSpec *spec)
         bo->trail = old_trail;
         bo->trail_seg_len = old_trail_seg_len;
     }
+    /* Bump past body_defaults(), which zeroes the struct. Every occupancy of a
+     * slot gets a distinct generation, so a handle taken against the previous
+     * tenant no longer resolves. Starts at 1 so a zeroed handle is never
+     * mistaken for a valid one. */
+    bo->generation = gen + 1;
 
     strncpy(bo->name, spec->name ? spec->name : "Body", 31);
     bo->name[31] = '\0';
@@ -1740,6 +1809,7 @@ void universe_rebind_to_nearest_stars(void)
 /* Free all trail buffers and the body array itself, then reset globals. */
 void universe_shutdown(void)
 {
+    field_store_reset();
     int i;
     for (i = 0; i < g_nbodies; i++) {
         free(g_bodies[i].trail);
@@ -1751,4 +1821,70 @@ void universe_shutdown(void)
     g_bodies     = NULL;
     g_nbodies    = 0;
     g_bodies_cap = 0;
+}
+
+/* ── field-star pool ──────────────────────────────────────────────────────
+ *
+ * Materialise the catalog stars within `radius_m` of the camera into the
+ * reserved Body slots, and release the ones that drifted out. The bulk
+ * catalog is 48-byte records; only these few need acceleration, rotation,
+ * labels, lighting and a HUD entry, and only while you are near them.
+ *
+ * Same residency shape as the trail pool: diff against what is already
+ * resident rather than rebuilding, so a star sitting at the boundary is not
+ * torn down and rebuilt every frame. */
+void universe_field_pool_update(const double cam_m[3], double radius_m)
+{
+    if (!g_field_stars || g_field_star_end <= g_field_star_begin) return;
+
+    static int near[FIELD_POOL_MAX];
+    int n = cosmic_field_stars_near(cam_m, radius_m, near, FIELD_POOL_MAX);
+
+    /* Release slots whose record is no longer in range. */
+    for (int k = 0; k < FIELD_POOL_MAX; k++) {
+        if (s_pool_rec[k] < 0) continue;
+        int still = 0;
+        for (int j = 0; j < n; j++) if (near[j] == s_pool_rec[k]) { still = 1; break; }
+        if (!still) {
+            g_bodies[g_field_star_begin + k].alive = 0;
+            s_pool_rec[k] = -1;
+        }
+    }
+
+    /* Materialise anything newly in range into a free slot. */
+    for (int j = 0; j < n; j++) {
+        int fi = near[j], have = 0;
+        for (int k = 0; k < FIELD_POOL_MAX; k++)
+            if (s_pool_rec[k] == fi) { have = 1; break; }
+        if (have) continue;
+        int slot = -1;
+        for (int k = 0; k < FIELD_POOL_MAX; k++)
+            if (s_pool_rec[k] < 0) { slot = k; break; }
+        if (slot < 0) break;                 /* pool full: the rest stay points */
+
+        const FieldStar *fs = &g_field_stars[fi];
+        Body *bo = &g_bodies[g_field_star_begin + slot];
+        body_defaults(bo);
+        star_catalog_name(fs->source_id, bo->name, sizeof bo->name);
+        if (!isnan(fs->abs_mag)) { bo->has_abs_mag = 1; bo->abs_mag = fs->abs_mag; }
+        bo->mass   = fs->mass_kg;
+        bo->radius = (double)fs->radius_km * 1000.0;
+        bo->pos[0] = (double)fs->pos_ly[0] * LY;
+        bo->pos[1] = (double)fs->pos_ly[1] * LY;
+        bo->pos[2] = (double)fs->pos_ly[2] * LY;
+        bo->vel[0] = (double)fs->vel_kms[0] * 1000.0;
+        bo->vel[1] = (double)fs->vel_kms[1] * 1000.0;
+        bo->vel[2] = (double)fs->vel_kms[2] * 1000.0;
+        bo->col[0] = fs->color[0] / 255.0f;
+        bo->col[1] = fs->color[1] / 255.0f;
+        bo->col[2] = fs->color[2] / 255.0f;
+        bo->is_star = 1;
+        bo->obliquity = 0.0;
+        bo->rotation_rate = 2.0 * PI / (25.0 * DAY);   /* convert_gaia default */
+        accretion_init_body(bo);
+        alloc_trail(bo);                               /* NULL for stars */
+        bo->alive = 1;
+        bo->generation++;                              /* handles stay honest */
+        s_pool_rec[slot] = fi;
+    }
 }

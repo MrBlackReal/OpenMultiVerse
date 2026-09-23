@@ -122,6 +122,38 @@ extern int g_universe_is_snapshot;
 extern int g_field_star_begin;
 extern int g_field_star_end;
 
+/* ── compact field-star store ─────────────────────────────────────────────
+ *
+ * The bulk catalog lives here, NOT in g_bodies. A field star expanded into a
+ * full Body cost 608 bytes to carry acceleration, RESPA state, rotation, AGN
+ * and atmosphere fields it can never use -- measured at ~605 bytes per star of
+ * resident memory, which put the practical ceiling near 10M stars. As a record
+ * it is 48 bytes, so the same budget reaches well past 100M.
+ *
+ * [g_field_star_begin, g_field_star_end) still exists and still bounds real
+ * Body slots -- it is now a small POOL, materialised on demand from this store
+ * for the few stars near enough to need full body state. Every site that skips
+ * the range keeps working untouched; only the bulk consumers (the static VBO
+ * and the frozen cell partition) read the store directly. */
+typedef struct {
+    float    pos_ly[3];    /* GL frame, light-years                        */
+    float    vel_kms[3];
+    float    mass_kg;
+    float    radius_km;
+    float    abs_mag;      /* NaN = none (renderer falls back to radius)   */
+    unsigned char color[3];
+    unsigned char flags;
+    unsigned long long source_id;  /* -> body name, decimal                */
+} FieldStar;               /* 48 bytes vs Body's 608                       */
+
+extern FieldStar *g_field_stars;    /* NULL when the preset has no catalog */
+extern int        g_field_star_n;
+
+/* Materialise catalog stars within `radius_m` of the camera into the reserved
+ * Body slots inside [g_field_star_begin, g_field_star_end), releasing those
+ * that left. Call once per frame from the render pass. */
+void universe_field_pool_update(const double cam_m[3], double radius_m);
+
 /* Bumped by universe_load() on every (re)load so cached, universe-scoped GPU
  * resources (e.g. the static field-star VBO in render.c) know to rebuild. */
 extern unsigned g_universe_generation;

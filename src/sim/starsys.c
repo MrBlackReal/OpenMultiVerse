@@ -46,6 +46,7 @@ typedef struct {
     long   cx, cy, cz;           /* lattice cell (galaxy frame)           */
     int    sub;                  /* candidate index within the cell       */
     int    body[SS_MAX_BODIES];  /* g_bodies indices (body[0] = the star) */
+    BodyHandle bh[SS_MAX_BODIES];/* same bodies, reuse-proof (body.h)     */
     int    nbody;
     double pos_au[3];            /* star world position, AU               */
     char   name[32];             /* star name (slot-reuse guard)          */
@@ -264,14 +265,18 @@ static float crossfade_gain(const double cam_au[3])
 static void demote(Promoted *p)
 {
     /* Slot-reuse guard: only kill bodies that are still ours (a promoted
-     * planet may have been absorbed in a collision and its slot recycled). */
+     * planet may have been absorbed in a collision and its slot recycled).
+     *
+     * This used to compare names, which is approximate in both directions:
+     * the planet case matched only strlen(p->name) characters, so any body
+     * whose name merely STARTS with the star's -- a different system sharing
+     * a prefix, or a renamed collision remnant -- passed the guard and was
+     * killed. The slot generation is exact: it changes on every reuse, so a
+     * handle taken at promotion resolves if and only if the same body is
+     * still in that slot. */
     for (int i = 0; i < p->nbody; i++) {
-        int idx = p->body[i];
-        if (idx < 0 || idx >= g_nbodies || !g_bodies[idx].alive) continue;
-        if (i == 0 && strncmp(g_bodies[idx].name, p->name, sizeof(p->name)))
-            continue;
-        if (i > 0 && strncmp(g_bodies[idx].name, p->name, strlen(p->name)))
-            continue;
+        int idx = body_handle_resolve(p->bh[i]);
+        if (idx < 0) continue;            /* absorbed, or slot reused */
         g_bodies[idx].alive = 0;
     }
     physics_mark_timestep_dirty();   /* bodies removed — rebuild timestep model */
@@ -323,6 +328,7 @@ static void promote(int gal, long cx, long cy, long cz, int sub,
 
     int star = universe_add_body(&spec);
     if (star < 0) { p->active = 0; return; }
+    p->bh[p->nbody] = body_handle(star);
     p->body[p->nbody++] = star;
 
     /* Physical colour from the spectral pipeline (mass → T_eff → blackbody),
@@ -361,6 +367,37 @@ static void promote(int gal, long cx, long cy, long cz, int sub,
         double a_m   = a_au * AU;
         double v     = sqrt(g_laws.G * spec.mass / a_m);
         double phi   = rng01() * 2.0 * PI;
+
+        /* Advance the orbit to the current simulation time.
+         *
+         * Without this a system regenerated on approach is frozen at the phase
+         * it was seeded with, however long the universe has been running --
+         * which is visibly inconsistent, because stellar evolution is NOT
+         * frozen: lifecycle_step() iterates every body on its own clock
+         * regardless of distance, so the star ages, changes phase and can go
+         * supernova while you are away. Only its planets stood still.
+         *
+         * These orbits are exact circles by construction (v is the circular
+         * speed and eccentricity is zero), so there is no Kepler equation to
+         * solve: the phase is just phi0 + omega*t. That makes position a pure
+         * function of (seed, t) -- no stored per-object clock, nothing to
+         * persist, and O(1) for any elapsed time, since phi wraps mod 2*pi. A
+         * billion years costs exactly what one second costs.
+         *
+         * Drawn BEFORE this advance so the RNG stream is untouched: the same
+         * seed still yields the same system, just at the right phase.
+         *
+         * Known limit: stellar evolution changes the star's mass, and
+         * omega = sqrt(GM/a^3) depends on it, so a single phi0 + omega*t is
+         * wrong across a mass-loss event. Systems that were actually perturbed
+         * need the stored-clock path instead; this covers the untouched
+         * majority. */
+        if (a_m > 0.0 && g_sim_time != 0.0) {
+            double omega = v / a_m;                   /* rad/s, circular */
+            phi = fmod(phi + omega * g_sim_time, 2.0 * PI);
+            if (phi < 0.0) phi += 2.0 * PI;
+        }
+
         double cp = cos(phi), sp = sin(phi);
 
         char pname[32];
@@ -401,6 +438,7 @@ static void promote(int gal, long cx, long cy, long cz, int sub,
 
         int idx = universe_add_body(&ps);
         if (idx < 0) break;
+        p->bh[p->nbody] = body_handle(idx);
         p->body[p->nbody++] = idx;
         trails_add_body(idx);
         trails_reset_body(idx);

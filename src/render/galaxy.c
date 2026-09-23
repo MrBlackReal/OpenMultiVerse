@@ -21,6 +21,7 @@
 #include "laws.h"        /* laws_schwarzschild_radius                           */
 #include "accretion.h"   /* accretion_init_body (seeds spin + gas reservoir)    */
 #include "settings.h"    /* g_settings.galaxy_agn gate                          */
+#include "stellar_lf.h"  /* measured LF + catalog detection limit (derive_lf.py) */
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
@@ -122,7 +123,43 @@ static GLuint s_star_shader = 0, s_star_vao = 0;
 static GLint  s_su_vp, s_su_cell_base, s_su_origin_rel, s_su_cell_size;
 static GLint  s_su_grid_dim, s_su_inner, s_su_outer, s_su_cam_in_gal;
 static GLint  s_su_radius, s_su_axis, s_su_seed, s_su_type, s_su_time;
-static GLint  s_su_gain, s_su_lum, s_su_suppress, s_su_n_suppress;
+static GLint  s_su_gain, s_su_suppress, s_su_n_suppress;
+static GLint  s_su_lf_mag, s_su_mag_limit, s_su_cam_abs, s_su_q_max;
+
+/* Inverse CDF of the measured luminosity function: s_lf_mag[i] is the
+ * absolute magnitude at quantile i/(LF_TABLE-1), bright end first. Built once
+ * so the shader samples the real stellar population with one lerp. */
+#define LF_TABLE 32
+/* The table is indexed by LOG10 quantile, not quantile. A coarse cascade cuts
+ * at q_max ~ 1e-7 (its cell holds millions of stars but emits five), so a
+ * table linear in q collapses every coarse star onto the brightest bin -- a
+ * sky of M = -10 hypergiants. Log spacing keeps resolution across the whole
+ * bright tail. */
+#define LF_LOGQ_MIN (-9.0)
+static float s_lf_mag[LF_TABLE];
+
+static void build_lf_table(void)
+{
+    double cum[STELLAR_LF_BINS + 1];
+    cum[0] = 0.0;
+    for (int i = 0; i < STELLAR_LF_BINS; i++)
+        cum[i + 1] = cum[i] + (double)STELLAR_LF[i];
+    double total = cum[STELLAR_LF_BINS];
+    if (total <= 0.0) {                       /* degenerate table: flat fallback */
+        for (int i = 0; i < LF_TABLE; i++) s_lf_mag[i] = 5.0f;
+        return;
+    }
+    for (int k = 0; k < LF_TABLE; k++) {
+        double lq = LF_LOGQ_MIN
+                  + (double)k / (double)(LF_TABLE - 1) * (-LF_LOGQ_MIN);
+        double q = pow(10.0, lq) * total;
+        int b = 0;
+        while (b < STELLAR_LF_BINS - 1 && cum[b + 1] < q) b++;
+        double span = cum[b + 1] - cum[b];
+        double f = span > 0.0 ? (q - cum[b]) / span : 0.0;
+        s_lf_mag[k] = (float)(STELLAR_LF_M_MIN + b + f);
+    }
+}
 static GLint  s_u_vp, s_u_center, s_u_radius, s_u_right, s_u_up, s_u_fwd;
 static GLint  s_u_oc, s_u_color, s_u_density, s_u_seed, s_u_bill, s_u_fullscreen;
 static GLint  s_u_fov_tan, s_u_aspect, s_u_screen, s_u_steps, s_u_type;
@@ -252,7 +289,11 @@ void galaxy_init(void)
         s_su_type       = glGetUniformLocation(s_star_shader, "u_type");
         s_su_time       = glGetUniformLocation(s_star_shader, "u_time");
         s_su_gain       = glGetUniformLocation(s_star_shader, "u_gain");
-        s_su_lum        = glGetUniformLocation(s_star_shader, "u_lum_scale");
+        s_su_lf_mag     = glGetUniformLocation(s_star_shader, "u_lf_mag");
+        s_su_mag_limit  = glGetUniformLocation(s_star_shader, "u_mag_limit");
+        s_su_cam_abs    = glGetUniformLocation(s_star_shader, "u_cam_abs");
+        s_su_q_max      = glGetUniformLocation(s_star_shader, "u_q_max");
+        build_lf_table();
         s_su_suppress   = glGetUniformLocation(s_star_shader, "u_suppress");
         s_su_n_suppress = glGetUniformLocation(s_star_shader, "u_n_suppress");
         s_star_vao      = gl_vao_create();
@@ -393,6 +434,14 @@ void galaxy_render_stars(const float vp_camrel[16], const double cam_pos[3],
     glUniform1i(s_su_grid_dim, GS_GRID_DIM);
     glUniform1f(s_su_time, time_s);
     glUniform1f(s_su_gain, gain);
+    glUniform1fv(s_su_lf_mag, LF_TABLE, s_lf_mag);
+    glUniform1f(s_su_mag_limit, CATALOG_MAG_LIMIT);
+    /* The selection function is evaluated from the Sun (the survey's vantage),
+     * so the shader needs the camera's absolute position to recover each
+     * candidate's heliocentric distance. Float is ample: a ~100 AU rounding
+     * error at galactic-centre range shifts a distance modulus by ~1e-7 mag. */
+    glUniform3f(s_su_cam_abs, (float)cam_pos[0], (float)cam_pos[1],
+                              (float)cam_pos[2]);
 
     glEnable(GL_PROGRAM_POINT_SIZE);
     glEnable(GL_BLEND);
@@ -448,8 +497,18 @@ void galaxy_render_stars(const float vp_camrel[16], const double cam_pos[3],
             glUniform1f(s_su_inner, (float)inner);
             glUniform1f(s_su_outer, (float)outer);
             {
-                double rel = GS_CELL_LY[k] / GS_CELL_LY[0];
-                glUniform1f(s_su_lum, (float)(rel * rel));
+                /* Quantile cut for this cascade. A cell of edge c holds about
+                 * STELLAR_DENSITY_LY3 * c^3 stars but can emit only
+                 * GS_PER_CELL candidates, so draw from the brightest
+                 * q_max fraction of the luminosity function. The emitted
+                 * stars then sit at true space density instead of being
+                 * luminosity-boosted stand-ins. */
+                double c3 = GS_CELL_LY[k] * GS_CELL_LY[k] * GS_CELL_LY[k];
+                double in_cell = (double)STELLAR_DENSITY_LY3 * c3;
+                double q_max = in_cell > 0.0
+                             ? (double)GS_PER_CELL / in_cell : 1.0;
+                if (q_max > 1.0) q_max = 1.0;
+                glUniform1f(s_su_q_max, (float)q_max);
             }
             glDrawArrays(GL_POINTS, 0, n_points);
 

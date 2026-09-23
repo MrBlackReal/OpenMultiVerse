@@ -83,3 +83,9 @@ typedef struct {
 /* Access the cached cluster list.  Returns the count; *out points at an
  * internal array valid until the next universe (re)load.  Main-thread only. */
 int cosmic_field_clusters(const CosmicCluster **out);
+
+/* Field-store record indices within `radius_m` of `centre_m` (frozen cell
+ * partition). The bulk catalog lives in g_field_stars, not g_bodies, so this
+ * replaces scanning the old field body range. Returns the count written. */
+int cosmic_field_stars_near(const double centre_m[3], double radius_m,
+                            int *out, int max);

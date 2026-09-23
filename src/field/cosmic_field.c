@@ -176,10 +176,33 @@ typedef struct { int lo, hi; } IdxRange;
 /* Build an open-addressed cell hash + CSR body pool over the alive bodies whose
  * index falls in one of `ranges`.  The table and pool grow as needed and
  * persist across calls.  Returns 1 if the partition holds >=1 body, 0 if empty. */
-static int hash_build(Cell **ptable, int *ptable_cap, int **ppool, int *ppool_cap,
-                      const IdxRange *ranges, int nranges)
+/* Position of entry `i` in metres, from whichever backing array is in use.
+ * from_field selects the compact field-star store over g_bodies. */
+static inline void entry_pos(int i, int from_field, double out[3])
 {
+    if (from_field) {
+        const FieldStar *fs = &g_field_stars[i];
+        out[0] = (double)fs->pos_ly[0] * LY;
+        out[1] = (double)fs->pos_ly[1] * LY;
+        out[2] = (double)fs->pos_ly[2] * LY;
+    } else {
+        out[0] = g_bodies[i].pos[0];
+        out[1] = g_bodies[i].pos[1];
+        out[2] = g_bodies[i].pos[2];
+    }
+}
+
+static int hash_build(Cell **ptable, int *ptable_cap, int **ppool, int *ppool_cap,
+                      const IdxRange *ranges, int nranges, int from_field)
+{
+    /* The field store has no per-entry alive flag: every record is a real,
+     * frozen star, so the count is simply its length. */
+    IdxRange fr = { 0, from_field ? g_field_star_n : 0 };
+    if (from_field) { ranges = &fr; nranges = 1; }
     int alive = 0;
+    if (from_field) {
+        alive = g_field_star_n;
+    } else
     for (int r = 0; r < nranges; r++)
         for (int i = ranges[r].lo; i < ranges[r].hi; i++)
             if (g_bodies[i].alive) alive++;
@@ -209,10 +232,11 @@ static int hash_build(Cell **ptable, int *ptable_cap, int **ppool, int *ppool_ca
     /* Pass 1 — count bodies per cell (find-or-insert). */
     for (int r = 0; r < nranges; r++) {
         for (int i = ranges[r].lo; i < ranges[r].hi; i++) {
-            if (!g_bodies[i].alive) continue;
-            uint64_t key = pack_cell(cell_coord(g_bodies[i].pos[0]),
-                                     cell_coord(g_bodies[i].pos[1]),
-                                     cell_coord(g_bodies[i].pos[2]));
+            if (!from_field && !g_bodies[i].alive) continue;
+            double ep[3]; entry_pos(i, from_field, ep);
+            uint64_t key = pack_cell(cell_coord(ep[0]),
+                                     cell_coord(ep[1]),
+                                     cell_coord(ep[2]));
             int s = table_slot(table, cap, key);
             if (table[s].key == KEY_EMPTY) { table[s].key = key; table[s].count = 0; }
             table[s].count++;
@@ -231,10 +255,11 @@ static int hash_build(Cell **ptable, int *ptable_cap, int **ppool, int *ppool_ca
     /* Pass 2 — scatter body indices into the CSR pool. */
     for (int r = 0; r < nranges; r++) {
         for (int i = ranges[r].lo; i < ranges[r].hi; i++) {
-            if (!g_bodies[i].alive) continue;
-            uint64_t key = pack_cell(cell_coord(g_bodies[i].pos[0]),
-                                     cell_coord(g_bodies[i].pos[1]),
-                                     cell_coord(g_bodies[i].pos[2]));
+            if (!from_field && !g_bodies[i].alive) continue;
+            double ep[3]; entry_pos(i, from_field, ep);
+            uint64_t key = pack_cell(cell_coord(ep[0]),
+                                     cell_coord(ep[1]),
+                                     cell_coord(ep[2]));
             int s = table_slot(table, cap, key);
             pool[table[s].fill++] = i;
         }
@@ -261,7 +286,7 @@ static void dynamic_rebuild(void)
     int fb, fe; field_range(&fb, &fe);
     IdxRange ranges[2] = { { 0, fb }, { fe, g_nbodies } };
     s_built = hash_build(&s_table, &s_table_cap,
-                         &s_cell_body, &s_cell_body_cap, ranges, 2);
+                         &s_cell_body, &s_cell_body_cap, ranges, 2, 0);
 }
 
 /* Accumulator for one coarse cluster cell (open-addressed by packed key). */
@@ -279,10 +304,12 @@ typedef struct {
  * per universe load (field stars never move) — no recurring per-frame cost. */
 static void cluster_extract(void)
 {
+    /* Reads the compact field-star store (universe.h FieldStar), not Body
+     * slots: the bulk catalog is no longer materialised as bodies, so the old
+     * [g_field_star_begin, g_field_star_end) walk found nothing and cluster
+     * extraction silently produced zero impostors. */
     s_cluster_count = 0;
-    int fb, fe; field_range(&fb, &fe);
-    int alive = 0;
-    for (int i = fb; i < fe; i++) if (g_bodies[i].alive) alive++;
+    int alive = g_field_stars ? g_field_star_n : 0;
     if (alive < CLUSTER_MIN) return;
 
     int cap = next_pow2(2 * alive + 1);
@@ -291,24 +318,24 @@ static void cluster_extract(void)
     for (int i = 0; i < cap; i++) acc[i].key = KEY_EMPTY;
     uint32_t mask = (uint32_t)cap - 1u;
 
-    for (int i = fb; i < fe; i++) {
-        if (!g_bodies[i].alive) continue;
-        uint64_t key = pack_cell(coarse_coord(g_bodies[i].pos[0]),
-                                 coarse_coord(g_bodies[i].pos[1]),
-                                 coarse_coord(g_bodies[i].pos[2]));
+    for (int i = 0; i < g_field_star_n; i++) {
+        const FieldStar *fs = &g_field_stars[i];
+        double px = (double)fs->pos_ly[0];
+        double py = (double)fs->pos_ly[1];
+        double pz = (double)fs->pos_ly[2];
+        uint64_t key = pack_cell(coarse_coord(px * LY),
+                                 coarse_coord(py * LY),
+                                 coarse_coord(pz * LY));
         uint32_t s = (uint32_t)hash64(key) & mask;
         while (acc[s].key != KEY_EMPTY && acc[s].key != key) s = (s + 1u) & mask;
         ClAcc *a = &acc[s];
         if (a->key == KEY_EMPTY) a->key = key;
-        double px = g_bodies[i].pos[0] / LY;
-        double py = g_bodies[i].pos[1] / LY;
-        double pz = g_bodies[i].pos[2] / LY;
         a->n++;
         a->sum[0] += px; a->sum[1] += py; a->sum[2] += pz;
         a->sumsq  += px*px + py*py + pz*pz;
-        a->col[0] += g_bodies[i].col[0];
-        a->col[1] += g_bodies[i].col[1];
-        a->col[2] += g_bodies[i].col[2];
+        a->col[0] += fs->color[0] / 255.0f;
+        a->col[1] += fs->color[1] / 255.0f;
+        a->col[2] += fs->color[2] / 255.0f;
     }
 
     for (int s = 0; s < cap && s_cluster_count < CLUSTER_MAX; s++) {
@@ -341,10 +368,10 @@ static void cluster_extract(void)
 /* Rebuild the frozen field-star partition (once per universe load). */
 static void field_partition_rebuild(void)
 {
-    int fb, fe; field_range(&fb, &fe);
-    IdxRange r = { fb, fe };
+    /* Built over the compact field-star store, not Body slots. */
+    IdxRange r = { 0, g_field_star_n };
     s_fbuilt = hash_build(&s_ftable, &s_ftable_cap,
-                          &s_fcell_body, &s_fcell_body_cap, &r, 1);
+                          &s_fcell_body, &s_fcell_body_cap, &r, 1, 1);
     s_fbuilt_gen   = g_universe_generation;
     s_fbuilt_begin = g_field_star_begin;
     s_fbuilt_end   = g_field_star_end;
@@ -377,6 +404,52 @@ void cosmic_field_tick(double dt)
         dynamic_rebuild();
 }
 
+/* Field-store records within `radius_m` of `centre_m`, via the frozen cell
+ * partition. Returns how many were written to `out` (capped at `max`).
+ *
+ * This is what replaces walking [g_field_star_begin, g_field_star_end) now
+ * that the bulk catalog is records rather than bodies: the caller materialises
+ * the few returned records into real Body slots. */
+int cosmic_field_stars_near(const double centre_m[3], double radius_m,
+                            int *out, int max)
+{
+    field_partition_ensure();
+    if (!s_fbuilt || !g_field_stars || max <= 0) return 0;
+
+    const double r2_ly = (radius_m / LY) * (radius_m / LY);
+    int cmin[3], cmax[3];
+    for (int k = 0; k < 3; k++) {
+        cmin[k] = cell_coord(centre_m[k] - radius_m);
+        cmax[k] = cell_coord(centre_m[k] + radius_m);
+    }
+    double box = ((double)cmax[0] - cmin[0] + 1.0)
+               * ((double)cmax[1] - cmin[1] + 1.0)
+               * ((double)cmax[2] - cmin[2] + 1.0);
+    if (box > (double)CELL_BOX_CAP) return 0;   /* absurd radius: caller copes */
+
+    int n = 0;
+    for (int cz = cmin[2]; cz <= cmax[2] && n < max; cz++)
+    for (int cy = cmin[1]; cy <= cmax[1] && n < max; cy++)
+    for (int cx = cmin[0]; cx <= cmax[0] && n < max; cx++) {
+        uint64_t key = pack_cell(cx, cy, cz);
+        uint32_t mask = (uint32_t)s_ftable_cap - 1u;
+        uint32_t sl = (uint32_t)hash64(key) & mask;
+        while (s_ftable[sl].key != KEY_EMPTY && s_ftable[sl].key != key)
+            sl = (sl + 1u) & mask;
+        if (s_ftable[sl].key != key) continue;
+        int start = s_ftable[sl].start, cnt = s_ftable[sl].count;
+        for (int k = 0; k < cnt && n < max; k++) {
+            int fi = s_fcell_body[start + k];
+            const FieldStar *fs = &g_field_stars[fi];
+            double rx = (double)fs->pos_ly[0] - centre_m[0] / LY;
+            double ry = (double)fs->pos_ly[1] - centre_m[1] / LY;
+            double rz = (double)fs->pos_ly[2] - centre_m[2] / LY;
+            if (rx*rx + ry*ry + rz*rz <= r2_ly) out[n++] = fi;
+        }
+    }
+    return n;
+}
+
 /* Accumulate one body's contribution (position relative to the sample centre,
  * in light-years) into the running sums if it lies inside the sample sphere. */
 static inline void accum_body(int b, const double centre_m[3], double r2_ly,
@@ -396,7 +469,24 @@ static inline void accum_body(int b, const double centre_m[3], double r2_ly,
 }
 
 /* Accumulate every body in `table`'s cell `key` (if occupied) into the sums. */
-static inline void accum_cell(const Cell *table, int cap, const int *pool,
+static inline void accum_field(int fi, const double centre_m[3], double r2_ly,
+                               double *N, double *mass_sum,
+                               double sum[3], double *sumsq)
+{
+    const FieldStar *fs = &g_field_stars[fi];
+    double rx = ((double)fs->pos_ly[0] * LY - centre_m[0]) / LY;
+    double ry = ((double)fs->pos_ly[1] * LY - centre_m[1]) / LY;
+    double rz = ((double)fs->pos_ly[2] * LY - centre_m[2]) / LY;
+    double d2 = rx*rx + ry*ry + rz*rz;
+    if (d2 > r2_ly) return;
+    *N += 1.0;
+    *mass_sum += (double)fs->mass_kg;
+    sum[0] += rx; sum[1] += ry; sum[2] += rz;
+    *sumsq += d2;
+}
+
+static inline void accum_cell(int from_field,
+                              const Cell *table, int cap, const int *pool,
                               uint64_t key, const double centre_m[3], double r2_ly,
                               double *N, double *mass_sum,
                               double sum[3], double *sumsq)
@@ -405,7 +495,10 @@ static inline void accum_cell(const Cell *table, int cap, const int *pool,
     if (table[s].key != key) return;            /* empty cell → free           */
     int start = table[s].start, cnt = table[s].count;
     for (int k = 0; k < cnt; k++)
-        accum_body(pool[start + k], centre_m, r2_ly, N, mass_sum, sum, sumsq);
+        if (from_field)
+            accum_field(pool[start + k], centre_m, r2_ly, N, mass_sum, sum, sumsq);
+        else
+            accum_body(pool[start + k], centre_m, r2_ly, N, mass_sum, sum, sumsq);
 }
 
 int cosmic_field_sample(const double pos_m[3], double radius_m, CosmicSample *out)
@@ -438,16 +531,19 @@ int cosmic_field_sample(const double pos_m[3], double radius_m, CosmicSample *ou
              * mostly-empty cell box.  Covers both partitions in one pass. */
             for (int b = 0; b < g_nbodies; b++)
                 accum_body(b, pos_m, r2_ly, &N, &mass_sum, sum, &sumsq);
+            if (s_fbuilt)
+                for (int fi = 0; fi < g_field_star_n; fi++)
+                    accum_field(fi, pos_m, r2_ly, &N, &mass_sum, sum, &sumsq);
         } else {
             for (int cz = cmin[2]; cz <= cmax[2]; cz++)
             for (int cy = cmin[1]; cy <= cmax[1]; cy++)
             for (int cx = cmin[0]; cx <= cmax[0]; cx++) {
                 uint64_t key = pack_cell(cx, cy, cz);
                 if (s_built)
-                    accum_cell(s_table, s_table_cap, s_cell_body, key,
+                    accum_cell(0, s_table, s_table_cap, s_cell_body, key,
                                pos_m, r2_ly, &N, &mass_sum, sum, &sumsq);
                 if (s_fbuilt)
-                    accum_cell(s_ftable, s_ftable_cap, s_fcell_body, key,
+                    accum_cell(1, s_ftable, s_ftable_cap, s_fcell_body, key,
                                pos_m, r2_ly, &N, &mass_sum, sum, &sumsq);
             }
         }
