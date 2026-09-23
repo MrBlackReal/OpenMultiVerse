@@ -62,6 +62,7 @@
 #include "gpu_timer.h"
 #include "dust_field.h"
 #include "frame.h"
+#include "freeze.h"
 
 /* Active-system count, captured for profiler spike context only. */
 static int s_prof_active_systems = 0;
@@ -515,6 +516,7 @@ static void reset_universe_state(void) {
     supernova_reset();
     field_graph_reset();   /* event history belongs to the old universe */
     starsys_reset();       /* promoted bodies were wiped with the world */
+    freeze_reset();        /* records point at the old world's bodies */
     clear_movement_keys();
     s_freelook = 0;
     s_warp = 0;
@@ -1886,7 +1888,8 @@ int main(int argc, char **argv) {
 
     /* --selftest-frame: floating-origin precision far from home; exits. */
     if (cli_selftest_frame) {
-        int ok = frame_selftest();
+        int ok = freeze_selftest();
+        ok = frame_selftest() && ok;
         app_quit();
         return ok ? 0 : 1;
     }
@@ -2168,6 +2171,16 @@ int main(int argc, char **argv) {
         /* Keep the local frame centred on the camera (frame.h): after the
          * camera moved, before anything simulates or draws. */
         frame_rebase_if_needed();
+        /* Systems entering or leaving the active region thaw or freeze
+         * (freeze.h), paused or not: the camera moves either way. */
+        {
+            double fz_cam[3];
+            const int *fz_slots = NULL;
+            camera_world_m(fz_cam);
+            physics_refresh_timestep_model_if_needed(0.0);
+            int fz_n = physics_active_systems(fz_cam, ACTIVE_RADIUS_LY * LY, &fz_slots);
+            freeze_update(fz_slots, fz_n);
+        }
         profiler_stage_end(PROFILER_STAGE_INPUT);
 
         profiler_stage_begin(PROFILER_STAGE_STARSYS);

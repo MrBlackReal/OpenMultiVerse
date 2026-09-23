@@ -46,6 +46,10 @@ void frame_local_to_sun_m(const double local_m[3], double out_sun_m[3]);
 typedef void (*FrameShiftFn)(const double d_m[3]);
 void frame_on_rebase(FrameShiftFn fn);
 
+/* Called with the same d_m BEFORE anything moves, while positions still hold
+ * their full precision (freeze.c snapshots systems a jump leaves behind). */
+void frame_on_pre_rebase(FrameShiftFn fn);
+
 /* Once per frame, before physics and rendering: rebase if the camera has
  * drifted FRAME_REBASE_AU from the origin. Returns 1 if it rebased. */
 int  frame_rebase_if_needed(void);

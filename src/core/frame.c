@@ -21,13 +21,19 @@ static double ulp_of(double x) { return nextafter(fabs(x), INFINITY) - fabs(x); 
 #define FRAME_MAX_LISTENERS 32
 static FrameShiftFn s_listeners[FRAME_MAX_LISTENERS];
 static int          s_nlisteners = 0;
+static FrameShiftFn s_pre[FRAME_MAX_LISTENERS];
+static int          s_npre = 0;
 
-void frame_on_rebase(FrameShiftFn fn)
+static void add_listener(FrameShiftFn *list, int *n, FrameShiftFn fn)
 {
-    for (int i = 0; i < s_nlisteners; i++) if (s_listeners[i] == fn) return;
-    if (s_nlisteners < FRAME_MAX_LISTENERS) s_listeners[s_nlisteners++] = fn;
+    for (int i = 0; i < *n; i++) if (list[i] == fn) return;
+    if (*n < FRAME_MAX_LISTENERS) list[(*n)++] = fn;
     else fprintf(stderr, "[frame] too many rebase listeners\n");
 }
+
+void frame_on_pre_rebase(FrameShiftFn fn) { add_listener(s_pre, &s_npre, fn); }
+
+void frame_on_rebase(FrameShiftFn fn) { add_listener(s_listeners, &s_nlisteners, fn); }
 
 void frame_cam_sun(double out[3])
 {
@@ -47,6 +53,7 @@ void frame_local_to_sun_m(const double local_m[3], double out[3])
 void frame_rebase(const double delta_au[3])
 {
     const double d_m[3] = { delta_au[0] * AU, delta_au[1] * AU, delta_au[2] * AU };
+    for (int i = 0; i < s_npre; i++) s_pre[i](d_m);
     for (int k = 0; k < 3; k++) {
         g_frame_origin_au[k] += delta_au[k];
         g_cam.pos[k]         -= delta_au[k];

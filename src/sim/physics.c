@@ -64,6 +64,7 @@
 #include "physics.h"
 #include "body.h"
 #include "collision.h"
+#include "frame.h"
 #include <math.h>
 
 double g_sim_time  = 0.0;
@@ -156,6 +157,15 @@ static int     s_near_count  = 0, s_near_cap = 0;
 static double  s_near_cam[3] = {0.0, 0.0, 0.0};
 static double  s_near_radius = -1.0;    /* metres of coverage around s_near_cam */
 static int     s_near_valid  = 0;
+
+/* Bumped on every membership rebuild, so callers keyed on slots can tell. */
+static unsigned s_system_generation = 0;
+
+/* The near cache's anchor is a local-frame position: follow a rebase. */
+static void near_cache_frame_shift(const double d_m[3])
+{
+    for (int k = 0; k < 3; k++) s_near_cam[k] -= d_m[k];
+}
 
 /* k-th member body index of slot (CSR access). */
 static inline int sys_member(int slot, int k)
@@ -478,7 +488,10 @@ static void recompute_global_limits(void)
 
 void physics_refresh_timestep_model(void)
 {
+    static int s_listening = 0;
+    if (!s_listening) { frame_on_rebase(near_cache_frame_shift); s_listening = 1; }
     s_nsystems = 0;
+    s_system_generation++;
 
     physics_ensure_capacity(g_nbodies > 0 ? g_nbodies : 1);
 
@@ -600,6 +613,22 @@ void physics_refresh_active_timesteps(const int *slots, int n, double real_dt)
 double physics_outer_dt_limit(void)  { return s_outer_dt_limit; }
 double physics_inner_dt_limit(void)  { return s_inner_dt_limit; }
 int    physics_system_count(void)    { return s_nsystems; }
+
+unsigned physics_system_generation(void) { return s_system_generation; }
+
+int physics_root_slot(int root)
+{
+    if (root < 0 || root >= s_cap) return -1;
+    int s = s_root_to_slot[root];
+    return (s >= 0 && s < s_nsystems) ? s : -1;
+}
+
+int physics_system_members(int idx, const int **out)
+{
+    if (idx < 0 || idx >= s_nsystems) { *out = NULL; return 0; }
+    *out = &s_member_pool[s_member_off[idx]];
+    return s_system_member_count[idx];
+}
 
 int physics_system_root(int idx)
 {

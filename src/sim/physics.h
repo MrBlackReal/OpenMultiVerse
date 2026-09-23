@@ -49,6 +49,12 @@ double physics_outer_dt_limit(void);
 double physics_inner_dt_limit(void);
 int    physics_system_count(void);
 int    physics_system_root(int idx);
+/* Members of system slot idx (root included), valid until the next rebuild. */
+int    physics_system_members(int idx, const int **out);
+/* Changes whenever the slot layout is rebuilt (body set changed). */
+unsigned physics_system_generation(void);
+/* Slot of the system rooted at body `root`, or -1. */
+int    physics_root_slot(int root);
 
 /* Fill `out` with up to `max` body indices from systems within `radius_m` of
  * `cam_m` (metres), nearest systems first; returns the count written.  The
