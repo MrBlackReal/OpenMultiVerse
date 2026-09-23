@@ -63,6 +63,7 @@
 #include "dust_field.h"
 #include "frame.h"
 #include "freeze.h"
+#include "bc7.h"
 
 /* Active-system count, captured for profiler spike context only. */
 static int s_prof_active_systems = 0;
@@ -1551,6 +1552,7 @@ static void print_usage(const char *prog)
 "Benchmark / tools:\n"
 "  --profile               Per-stage frame profiler; prints a report on exit.\n"
 "  --selftest-frame        Floating-origin precision test at M87 distance; exit.\n"
+"  --selftest-bc7          BC7 texture encoder round-trip quality; exit.\n"
 "  --selftest-starsys      Run the procedural-system delta round-trip test; exit.\n"
 "  --frame-offset X,Y,Z    Displace the floating origin by X,Y,Z AU (test: the\n"
 "                          picture must not change beyond rounding).\n"
@@ -1693,6 +1695,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[a], "--frame-offset") && a + 1 < argc) {
             cli_frame_offset_set = sscanf(argv[++a], "%lf,%lf,%lf", &cli_frame_offset[0],
                                           &cli_frame_offset[1], &cli_frame_offset[2]) == 3;
+        }
+        else if (!strcmp(argv[a], "--selftest-bc7")) {
+            return bc7_selftest() ? 0 : 1;      /* pure CPU: no window, no universe */
         }
         else if (!strcmp(argv[a], "--selftest-frame")) {
             cli_selftest_frame = 1;

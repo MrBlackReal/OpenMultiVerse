@@ -5,6 +5,7 @@
 #include "gl_utils.h"
 #include "settings.h"
 #include "stb_image.h"
+#include "texpack.h"
 
 #include <GL/glew.h>
 #include <stdio.h>
@@ -42,6 +43,9 @@ static unsigned char *downsample_to(unsigned char *px, int *w, int *h, int max_p
 static GLuint load_one(const char *path, int max_px, const char *what)
 {
     if (!path || !path[0]) return 0;
+    /* BC7 from the baked cache: a quarter of the VRAM (texpack.h). */
+    GLuint packed = texpack_load_srgb(path, max_px, what);
+    if (packed) return packed;
     int w, h, n;
     unsigned char *px = stbi_load(path, &w, &h, &n, 3);
     if (!px) {

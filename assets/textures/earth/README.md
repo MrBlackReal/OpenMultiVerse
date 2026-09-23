@@ -26,5 +26,14 @@ control) caps the loaded width to save GPU memory; `0` loads full resolution. Th
 loader also halves any map wider than the GPU's `GL_MAX_TEXTURE_SIZE`.
 A missing or unreadable file falls back to the procedural Earth.
 
+## GPU format
+
+Each map is uploaded as BC7 (1 byte a texel, sRGB, full mip chain) by
+`src/render/texpack.c`. The first load bakes `<file>.bc7.dds` next to the
+source (about 12 s for the 16k map on 4 threads) and later loads read it
+directly. The cache is regenerated when the source is newer; it is not
+committed. VRAM: 171 MB day + 43 MB night, where uncompressed RGB (padded to
+RGBA by the driver) took about 850 MB.
+
 The night map is not lights-only: it has a faint blue moonlit base. The shader
 keeps only the warm excess above it, so oceans and unlit land stay dark.
