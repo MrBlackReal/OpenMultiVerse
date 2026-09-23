@@ -1886,6 +1886,10 @@ int main(int argc, char **argv) {
     frame_on_rebase(rel_prev_frame_shift);
     if (cli_frame_offset_set) frame_rebase(cli_frame_offset);
 
+    /* Galaxy rebuilds off the main thread when interactive; headless shots and
+     * film-out keep them inline so every frame is reproducible. */
+    galaxy_proc_set_async(!headless);
+
     /* --selftest-frame: floating-origin precision far from home; exits. */
     if (cli_selftest_frame) {
         int ok = freeze_selftest();

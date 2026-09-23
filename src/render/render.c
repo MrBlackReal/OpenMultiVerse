@@ -976,9 +976,10 @@ static int env_ensure(void)
     return ok;
 }
 
-/* Render the distant background into the six faces around the camera. The
- * standard cube-face orientation, so bh.frag samples it by world direction. */
-static void env_capture(float sf_fade)
+/* Render the distant background into cube faces [f0, f1) around the camera.
+ * The standard cube-face orientation, so bh.frag samples it by world
+ * direction. */
+static void env_capture(float sf_fade, int f0, int f1)
 {
     static const float dirs[6][3] = { {1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1} };
     static const float ups [6][3] = { {0,-1,0}, {0,-1,0}, {0,0,1}, {0,0,-1}, {0,-1,0}, {0,-1,0} };
@@ -998,7 +999,7 @@ static void env_capture(float sf_fade)
     mat4_perspective(proj, 90.0f, 1.0f, 0.0001f, RENDER_DEPTH_FAR);
     glBindFramebuffer(GL_FRAMEBUFFER, s_env_fbo);
     glViewport(0, 0, ENV_SIZE, ENV_SIZE);
-    for (int f = 0; f < 6; f++) {
+    for (int f = f0; f < f1; f++) {
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                                GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, s_env_tex, 0);
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
@@ -4164,10 +4165,17 @@ dyn_ready:
              * source in it is light-years away; orientation is free — the lens
              * samples it by world direction). So reuse it until the camera has
              * moved enough to show parallax, the star-veil exposure has shifted,
-             * or the universe changed. 1 AU at the nearest background (~0.1 ly)
-             * is under half an environment texel. Deterministic: the same path
-             * gives the same recaptures. */
+             * or the universe changed: by half an environment texel of parallax
+             * at the nearest background (~0.1 ly), ~4.8 AU at 1024^2.
+             * Deterministic: the same path gives the same recaptures.
+             *
+             * A full capture is six 1024^2 faces of galaxy march, stars and
+             * nebulae: ~60 ms on an RX 570. Orbiting a black hole at tens of
+             * AU/s that stalled every few frames. So after the first capture a
+             * refresh renders one face per frame; the lens reads the previous
+             * faces meanwhile, which differ by well under a texel. */
             static int      env_valid = 0;
+            static int      env_next  = 6;      /* next face to refresh; 6 = idle */
             static double   env_pos[3];
             static double   env_veil  = 0.0;
             static unsigned env_gen   = 0;
@@ -4177,13 +4185,24 @@ dyn_ready:
             double mx = ecam[0] - env_pos[0], my = ecam[1] - env_pos[1],
                    mz = ecam[2] - env_pos[2];
             double dv = fabs(s_veil_f - env_veil);
-            if (!env_valid || mx*mx + my*my + mz*mz > 1.0 ||
-                dv > 0.10 * fmax(env_veil, 0.02) || env_gen != (unsigned)g_universe_generation) {
-                env_capture(sf_fade);
-                env_valid = 1;
+            const double env_move_au = 0.5 * (PI * 0.5 / ENV_SIZE) * 0.1 * 63241.077;
+            int stale = !env_valid || mx*mx + my*my + mz*mz > env_move_au * env_move_au ||
+                        dv > 0.10 * fmax(env_veil, 0.02) ||
+                        env_gen != (unsigned)g_universe_generation;
+            if (stale && env_next == 6) {
+                if (!env_valid || env_gen != (unsigned)g_universe_generation) {
+                    env_capture(sf_fade, 0, 6);    /* nothing usable yet: all now */
+                    env_valid = 1;
+                } else {
+                    env_next = 0;                  /* start a staggered refresh  */
+                }
                 env_pos[0] = ecam[0]; env_pos[1] = ecam[1]; env_pos[2] = ecam[2];
                 env_veil = s_veil_f;
                 env_gen  = (unsigned)g_universe_generation;
+            }
+            if (env_next < 6) {
+                env_capture(sf_fade, env_next, env_next + 1);
+                env_next++;
             }
         }
 

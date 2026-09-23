@@ -86,6 +86,9 @@ int          galaxy_count(void);
  * far enough). Call once per frame before rendering; galaxy_count() then
  * covers catalogue + procedural. */
 void         galaxy_proc_update(const double cam[3]);
+/* Rebuild the procedural set on a worker thread (interactive) or inline
+ * (deterministic: headless shots, film-out). Off by default. */
+void         galaxy_proc_set_async(int on);
 const char  *galaxy_name(int i);
 /* World position of galaxy i in AU (zeroed if out of range). */
 void         galaxy_position(int i, double out[3]);

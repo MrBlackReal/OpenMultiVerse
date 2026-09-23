@@ -23,6 +23,8 @@
 #include "accretion.h"   /* accretion_init_body (seeds spin + gas reservoir)    */
 #include "settings.h"    /* g_settings.galaxy_agn gate                          */
 #include "stellar_lf.h"  /* measured LF + catalog detection limit (derive_lf.py) */
+#include <SDL2/SDL.h>    /* the rebuild worker thread */
+#include <omp.h>
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
@@ -905,8 +907,11 @@ void galaxy_render_impostors(const float vp_camrel[16], float time_s,
     glDisable(GL_PROGRAM_POINT_SIZE);
 }
 
+static void gal_join(int wait);
+
 void galaxy_shutdown(void)
 {
+    gal_join(1);             /* the worker reads survey data freed with us */
     glDeleteBuffers(1, &s_vbo);
     glDeleteBuffers(1, &s_ebo);
     glDeleteVertexArrays(1, &s_vao);
@@ -985,21 +990,15 @@ static void gal_cand_insert(GalCand *best, int *nb, int lo, int cap, const GalCa
     if (*nb < cap) (*nb)++;
 }
 
-void galaxy_proc_update(const double cam[3])
-{
-    if (!s_gal || s_gal_cap <= GALAXY_COUNT) return;
-    double mv = 0.0;
-    for (int k = 0; k < 3; k++) {
-        double d = cam[k] - s_gal_built_cam[k];
-        mv += d * d;
-    }
-    const double reb_au = GAL_REBUILD_MLY * 1e6 * AU_PER_LY;
-    if (mv < reb_au * reb_au) return;
-    for (int k = 0; k < 3; k++) s_gal_built_cam[k] = cam[k];
+/* Threads for the survey pass: all of them inline, two on the worker so a
+ * background rebuild does not starve the frame it is hiding from. */
+static int s_gal_build_threads = 8;
 
-    /* Insertion sort into a fixed top-N by angular radius. */
-    /* static: GAL_PROC_MAX entries is large, too much for the stack */
-    static GalCand best[GAL_PROC_MAX];
+/* The candidate set around `cam`, largest first per shell, into best[];
+ * returns the count. Touches only read-only data (lattice hashes, the survey)
+ * and its own statics, so it can run on the rebuild worker. */
+static int gal_build(const double cam[3], GalCand *best)
+{
     int nb = 0;
 
     /* Budget PER LEVEL, not globally. A single top-N by angular size is always
@@ -1026,7 +1025,7 @@ void galaxy_proc_update(const double cam[3])
         double outer[GAL_CASCADES];
         for (int lv = 0; lv < GAL_CASCADES; lv++)
             outer[lv] = GAL_CELL_MLY[lv] * 1e6 * AU_PER_LY * GAL_SPAN_CELLS;
-        #pragma omp parallel for schedule(static)
+        #pragma omp parallel for schedule(static) num_threads(s_gal_build_threads)
         for (int s = 0; s < s_sv_n; s++) {
             const SurveyRec *r = &s_sv[s];
             double rx = (double)r->pos_ly[0] * AU_PER_LY - cam[0];
@@ -1155,7 +1154,12 @@ void galaxy_proc_update(const double cam[3])
         }
         inner_au = outer_au;
     }
+    return nb;
+}
 
+/* Make best[0, nb) the live procedural + survey galaxies. Main thread. */
+static void gal_install(const GalCand *best, int nb)
+{
     s_gal_n = GALAXY_COUNT;
     for (int i = 0; i < nb; i++) {
         GalaxyInst *g = &s_gal[s_gal_n++];
@@ -1186,6 +1190,73 @@ void galaxy_proc_update(const double cam[3])
         g->axis[1] = (float)(sr * sin(v * 6.2831853));
         g->axis[2] = (float)sz;
     }
+}
+
+/* ── the rebuild worker ─────────────────────────────────────────────────────
+ * A rebuild is ~50 ms of CPU (lattice cells over five shells, the survey
+ * pass) and flying between galaxies at warp crosses GAL_REBUILD_MLY nearly
+ * every frame, so done inline it stalled every frame of an intergalactic leg.
+ * Interactive runs build on a worker thread instead and swap the result in
+ * when it lands; the old set keeps rendering meanwhile. The first build, and
+ * every build when async is off (headless shots and film-out, which must be
+ * deterministic), stays inline. */
+static int           s_gal_async   = 0;
+static SDL_Thread   *s_gal_thread  = NULL;
+static SDL_atomic_t  s_gal_done;              /* worker finished            */
+static double        s_gal_job_cam[3];
+static int           s_gal_job_n   = 0;
+static int           s_gal_have    = 0;       /* a build was ever installed */
+static GalCand       s_gal_job_best[GAL_PROC_MAX];
+
+static int gal_worker(void *arg)
+{
+    (void)arg;
+    s_gal_build_threads = 2;
+    s_gal_job_n = gal_build(s_gal_job_cam, s_gal_job_best);
+    SDL_AtomicSet(&s_gal_done, 1);
+    return 0;
+}
+
+/* Collect a finished (or, with wait, any running) job. */
+static void gal_join(int wait)
+{
+    if (!s_gal_thread) return;
+    if (!wait && !SDL_AtomicGet(&s_gal_done)) return;
+    SDL_WaitThread(s_gal_thread, NULL);
+    s_gal_thread = NULL;
+    gal_install(s_gal_job_best, s_gal_job_n);
+}
+
+void galaxy_proc_set_async(int on)
+{
+    if (!on) gal_join(1);
+    s_gal_async = on ? 1 : 0;
+}
+
+void galaxy_proc_update(const double cam[3])
+{
+    if (!s_gal || s_gal_cap <= GALAXY_COUNT) return;
+    gal_join(0);
+    double mv = 0.0;
+    for (int k = 0; k < 3; k++) {
+        double d = cam[k] - s_gal_built_cam[k];
+        mv += d * d;
+    }
+    const double reb_au = GAL_REBUILD_MLY * 1e6 * AU_PER_LY;
+    if (mv < reb_au * reb_au || s_gal_thread) return;   /* current, or one in flight */
+    for (int k = 0; k < 3; k++) s_gal_built_cam[k] = cam[k];
+
+    if (s_gal_async && s_gal_have) {
+        for (int k = 0; k < 3; k++) s_gal_job_cam[k] = cam[k];
+        SDL_AtomicSet(&s_gal_done, 0);
+        s_gal_thread = SDL_CreateThread(gal_worker, "galaxy-rebuild", NULL);
+        if (s_gal_thread) return;
+        /* no thread: fall through and build inline */
+    }
+    s_gal_build_threads = omp_get_max_threads();
+    int n = gal_build(cam, s_gal_job_best);
+    gal_install(s_gal_job_best, n);
+    s_gal_have = 1;
 }
 
 int         galaxy_count(void)       { return s_gal_n; }
