@@ -544,6 +544,35 @@ static int needs_fullscreen(const float center[3], const float cam_fwd[3],
     return 0;
 }
 
+/* Route a galaxy: -1 = not visible, 0 = billboard, 1 = fullscreen march.
+ *
+ * needs_fullscreen() alone sent every galaxy with a small forward depth to the
+ * fullscreen path -- including every one BEHIND the camera, since the
+ * billboard path's behind-camera cull only ran after it. With the procedural
+ * sky's ~8k live galaxies that was thousands of full-screen marches a frame,
+ * each finding that its ray misses: ~97% of the galaxy pass's GPU time, 30+
+ * ms, in every scene (8 Gly from anything included). A fullscreen march is
+ * only needed when the camera is inside or beside the galaxy's bounds, or the
+ * billboard straddles the camera plane while the sphere can still reach the
+ * view cone; anything wholly behind, or angularly outside the view, is not
+ * drawn at all. */
+static int galaxy_route(const float center[3], const float cam_fwd[3], float radius,
+                        float fov_tan, float aspect)
+{
+    if (!needs_fullscreen(center, cam_fwd, radius)) return 0;
+    float half  = radius * GALAXY_BILL * 2.0f;          /* needs_fullscreen's */
+    float d     = sqrtf(center[0]*center[0] + center[1]*center[1] + center[2]*center[2]);
+    float eye_z = center[0]*cam_fwd[0] + center[1]*cam_fwd[1] + center[2]*cam_fwd[2];
+    if (d < half * 1.05f) return 1;                     /* inside / beside   */
+    if (eye_z + half <= 0.0f) return -1;                /* wholly behind     */
+    /* Off-axis angle of the centre, less the sphere's angular radius, against
+     * the half-angle of the view's diagonal. */
+    float ang_c = acosf(fmaxf(-1.0f, fminf(1.0f, eye_z / d)));
+    float ang_r = asinf(fminf(1.0f, half / d));
+    float view  = atanf(fov_tan * sqrtf(1.0f + aspect * aspect));
+    return (ang_c - ang_r > view) ? -1 : 1;
+}
+
 void galaxy_render(const float vp_camrel[16],
                    const float cam_right[3], const float cam_up[3],
                    const float cam_fwd[3], const double cam_pos[3],
@@ -593,7 +622,9 @@ void galaxy_render(const float vp_camrel[16],
         float center[3] = { (float)rx, (float)ry, (float)rz };
         float radf = (float)radius;
 
-        int fullscreen = needs_fullscreen(center, cam_fwd, radf);
+        int route = galaxy_route(center, cam_fwd, radf, fov_tan, aspect);
+        if (route < 0) continue;
+        int fullscreen = route;
 
         /* See nebula.c: film-out buys extra march steps (docs/CINEMATIC.md §8.4). */
         int base_steps = (int)(s_base_steps * cinematic_quality_scale());
