@@ -1,0 +1,8 @@
+https://data.sdss.org/sas/dr12/boss/lss/galaxy_DR12v5_CMASSLOWZTOT_North.fits.gz
+https://data.sdss.org/sas/dr12/boss/lss/galaxy_DR12v5_CMASSLOWZTOT_South.fits.gz
+https://data.sdss.org/sas/dr16/eboss/lss/catalogs/DR16/eBOSS_LRG_clustering_data-NGC-vDR16.fits
+https://data.sdss.org/sas/dr16/eboss/lss/catalogs/DR16/eBOSS_LRG_clustering_data-SGC-vDR16.fits
+https://data.sdss.org/sas/dr16/eboss/lss/catalogs/DR16/eBOSS_ELG_clustering_data-NGC-vDR16.fits
+https://data.sdss.org/sas/dr16/eboss/lss/catalogs/DR16/eBOSS_ELG_clustering_data-SGC-vDR16.fits
+https://data.sdss.org/sas/dr16/eboss/lss/catalogs/DR16/eBOSS_QSO_clustering_data-NGC-vDR16.fits
+https://data.sdss.org/sas/dr16/eboss/lss/catalogs/DR16/eBOSS_QSO_clustering_data-SGC-vDR16.fits

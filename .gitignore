@@ -115,3 +115,7 @@ showcase_4k.mp4
 
 # Scratch preview from tools/fetch_dustmap.py --preview
 dust.pgm
+
+# Raw SDSS BOSS/eBOSS LSS catalogs (tools/fetch_boss.py bakes them)
+assets/catalogs/sdss/*.fits
+assets/catalogs/sdss/*.fits.gz
