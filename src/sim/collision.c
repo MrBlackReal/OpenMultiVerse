@@ -360,11 +360,8 @@ static double current_contact_radius(int body_idx);   /* defined below */
  * Elements are osculating, so they drift under perturbation — but they are
  * recomputed from live state every step, and the widening covers one step of
  * motion, which is exactly the interval the caller is testing. */
-static void shell_of(int i, int root, double dt, double *lo, double *hi)
+static void shell_compute(int i, int root, double dt, double *lo, double *hi)
 {
-    if (i < 0 || i >= s_scratch_cap) { *lo = 0.0; *hi = 1e300; return; }
-    if (s_shell_stamp[i] == s_shell_gen) { *lo = s_shell_lo[i]; *hi = s_shell_hi[i]; return; }
-
     double r[3], v[3];
     for (int k = 0; k < 3; k++) {
         r[k] = g_bodies[i].pos[k] - g_bodies[root].pos[k];
@@ -396,9 +393,18 @@ static void shell_of(int i, int root, double dt, double *lo, double *hi)
     /* A non-inverse-square force law has no Kepler ellipse to speak of, so the
      * shell must not be trusted; the universe's laws are editable at runtime. */
     if (g_laws.force_exp != 2.0 || g_laws.lambda != 0.0) { slo = 0.0; shi = 1e300; }
-
-    s_shell_lo[i] = slo; s_shell_hi[i] = shi; s_shell_stamp[i] = s_shell_gen;
     *lo = slo; *hi = shi;
+}
+
+/* shell_compute(), cached per s_shell_gen. The cache ignores dt, so it is only
+ * valid for callers that bump the generation themselves before a pass at one
+ * dt (collision_step, collision_step_system). */
+static void shell_of(int i, int root, double dt, double *lo, double *hi)
+{
+    if (i < 0 || i >= s_scratch_cap) { *lo = 0.0; *hi = 1e300; return; }
+    if (s_shell_stamp[i] == s_shell_gen) { *lo = s_shell_lo[i]; *hi = s_shell_hi[i]; return; }
+    shell_compute(i, root, dt, lo, hi);
+    s_shell_lo[i] = *lo; s_shell_hi[i] = *hi; s_shell_stamp[i] = s_shell_gen;
 }
 
 /* 1 if a and b (same root) could possibly touch this step. */
@@ -579,48 +585,228 @@ void collision_on_body_added(int body_idx)
     if (root >= 0) mark_system_dirty(root, SYSTEM_HOT_DURATION);
 }
 
+/* ── primary-pair broadphase ───────────────────────────────────────────────
+ *
+ * collision_system_maybe_has_encounter() and
+ * collision_system_close_approach_subdivide() classify every active system
+ * every frame, and both used to test all primary pairs: at 657 bodies that was
+ * ~11 ms a call, ~60 ns a pair, most of it helper calls (two 16-slot merge-table
+ * scans and a parent lookup per pair). The shell filter rejects nothing in an
+ * asteroid belt, where every orbit crosses every other.
+ *
+ * Each predicate can only fire for a pair closer than some reach that is a sum
+ * of per-body terms, R_a + R_b (derived at each caller). So every primary gets
+ * a cube of half-size R around its position, and only pairs whose cubes
+ * overlap -- found by sorting on x and sweeping -- reach the exact test. Since
+ * |dx|, |dy|, |dz| <= dist, a pair outside that is outside the predicate, so
+ * the answer is identical to testing all pairs.
+ *
+ * Per-body work (primary, merge-impactor, contact radius, orbital shell) is
+ * done once per body instead of once per pair. The shells are computed fresh
+ * for this dt: the shared shell_of() cache is only renewed when collision_step
+ * does real work, so these callers were reading shells from an earlier frame,
+ * padded for whatever dt first filled them -- and close_approach_subdivide runs
+ * on worker threads, where writing that cache was a data race. */
+typedef struct {
+    int     cap, n;
+    int    *idx;                /* body index                                  */
+    int    *mk;                 /* its position in the root's member list      */
+    double (*p)[3], (*v)[3];    /* position, velocity (absolute)               */
+    double *cr;                 /* current_contact_radius                      */
+    double (*lo)[3], (*hi)[3];  /* candidate box                               */
+    double *slo, *shi;          /* orbital shell for this dt                   */
+    int    *order;              /* packed slots sorted by lo[0]                */
+} PairSweep;
+
+static PairSweep s_sweep;
+#pragma omp threadprivate(s_sweep)
+
+static void sweep_reserve(PairSweep *w, int n)
+{
+    if (n <= w->cap) return;
+    int cap = w->cap ? w->cap : 64;
+    while (cap < n) cap *= 2;
+    w->idx   = (int*)realloc(w->idx,   (size_t)cap * sizeof *w->idx);
+    w->mk    = (int*)realloc(w->mk,    (size_t)cap * sizeof *w->mk);
+    w->p     = (double(*)[3])realloc(w->p,  (size_t)cap * sizeof *w->p);
+    w->v     = (double(*)[3])realloc(w->v,  (size_t)cap * sizeof *w->v);
+    w->lo    = (double(*)[3])realloc(w->lo, (size_t)cap * sizeof *w->lo);
+    w->hi    = (double(*)[3])realloc(w->hi, (size_t)cap * sizeof *w->hi);
+    w->cr    = (double*)realloc(w->cr,  (size_t)cap * sizeof *w->cr);
+    w->slo   = (double*)realloc(w->slo, (size_t)cap * sizeof *w->slo);
+    w->shi   = (double*)realloc(w->shi, (size_t)cap * sizeof *w->shi);
+    w->order = (int*)realloc(w->order, (size_t)cap * sizeof *w->order);
+    if (!w->idx || !w->mk || !w->p || !w->v || !w->lo || !w->hi || !w->cr ||
+        !w->slo || !w->shi || !w->order) {
+        fprintf(stderr, "[collision] out of memory (pair sweep, %d bodies)\n", n);
+        exit(1);
+    }
+    w->cap = cap;
+}
+
+/* qsort has no context argument; the sort runs inside one thread's call. */
+static const double (*s_sort_lo)[3];
+#pragma omp threadprivate(s_sort_lo)
+static int sweep_cmp(const void *pa, const void *pb)
+{
+    double a = s_sort_lo[*(const int*)pa][0], b = s_sort_lo[*(const int*)pb][0];
+    return (a > b) - (a < b);
+}
+
+/* Box of each body, per caller:
+ *   SWEEP_REACH    cube of half-size k_r * cr + k_v * dt * |v - v_root| around
+ *                  the position: the caller's bound on how close a pair must
+ *                  be for its predicate to fire. Velocities are relative to the
+ *                  root because |va - vb| <= |va - vroot| + |vb - vroot| holds
+ *                  in any frame, and the root's own galactic motion (~230 km/s
+ *                  for the Sun) would otherwise swell every cube.
+ *   SWEEP_SEGMENT  the straight path swept_spheres_collide() assumes for this
+ *                  step (pre-physics position to now, or pos - vel*dt to now),
+ *                  padded by cr: two bodies whose paths' boxes are disjoint
+ *                  cannot come within cr_a + cr_b of each other along them.
+ * Both are padded by 1e-9 relative + 1 m against rounding in the exact tests. */
+enum { SWEEP_REACH, SWEEP_SEGMENT };
+
+/* Gather root's primaries (minus merge impactors, which no caller tests) and
+ * sort them for the sweep. Shells are filled only when `shells` is set. */
+static PairSweep *sweep_build(int root, double dt, int mode,
+                              double k_r, double k_v, int shells)
+{
+    PairSweep *w = &s_sweep;
+    int nm = mem_count(root);
+    sweep_reserve(w, nm);
+    const double *vroot = g_bodies[root].vel;
+
+    int n = 0;
+    for (int k = 0; k < nm; k++) {
+        int i = mem_at(root, k);
+        if (!body_is_primary(i) || body_is_merge_impactor(i)) continue;
+        const Body *b = &g_bodies[i];
+        double cr = current_contact_radius(i);
+        w->idx[n] = i;
+        w->mk[n]  = k;
+        w->cr[n]  = cr;
+        for (int q = 0; q < 3; q++) { w->p[n][q] = b->pos[q]; w->v[n][q] = b->vel[q]; }
+
+        if (mode == SWEEP_REACH) {
+            double d0 = b->vel[0] - vroot[0], d1 = b->vel[1] - vroot[1], d2 = b->vel[2] - vroot[2];
+            double reach = k_r * cr + k_v * dt * sqrt(d0*d0 + d1*d1 + d2*d2);
+            reach = reach * (1.0 + 1e-9) + 1.0;
+            for (int q = 0; q < 3; q++) {
+                w->lo[n][q] = b->pos[q] - reach;
+                w->hi[n][q] = b->pos[q] + reach;
+            }
+        } else {
+            for (int q = 0; q < 3; q++) {
+                double p0 = (s_pos_before_valid && dt > 0.0) ? s_pos_before[i][q]
+                                                             : b->pos[q] - b->vel[q] * dt;
+                double lo = fmin(p0, b->pos[q]), hi = fmax(p0, b->pos[q]);
+                double pad = cr + 1e-9 * fmax(fabs(lo), fabs(hi)) + 1.0;
+                w->lo[n][q] = lo - pad;
+                w->hi[n][q] = hi + pad;
+            }
+        }
+        if (shells) shell_compute(i, root, dt, &w->slo[n], &w->shi[n]);
+        w->order[n] = n;
+        n++;
+    }
+    s_sort_lo = (const double (*)[3])w->lo;
+    qsort(w->order, (size_t)n, sizeof *w->order, sweep_cmp);
+    w->n = n;
+    return w;
+}
+
+/* Next candidate pair (a, b) in packed slots, or 0 when exhausted: boxes
+ * overlap on every axis, and shells overlap if they were filled. *oi / *oj
+ * are the cursor, starting at 0 / 1. */
+static int sweep_next(const PairSweep *w, int shells, int *oi, int *oj,
+                      int *pa, int *pb)
+{
+    for (; *oi < w->n; (*oi)++, *oj = *oi + 1) {
+        int a = w->order[*oi];
+        for (; *oj < w->n; (*oj)++) {
+            int b = w->order[*oj];
+            if (w->lo[b][0] > w->hi[a][0]) break;     /* sorted: none further */
+            if (w->lo[b][1] > w->hi[a][1] || w->lo[a][1] > w->hi[b][1]) continue;
+            if (w->lo[b][2] > w->hi[a][2] || w->lo[a][2] > w->hi[b][2]) continue;
+            if (shells && (w->shi[a] < w->slo[b] || w->shi[b] < w->slo[a])) continue;
+            *pa = a;  *pb = b;
+            (*oj)++;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Primary-pair half of maybe_has_encounter: 1 if any pair fires. */
+static int maybe_has_encounter_pairs(int root, double dt)
+{
+    const PairSweep *w = sweep_build(root, dt, SWEEP_REACH, 4.0, 1.0, 1);
+    int oi = 0, oj = 1, a, b;
+    while (sweep_next(w, 1, &oi, &oj, &a, &b)) {
+        double rx = w->p[b][0] - w->p[a][0];
+        double ry = w->p[b][1] - w->p[a][1];
+        double rz = w->p[b][2] - w->p[a][2];
+        double dist = sqrt(rx*rx + ry*ry + rz*rz);
+        if (dist <= 1e-9) return 1;
+
+        double vx = w->v[b][0] - w->v[a][0];
+        double vy = w->v[b][1] - w->v[a][1];
+        double vz = w->v[b][2] - w->v[a][2];
+        double vr = -(rx*vx + ry*vy + rz*vz) / dist;
+        double rsum = w->cr[a] + w->cr[b];
+        double gap = dist - rsum;
+
+        if (gap <= rsum * 3.0) return 1;
+        if (vr > 10.0) {
+            double tau = gap / vr;
+            if (tau <= dt) return 1;
+        }
+    }
+    return 0;
+}
+
+/* Primary-pair half of close_approach_subdivide: the smallest time to contact
+ * among approaching pairs (1e30 if none), or -1 for a pair already touching. */
+static double close_approach_pairs(int root, double dt_outer)
+{
+    const PairSweep *w = sweep_build(root, dt_outer, SWEEP_REACH, 1.0, 8.0, 1);
+    double min_tau = 1e30;
+    int oi = 0, oj = 1, a, b;
+    while (sweep_next(w, 1, &oi, &oj, &a, &b)) {
+        double rx = w->p[b][0] - w->p[a][0];
+        double ry = w->p[b][1] - w->p[a][1];
+        double rz = w->p[b][2] - w->p[a][2];
+        double dist = sqrt(rx*rx + ry*ry + rz*rz);
+        if (dist <= 1e-9) return -1.0;
+
+        double vx = w->v[b][0] - w->v[a][0];
+        double vy = w->v[b][1] - w->v[a][1];
+        double vz = w->v[b][2] - w->v[a][2];
+        double vr = -(rx*vx + ry*vy + rz*vz) / dist; /* positive = approaching */
+        if (vr < 10.0) continue;
+
+        double gap = dist - (w->cr[a] + w->cr[b]);
+        if (gap <= 0.0) return -1.0;
+
+        double tau = gap / vr;
+        if (tau < min_tau) min_tau = tau;
+    }
+    return min_tau;
+}
+
 int collision_system_maybe_has_encounter(int root, double dt)
 {
     if (root < 0 || root >= cnb() || !g_bodies[root].alive) return 0;
     if (dt <= 0.0) return 0;
     if (!ensure_membership()) return 0;
 
-    /* Members only. This ran as a double loop over every body in the universe
-     * with a body_root_star() != root filter inside — ~128M rejected iterations
-     * per system per frame at galaxy scale, once per active system. It is
-     * called from main.c's hot/cold classifier, outside collision_step(), which
-     * is how it stayed out of the collision profile. */
+    /* Primary pairs, through the broadphase above. The pair fires when
+     * gap <= 3*rsum, i.e. dist <= 4*rsum, or when approaching with
+     * gap / vr <= dt, i.e. dist <= rsum + vr*dt <= rsum + |va - vb|*dt. Both
+     * sit inside 4*(cr_a + cr_b) + dt*(|va| + |vb|): reach = 4*cr + dt*|v|. */
     int nm = mem_count(root);
-    for (int ai = 0; ai < nm; ai++) {
-        int i = mem_at(root, ai);
-        if (!body_is_primary(i)) continue;
-        for (int bj = ai + 1; bj < nm; bj++) {
-            int j = mem_at(root, bj);
-            double rx, ry, rz, dist, vx, vy, vz, vr, rsum, gap;
-            if (!body_is_primary(j)) continue;
-            if (body_is_merge_impactor(i) || body_is_merge_impactor(j)) continue;
-            if (!shells_may_touch(i, j, root, dt)) continue;
-
-            rx = g_bodies[j].pos[0] - g_bodies[i].pos[0];
-            ry = g_bodies[j].pos[1] - g_bodies[i].pos[1];
-            rz = g_bodies[j].pos[2] - g_bodies[i].pos[2];
-            dist = sqrt(rx*rx + ry*ry + rz*rz);
-            if (dist <= 1e-9) return 1;
-
-            vx = g_bodies[j].vel[0] - g_bodies[i].vel[0];
-            vy = g_bodies[j].vel[1] - g_bodies[i].vel[1];
-            vz = g_bodies[j].vel[2] - g_bodies[i].vel[2];
-            vr = -(rx*vx + ry*vy + rz*vz) / dist;
-            rsum = current_contact_radius(i) + current_contact_radius(j);
-            gap = dist - rsum;
-
-            if (gap <= rsum * 3.0) return 1;
-            if (vr > 10.0) {
-                double tau = gap / vr;
-                if (tau <= dt) return 1;
-            }
-        }
-    }
+    if (maybe_has_encounter_pairs(root, dt)) return 1;
 
     if (g_bodies[root].is_star) {
         for (int k = 0; k < nm; k++) {
@@ -677,39 +863,14 @@ int collision_system_close_approach_subdivide(int root, double dt_outer)
     if (dt_outer <= 0.0) return 1;
     if (!ensure_membership()) return 1;
 
-    double min_tau = 1e30;
     int nm = mem_count(root);
 
-    /* Primary–primary pairs, members only (see maybe_has_encounter). */
-    for (int ai = 0; ai < nm; ai++) {
-        int i = mem_at(root, ai);
-        if (!body_is_primary(i)) continue;
-        for (int bj = ai + 1; bj < nm; bj++) {
-            int j = mem_at(root, bj);
-            if (!body_is_primary(j)) continue;
-            if (body_is_merge_impactor(i) || body_is_merge_impactor(j)) continue;
-            if (!shells_may_touch(i, j, root, dt_outer)) continue;
-
-            double rx = g_bodies[j].pos[0] - g_bodies[i].pos[0];
-            double ry = g_bodies[j].pos[1] - g_bodies[i].pos[1];
-            double rz = g_bodies[j].pos[2] - g_bodies[i].pos[2];
-            double dist = sqrt(rx*rx + ry*ry + rz*rz);
-            if (dist <= 1e-9) return 8;
-
-            double vx = g_bodies[j].vel[0] - g_bodies[i].vel[0];
-            double vy = g_bodies[j].vel[1] - g_bodies[i].vel[1];
-            double vz = g_bodies[j].vel[2] - g_bodies[i].vel[2];
-            double vr = -(rx*vx + ry*vy + rz*vz) / dist; /* positive = approaching */
-            if (vr < 10.0) continue;
-
-            double rsum = current_contact_radius(i) + current_contact_radius(j);
-            double gap = dist - rsum;
-            if (gap <= 0.0) return 8;
-
-            double tau = gap / vr;
-            if (tau < min_tau) min_tau = tau;
-        }
-    }
+    /* Primary pairs, through the broadphase. Only a pair with gap <= 0 or
+     * tau = gap / vr <= 8*dt_outer can change the answer (any larger tau
+     * returns 1 either way), i.e. dist <= rsum + 8*dt*vr <= rsum +
+     * 8*dt*(|va| + |vb|): reach = cr + 8*dt*|v|. */
+    double min_tau = close_approach_pairs(root, dt_outer);
+    if (min_tau < 0.0) return 8;
 
     /* Body approaching the star */
     if (g_bodies[root].is_star) {
@@ -2762,6 +2923,80 @@ static void absorb_body(int target, int impactor, double rel_speed,
     finalize_absorb_body(target, impactor, rel_speed, outcome, old_radius, 0);
 }
 
+/* ── collision_step_system pair helpers ──────────────────────────────────── */
+
+enum { PAIR_NONE, PAIR_ABSORBED, PAIR_ABSORBED_A };
+
+/* The body of collision_step_system's pair loop for a (outer) and b (inner).
+ * PAIR_ABSORBED_A means a itself was absorbed and the caller must stop
+ * scanning partners for it. */
+static int step_pair(int root, int a, int b, double dt)
+{
+    double speed = 0.0;
+    double hit_t = 0.0;
+    int target, impactor;
+    int a_is_merge_target, b_is_merge_target, keep_target_open;
+
+    if (!body_is_primary(b) || is_resolved(b) || body_is_merge_impactor(b))
+        return PAIR_NONE;
+
+    if (!shells_may_touch(a, b, root, dt))
+        return PAIR_NONE;
+
+    if (!swept_spheres_collide(a, b, dt, &speed, &hit_t))
+        return PAIR_NONE;
+
+    a_is_merge_target = body_is_merge_target(a);
+    b_is_merge_target = body_is_merge_target(b);
+    if (a_is_merge_target && !b_is_merge_target)
+        target = a;
+    else if (b_is_merge_target && !a_is_merge_target)
+        target = b;
+    else
+        target = g_bodies[a].mass >= g_bodies[b].mass ? a : b;
+    impactor = target == a ? b : a;
+
+    absorb_body(target, impactor, speed, hit_t, dt);
+    keep_target_open = body_is_merge_target(target);
+    if (!keep_target_open) set_resolved(target);
+    set_resolved(impactor);
+    return impactor == a ? PAIR_ABSORBED_A : PAIR_ABSORBED;
+}
+
+/* Candidate primary pairs for this step as member positions (a < b), sorted
+ * the way the all-pairs loop visits them. Hot systems run serially, so one
+ * shared list suffices. */
+typedef struct { int a, b; } MemberPair;
+static MemberPair *s_cand = NULL;
+static int         s_cand_cap = 0;
+
+static int cand_cmp(const void *pa, const void *pb)
+{
+    const MemberPair *x = (const MemberPair*)pa, *y = (const MemberPair*)pb;
+    if (x->a != y->a) return (x->a > y->a) - (x->a < y->a);
+    return (x->b > y->b) - (x->b < y->b);
+}
+
+static int step_candidates(int root, double dt)
+{
+    const PairSweep *w = sweep_build(root, dt, SWEEP_SEGMENT, 0.0, 0.0, 0);
+    int n = 0, oi = 0, oj = 1, a, b;
+    while (sweep_next(w, 0, &oi, &oj, &a, &b)) {
+        if (n == s_cand_cap) {
+            int cap = s_cand_cap ? s_cand_cap * 2 : 256;
+            MemberPair *t = (MemberPair*)realloc(s_cand, (size_t)cap * sizeof *t);
+            if (!t) { fprintf(stderr, "[collision] out of memory (candidates)\n"); exit(1); }
+            s_cand = t;  s_cand_cap = cap;
+        }
+        int ka = w->mk[a], kb = w->mk[b];
+        s_cand[n].a = ka < kb ? ka : kb;
+        s_cand[n].b = ka < kb ? kb : ka;
+        n++;
+    }
+    qsort(s_cand, (size_t)n, sizeof *s_cand, cand_cmp);
+    return n;
+}
+
 void collision_step_system(int root, double dt)
 {
     if (dt <= 0.0) return;
@@ -2783,43 +3018,36 @@ void collision_step_system(int root, double dt)
         s_shell_gen = 1;
     }
 
+    /* Primary pairs. The candidate list comes from the swept-box broadphase
+     * and is visited in the original (ai, bi) order, so collisions resolve in
+     * the same sequence as the all-pairs loop. That holds only while the state
+     * the boxes were built from is untouched: the first absorb changes masses,
+     * velocities and contact radii, so from then on the rest of the call runs
+     * the all-pairs loop. Collisions are rare; the pass that has one pays
+     * O(n^2) once, every other pass pays for the candidates alone. */
+    int nc = step_candidates(root, dt);
+    int ci = 0, exhaustive = 0;
     for (int ai = 0; ai < nm; ai++) {
         int a = mem_at(root, ai);
         if (!body_is_primary(a) || is_resolved(a) || body_is_merge_impactor(a))
             continue;
 
-        for (int bi = ai + 1; bi < nm; bi++) {
-            int b = mem_at(root, bi);
-            double speed = 0.0;
-            double hit_t = 0.0;
-            int target, impactor;
-            int a_is_merge_target, b_is_merge_target, keep_target_open;
-
-            if (!body_is_primary(b) || is_resolved(b) || body_is_merge_impactor(b))
-                continue;
-
-            if (!shells_may_touch(a, b, root, dt))
-                continue;
-
-            if (!swept_spheres_collide(a, b, dt, &speed, &hit_t))
-                continue;
-
-            a_is_merge_target = body_is_merge_target(a);
-            b_is_merge_target = body_is_merge_target(b);
-            if (a_is_merge_target && !b_is_merge_target)
-                target = a;
-            else if (b_is_merge_target && !a_is_merge_target)
-                target = b;
-            else
-                target = g_bodies[a].mass >= g_bodies[b].mass ? a : b;
-            impactor = target == a ? b : a;
-
-            absorb_body(target, impactor, speed, hit_t, dt);
-            keep_target_open = body_is_merge_target(target);
-            if (!keep_target_open) set_resolved(target);
-            set_resolved(impactor);
-            if (impactor == a) break;
+        int bi = ai + 1, stop = 0;
+        if (!exhaustive) {
+            while (ci < nc && s_cand[ci].a < ai) ci++;
+            for (; ci < nc && s_cand[ci].a == ai; ci++) {
+                int r = step_pair(root, a, mem_at(root, s_cand[ci].b), dt);
+                if (r == PAIR_NONE) continue;
+                exhaustive = 1;
+                bi = s_cand[ci].b + 1;
+                ci++;
+                stop = (r == PAIR_ABSORBED_A);
+                break;
+            }
+            if (!exhaustive || stop) continue;
         }
+        for (; bi < nm; bi++)
+            if (step_pair(root, a, mem_at(root, bi), dt) == PAIR_ABSORBED_A) break;
     }
 
     /* Black holes shred and devour bodies that stray within the tidal radius,

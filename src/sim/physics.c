@@ -930,6 +930,196 @@ static void add_relativistic_acc(int root) {
 }
 
 /*
+ * ── gathered slow-force kernel ─────────────────────────────────────────────
+ *
+ * The isolated-system pair loop, run over a packed copy of the system instead
+ * of over g_bodies.  Reading members in place cost ~19 ns a pair at 657
+ * bodies: every pair strode through 328-byte Body records, chased
+ * parent -> is_star for is_satellite(j), walked the parent chain for
+ * is_ancestor_of, and tested (and rejected) the j < i half of all pairs.
+ *
+ * Here every per-body input is gathered once, O(n), into dense arrays:
+ * positions and masses for the arithmetic, the satellite flag, and each
+ * satellite's ancestor chain as global indices, so the pair loop touches
+ * nothing but contiguous doubles and one byte per body.  Each row then runs
+ * in two passes: a branch-free one that computes every pair's separation and
+ * factor f (it vectorises), and one that applies the skips and accumulates.
+ *
+ * Measured at 657 bodies in one system (Xeon E5-1620 v2): 4.18 -> 2.25 ms
+ * per evaluation.  What is left is one sqrt and one divide per pair, which
+ * this CPU's SIMD units barely beat scalar on; the next factor has to come
+ * from evaluating fewer pairs, not from layout.
+ *
+ * Results are bit-identical to the in-place loop, by construction:
+ *   - Members are ascending body indices (the CSR fill walks i upward), so
+ *     the old `j < i` skip is exactly `b <= a`, and the inner loop starts at
+ *     a + 1 visiting the same j in the same order.
+ *   - Each acceleration receives the same terms in the same order: a's own
+ *     sum continues from whatever earlier rows already subtracted into it,
+ *     and a is never a `b` again once its row is done.
+ *   - Dead bodies are left out of the gather, which is what their `continue`
+ *     did; the ancestor chain is stored whole, dead links included, exactly
+ *     as is_ancestor_of walks it.
+ */
+#define GATHER_ANC_MAX 6          /* moon -> planet -> star is 2; deeper chains
+                                   * than this fall back to is_ancestor_of   */
+typedef struct {
+    int     cap;
+    int    *idx;                  /* global body index of each packed slot   */
+    double *x, *y, *z, *m;        /* position (m) and mass (kg)              */
+    double *ax, *ay, *az;         /* accumulated slow acceleration           */
+    uint8_t *sat;                 /* is_satellite()                          */
+    uint8_t *anc_n;               /* ancestor count, or 0xFF = chain too deep */
+    int    (*anc)[GATHER_ANC_MAX];/* ancestor chain, nearest first           */
+    double *tdx, *tdy, *tdz;      /* per-row scratch: separation to each b   */
+    double *tr2, *tf;             /* softened r^2 and pair factor f          */
+} ForceGather;
+
+/* One per thread: systems integrate in parallel (main.c, OpenMP). */
+static ForceGather s_gather;
+#pragma omp threadprivate(s_gather)
+
+static void gather_reserve(ForceGather *g, int n)
+{
+    if (n <= g->cap) return;
+    int cap = g->cap ? g->cap : 64;
+    while (cap < n) cap *= 2;
+    g->idx   = (int*)    realloc(g->idx,   (size_t)cap * sizeof *g->idx);
+    g->x     = (double*) realloc(g->x,     (size_t)cap * sizeof *g->x);
+    g->y     = (double*) realloc(g->y,     (size_t)cap * sizeof *g->y);
+    g->z     = (double*) realloc(g->z,     (size_t)cap * sizeof *g->z);
+    g->m     = (double*) realloc(g->m,     (size_t)cap * sizeof *g->m);
+    g->ax    = (double*) realloc(g->ax,    (size_t)cap * sizeof *g->ax);
+    g->ay    = (double*) realloc(g->ay,    (size_t)cap * sizeof *g->ay);
+    g->az    = (double*) realloc(g->az,    (size_t)cap * sizeof *g->az);
+    g->sat   = (uint8_t*)realloc(g->sat,   (size_t)cap * sizeof *g->sat);
+    g->anc_n = (uint8_t*)realloc(g->anc_n, (size_t)cap * sizeof *g->anc_n);
+    g->anc   = (int(*)[GATHER_ANC_MAX])realloc(g->anc, (size_t)cap * sizeof *g->anc);
+    g->tdx   = (double*) realloc(g->tdx,   (size_t)cap * sizeof *g->tdx);
+    g->tdy   = (double*) realloc(g->tdy,   (size_t)cap * sizeof *g->tdy);
+    g->tdz   = (double*) realloc(g->tdz,   (size_t)cap * sizeof *g->tdz);
+    g->tr2   = (double*) realloc(g->tr2,   (size_t)cap * sizeof *g->tr2);
+    g->tf    = (double*) realloc(g->tf,    (size_t)cap * sizeof *g->tf);
+    if (!g->tdx || !g->tdy || !g->tdz || !g->tr2 || !g->tf || !g->idx || !g->x || !g->y || !g->z || !g->m || !g->ax || !g->ay ||
+        !g->az || !g->sat || !g->anc_n || !g->anc) {
+        fprintf(stderr, "[physics] out of memory (force gather, %d bodies)\n", n);
+        exit(1);
+    }
+    g->cap = cap;
+}
+
+/* is_ancestor_of(anc_body, <packed body k>) from the gathered chain. */
+static inline int gather_has_ancestor(const ForceGather *g, int k, int anc_body)
+{
+    int n = g->anc_n[k];
+    if (n == 0xFF) return is_ancestor_of(anc_body, g->idx[k]);
+    for (int q = 0; q < n; q++)
+        if (g->anc[k][q] == anc_body) return 1;
+    return 0;
+}
+
+static void compute_acc_slow_gathered(int slot)
+{
+    ForceGather *g = &s_gather;
+    const int count = s_system_member_count[slot];
+    gather_reserve(g, count);
+
+    int n = 0;
+    for (int mi = 0; mi < count; mi++) {
+        int i = sys_member(slot, mi);
+        const Body *b = &g_bodies[i];
+        if (!b->alive) continue;
+        g->idx[n] = i;
+        g->x[n] = b->pos[0];  g->y[n] = b->pos[1];  g->z[n] = b->pos[2];
+        g->m[n] = b->mass;
+        g->ax[n] = g->ay[n] = g->az[n] = 0.0;
+        g->sat[n] = (uint8_t)is_satellite(i);
+        int na = 0;
+        if (g->sat[n]) {
+            for (int p = b->parent; p >= 0; p = g_bodies[p].parent) {
+                if (na == GATHER_ANC_MAX) { na = 0xFF; break; }
+                g->anc[n][na++] = p;
+            }
+        }
+        g->anc_n[n] = (uint8_t)na;
+        n++;
+    }
+
+    /* Locals, not g->: the loop stores through ax/ay/az, so without restrict
+     * the compiler must assume any store may change every array pointer and
+     * every g_laws field, and reloads them all on each pair. */
+    const int     *restrict idx = g->idx;
+    const double  *restrict x = g->x, *restrict y = g->y, *restrict z = g->z;
+    const double  *restrict m = g->m;
+    double        *restrict ax = g->ax, *restrict ay = g->ay, *restrict az = g->az;
+    const uint8_t *restrict sat = g->sat;
+    double *restrict tdx = g->tdx, *restrict tdy = g->tdy, *restrict tdz = g->tdz;
+    double *restrict tr2 = g->tr2, *restrict tf = g->tf;
+
+    const double soft2  = SOFTENING * SOFTENING;
+    const double G      = G_CONST;
+    const int    newton = (g_laws.force_exp == 2.0);
+
+    for (int a = 0; a < n; a++) {
+        const int    ia    = idx[a];
+        const int    sat_a = sat[a];
+        const double xa = x[a], ya = y[a], za = z[a], ma = m[a];
+        double sx = ax[a], sy = ay[a], sz = az[a];
+
+        if (newton) {
+            /* Pass 1, branch-free so it vectorises: every pair's separation
+             * and pair factor. sqrt and division are exactly rounded in SIMD
+             * too, so each f is bit-identical to the scalar one. Computing f
+             * for pairs pass 2 then skips is cheaper than branching first:
+             * compacting the survivors measured 1.6x slower when few are
+             * culled and only 1.15x faster in a realistic-mass belt. */
+            #pragma omp simd
+            for (int b = a + 1; b < n; b++) {
+                double dx = x[b] - xa, dy = y[b] - ya, dz = z[b] - za;
+                double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                tdx[b] = dx;  tdy[b] = dy;  tdz[b] = dz;  tr2[b] = r2;
+                /* laws_pair_factor()'s inverse-square path, on hoisted G. */
+                tf[b] = G / (r2 * sqrt(r2));
+            }
+        }
+
+        /* Pass 2: skips and accumulation, in the original order. */
+        for (int b = a + 1; b < n; b++) {
+            const int sat_b = sat[b];
+            if (sat_a && sat_b) continue;
+            if ((sat_b && gather_has_ancestor(g, b, ia)) ||
+                (sat_a && gather_has_ancestor(g, a, idx[b]))) continue;
+
+            double dx, dy, dz, f;
+            if (newton) {
+                double r2 = tr2[b];
+                if (G * m[b] < GRAV_EPSILON * r2 &&
+                    G * ma   < GRAV_EPSILON * r2) continue;
+                dx = tdx[b];  dy = tdy[b];  dz = tdz[b];  f = tf[b];
+            } else {
+                dx = x[b] - xa;  dy = y[b] - ya;  dz = z[b] - za;
+                double r2 = dx*dx + dy*dy + dz*dz + soft2;
+                f = laws_pair_factor(r2, sqrt(r2));
+            }
+
+            sx += f * m[b] * dx;
+            sy += f * m[b] * dy;
+            sz += f * m[b] * dz;
+
+            ax[b] -= f * ma * dx;
+            ay[b] -= f * ma * dy;
+            az[b] -= f * ma * dz;
+        }
+        ax[a] = sx;  ay[a] = sy;  az[a] = sz;
+    }
+
+    for (int k = 0; k < n; k++) {
+        double *acc = g_bodies[g->idx[k]].acc;
+        acc[0] = g->ax[k];  acc[1] = g->ay[k];  acc[2] = g->az[k];
+    }
+}
+
+/*
  * compute_acc_slow_system — accumulate slow gravitational accelerations.
  *
  * Computes all-pairs force for the given star system, with two exclusions:
@@ -1014,24 +1204,27 @@ static void compute_acc_slow_system(int root) {
      * this system's own members — interstellar gravity between systems is
      * negligible, so cross-system pairs are skipped entirely.  This is the
      * O(active x N) -> O(Ni^2) win that lets thousand-system universes run in
-     * real time.  When isolation is off, fall back to scanning all bodies so a
-     * deliberately-coupled scenario still feels every cross-system pair. */
-    int isolated = (g_laws.gravity_isolation != 0.0);
+     * real time; the gathered kernel above runs it over packed arrays.  When
+     * isolation is off, fall back to scanning all bodies so a deliberately-
+     * coupled scenario still feels every cross-system pair. */
+    if (g_laws.gravity_isolation != 0.0) {
+        compute_acc_slow_gathered(slot);
+        add_cosmological_acc(root);
+        add_relativistic_acc(root);
+        return;
+    }
     int member_count = s_system_member_count[slot];
-    int j_count = isolated ? member_count : g_nbodies;
     for (int mi = 0; mi < member_count; mi++) {
         i = sys_member(slot, mi);
         if (!g_bodies[i].alive) continue;
         int i_is_sat = is_satellite(i);   /* invariant across the inner j loop */
-        for (int jk = 0; jk < j_count; jk++) {
+        for (j = 0; j < g_nbodies; j++) {
             int same_system;
             double dx, dy, dz, r2, r, f;
 
-            j = isolated ? sys_member(slot, jk) : jk;
             if (j == i || !g_bodies[j].alive) continue;
 
-            same_system = isolated ||
-                          (j >= 0 && j < g_nbodies && s_body_system_slot[j] == slot);
+            same_system = (s_body_system_slot[j] == slot);
             if (same_system && j < i) continue;
 
             if (i_is_sat && is_satellite(j)) continue;
