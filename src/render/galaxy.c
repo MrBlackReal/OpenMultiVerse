@@ -142,7 +142,6 @@ static GLuint s_imp_shader = 0, s_imp_vao = 0, s_imp_vbo = 0;
 static GLint  s_imp_vp = -1, s_imp_time = -1, s_imp_twinkle = -1;
 static float *s_imp_buf = NULL;
 static int    s_imp_n = 0, s_imp_cap = 0;
-static void galaxy_render_impostors(const float vp_camrel[16], float time_s);
 
 /* ── procedural galaxy lattice ────────────────────────────────────────────
  *
@@ -588,8 +587,8 @@ void galaxy_render(const float vp_camrel[16],
     glDisable(GL_BLEND);
 
     { static int f=0; if(f++==3) fprintf(stderr,"[GN] impostors=%d set=%d\n", s_imp_n, s_gal_n); }
-    /* Everything the loop above was too small to march. */
-    galaxy_render_impostors(vp_camrel, time_s);
+    /* Everything the loop above was too small to march is left in s_imp_buf
+     * for galaxy_render_impostors(), which the caller draws separately. */
 }
 
 void galaxy_render_stars(const float vp_camrel[16], const double cam_pos[3],
@@ -692,11 +691,17 @@ void galaxy_render_stars(const float vp_camrel[16], const double cam_pos[3],
 }
 
 /* Draw the galaxies the volumetric pass was too small to march, as additive
- * point sprites. Called at the end of galaxy_render(), after s_imp_buf has
- * been filled by that pass. */
-static void galaxy_render_impostors(const float vp_camrel[16], float time_s)
+ * point sprites (see galaxy.h). s_imp_buf was filled by the last
+ * galaxy_render(), with sizes in that call's target pixels. */
+void galaxy_render_impostors(const float vp_camrel[16], float time_s,
+                             float px_scale)
 {
-    if (!s_imp_shader || !s_imp_vao || s_imp_n <= 0) return;
+    if (!s_enabled || !s_imp_shader || !s_imp_vao || s_imp_n <= 0) return;
+
+    /* Rescale sizes in place: galaxy_render() rebuilds the buffer each call,
+     * and each build is drawn once. */
+    if (px_scale != 1.0f)
+        for (int i = 0; i < s_imp_n; i++) s_imp_buf[i * 8 + 7] *= px_scale;
 
     glBindVertexArray(s_imp_vao);
     glBindBuffer(GL_ARRAY_BUFFER, s_imp_vbo);

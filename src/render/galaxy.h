@@ -29,6 +29,15 @@ void galaxy_render(const float vp_camrel[16],
                    const float cam_fwd[3], const double cam_pos[3],
                    float fov_tan, float aspect, int screen_w, int screen_h,
                    float time_s, unsigned int scene_depth_tex);
+
+/* The galaxies galaxy_render() found too small to raymarch, as point sprites.
+ * Call after galaxy_render(), into a target WITH the opaque scene's depth:
+ * they rely on the ordinary depth test, which a depth-less half-res target
+ * cannot provide, so drawn there they showed through planets. px_scale
+ * converts the sprite sizes from galaxy_render()'s target to this one
+ * (e.g. 2 when galaxy_render() drew at half resolution). */
+void galaxy_render_impostors(const float vp_camrel[16], float time_s,
+                             float px_scale);
 void galaxy_shutdown(void);
 
 /* Procedural resolved stars (the §0.1 galaxy → stars scale step): when the

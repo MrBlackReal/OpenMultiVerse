@@ -854,6 +854,7 @@ static void env_capture(float sf_fade)
         glEnable(GL_DEPTH_TEST);
         galaxy_render(vp, right, up, fwd, g_cam.pos, 1.0f, 1.0f,
                       ENV_SIZE, ENV_SIZE, (float)g_render_time, 0);
+        galaxy_render_impostors(vp, (float)g_render_time, 1.0f);
         /* The galaxy's resolved stars: far from the Sun (e.g. at Sgr A*) they
          * are nearly all the stars there are to lens. */
         /* Gain is no longer the skybox crossfade: the selection function in
@@ -3114,6 +3115,12 @@ dyn_ready:
             glEnable(GL_DEPTH_TEST);
             glDisable(GL_BLEND);
         }
+
+        /* Unresolved galaxies as sprites: full-res, into the scene target, so
+         * the depth test sees the planets in front of them. Sizes were
+         * computed for the galaxy target above. */
+        galaxy_render_impostors(vp_camrel, (float)g_render_time,
+                                (float)WIN_H / (float)gal_h);
     }
 
     /* Procedural resolved stars (§0.1 galaxy → stars): additive sparkle
