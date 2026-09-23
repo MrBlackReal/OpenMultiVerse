@@ -54,6 +54,11 @@ void galaxy_set_params(int enabled, float density, int steps,
 
 /* Enumeration for the Navigate tab / fields. */
 int          galaxy_count(void);
+
+/* Rebuild the procedural galaxies around the camera (no-op unless it has moved
+ * far enough). Call once per frame before rendering; galaxy_count() then
+ * covers catalogue + procedural. */
+void         galaxy_proc_update(const double cam[3]);
 const char  *galaxy_name(int i);
 /* World position of galaxy i in AU (zeroed if out of range). */
 void         galaxy_position(int i, double out[3]);

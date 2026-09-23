@@ -117,7 +117,114 @@ typedef struct {
 static const double GS_CELL_LY[GS_CASCADES] = { 2, 8, 32, 128, 512, 2048 };
 #define GS_ENTER_FRAC 1.35   /* start resolving stars inside this × radius */
 
-static GalaxyInst s_gal[GALAXY_COUNT];
+/* Live galaxy set: the catalogue rows first, then procedurally generated
+ * galaxies rebuilt around the camera. galaxy_count() reports the whole set, so
+ * every consumer -- crucially galaxy_render_stars(), which already takes its
+ * position/radius/axis/seed/type per galaxy as uniforms -- picks up procedural
+ * galaxies with no further work. */
+static GalaxyInst *s_gal = NULL;
+static int         s_gal_n = 0, s_gal_cap = 0;
+static double      s_gal_built_cam[3] = { 1e300, 0, 0 };
+
+/* ── distant-galaxy impostors ─────────────────────────────────────────────
+ *
+ * A galaxy stops being worth raymarching long before it stops being worth
+ * seeing. A 50 kly disc subtends 0.9 px at 50 Mly and 0.02 px at 2 Gly, so the
+ * volumetric pass correctly skips almost every procedural galaxy -- which left
+ * the deep sky empty even though thousands were being generated.
+ *
+ * Below the volumetric threshold a galaxy becomes a point sprite instead,
+ * reusing star_dot.vert + cluster.frag: exactly the soft additive glow that
+ * already stands in for unresolved star clumps. Flux goes as the solid angle
+ * (surface brightness is roughly scale-free across galaxies), so apparent
+ * brightness ~ angular_radius^2 -- which falls off as 1/d^2 for free. */
+static GLuint s_imp_shader = 0, s_imp_vao = 0, s_imp_vbo = 0;
+static GLint  s_imp_vp = -1, s_imp_time = -1, s_imp_twinkle = -1;
+static float *s_imp_buf = NULL;
+static int    s_imp_n = 0, s_imp_cap = 0;
+static void galaxy_render_impostors(const float vp_camrel[16], float time_s);
+
+/* ── procedural galaxy lattice ────────────────────────────────────────────
+ *
+ * Beyond the catalogue the universe was empty: eleven hand-listed rows and
+ * then nothing, so flying past M87 left you in a void. Galaxies are now
+ * generated on a cubic lattice around the camera, the same construction the
+ * star cascade uses one scale down.
+ *
+ * The lattice is deliberately NOT the cosmic_field cell hash: that packs 21
+ * bits per axis at 1 ly per cell, so it tops out at +-1 Mly -- Andromeda at
+ * 2.54 Mly is already outside it. At GAL_CELL_MLY per cell the same bit
+ * budget reaches far past the observable universe. */
+/* A CASCADE of lattices, not one. Within 160 Mly there are ~10^4 galaxies;
+ * within 5 Gly there are ~3x10^8. Enumerating the far ones is impossible and
+ * pointless -- but generating none of them is why the deep sky read as empty,
+ * because that is where almost every galaxy you can see actually is.
+ *
+ * Each level covers a shell the next-finer level does not, with cells ~5x
+ * larger, and emits only the LARGEST galaxies of that volume (its cell holds
+ * far more than the few candidates it can produce). Same construction
+ * galaxy_stars.vert uses for stars one scale down. */
+#define GAL_CASCADES    5
+#define GAL_SPAN_CELLS  11       /* cells each way per level                 */
+#define GAL_PER_CELL    2        /* candidates per cell                      */
+#define GAL_PROC_MAX    8192     /* total kept, largest angular size         */
+static const double GAL_CELL_MLY[GAL_CASCADES] = { 12.0, 55.0, 260.0, 1200.0, 5500.0 };
+#define GAL_REBUILD_MLY 4.0      /* camera travel that forces a rebuild      */
+#define GAL_IMPOSTOR_PX  1.5f    /* below this projected radius, draw a point */
+/* Brightness: the SAME magnitude law the stars use, not a separate invented
+ * one. A galaxy gets an absolute magnitude from its size, an apparent
+ * magnitude from its distance, and then star_field.vert's size curve and the
+ * two-tier alpha. Visibility then falls out of the physics at every vantage --
+ * a 2 Gly galaxy is correctly invisible from Earth AND correctly bright when
+ * you are beside it -- with no distance-dependent exposure hack.
+ *
+ * M = GAL_M_REF - 5*log10(r / GAL_R_REF): luminosity goes as r^2, and a
+ * 50 kly disc is about M_V -20.9 (the Milky Way). */
+#define GAL_M_REF   (-20.9f)
+#define GAL_R_REF   (5.0e4f)     /* light-years */
+#define GAL_IMPOSTOR_MINA 0.01f     /* identical floor to galaxy_stars.vert */
+#define GAL_IMPOSTOR_MINPX 4.0f     /* extended source: never a bare point   */
+
+static double gh_hash(long x, long y, long z, int k)
+{
+    uint64_t h = (uint64_t)(x * 73856093L) ^ (uint64_t)(y * 19349663L)
+               ^ (uint64_t)(z * 83492791L) ^ (uint64_t)(k * 2654435761u);
+    h ^= h >> 33; h *= 0xff51afd7ed558ccdULL;
+    h ^= h >> 33; h *= 0xc4ceb9fe1a85ec53ULL;
+    h ^= h >> 33;
+    return (double)(h >> 11) / 9007199254740992.0;      /* [0,1) */
+}
+
+/* Smooth value noise over the lattice, for large-scale structure. Real
+ * galaxies sit in filaments and walls around voids rather than uniformly, and
+ * a uniform scatter reads as obviously synthetic when you fly through it. */
+static double gh_vnoise(double x, double y, double z)
+{
+    long ix = (long)floor(x), iy = (long)floor(y), iz = (long)floor(z);
+    double fx = x - ix, fy = y - iy, fz = z - iz;
+    fx = fx*fx*(3.0-2.0*fx); fy = fy*fy*(3.0-2.0*fy); fz = fz*fz*(3.0-2.0*fz);
+    double c[8];
+    for (int b = 0; b < 8; b++)
+        c[b] = gh_hash(ix + (b&1), iy + ((b>>1)&1), iz + ((b>>2)&1), 7);
+    double x00 = c[0] + (c[1]-c[0])*fx, x10 = c[2] + (c[3]-c[2])*fx;
+    double x01 = c[4] + (c[5]-c[4])*fx, x11 = c[6] + (c[7]-c[6])*fx;
+    double y0 = x00 + (x10-x00)*fy, y1 = x01 + (x11-x01)*fy;
+    return y0 + (y1-y0)*fz;
+}
+
+/* Cosmic-web occupancy at a lattice point, 0 in voids .. 1 in filaments. */
+static double gh_structure(double cx, double cy, double cz)
+{
+    double n = gh_vnoise(cx * 0.16, cy * 0.16, cz * 0.16) * 0.6
+             + gh_vnoise(cx * 0.41, cy * 0.41, cz * 0.41) * 0.3
+             + gh_vnoise(cx * 0.93, cy * 0.93, cz * 0.93) * 0.1;
+    /* Sharpen into walls/filaments with wide voids between. */
+    double t = (n - 0.42) / 0.30;
+    if (t < 0.0) t = 0.0;
+    if (t > 1.0) t = 1.0;
+    return t * t * (3.0 - 2.0 * t);
+}
+
 static GLuint s_shader = 0, s_vao = 0, s_vbo = 0, s_ebo = 0;
 static GLuint s_star_shader = 0, s_star_vao = 0;
 static GLint  s_su_vp, s_su_cell_base, s_su_origin_rel, s_su_cell_size;
@@ -214,8 +321,34 @@ void galaxy_init(void)
     s_u_scene_depth     = glGetUniformLocation(s_shader, "u_scene_depth");
     s_u_use_scene_depth = glGetUniformLocation(s_shader, "u_use_scene_depth");
 
+    s_imp_shader = gl_shader_load("assets/shaders/star_dot.vert",
+                                  "assets/shaders/cluster.frag");
+    if (s_imp_shader) {
+        s_imp_vp      = glGetUniformLocation(s_imp_shader, "u_vp");
+        s_imp_time    = glGetUniformLocation(s_imp_shader, "u_time");
+        s_imp_twinkle = glGetUniformLocation(s_imp_shader, "u_twinkle");
+        s_imp_cap = GAL_PROC_MAX;
+        s_imp_buf = (float *)malloc((size_t)s_imp_cap * 8 * sizeof(float));
+        s_imp_vao = gl_vao_create();
+        s_imp_vbo = gl_vbo_create((GLsizeiptr)s_imp_cap * 8 * sizeof(float),
+                                  NULL, GL_DYNAMIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8*sizeof(float), (void*)0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 8*sizeof(float),
+                              (void*)(3*sizeof(float)));
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, 8*sizeof(float),
+                              (void*)(7*sizeof(float)));
+        glBindVertexArray(0);
+    }
+
     const double arcmin = (PI / 180.0) / 60.0;
-    for (int i = 0; i < GALAXY_COUNT; i++) {
+    s_gal_cap = GALAXY_COUNT + GAL_PROC_MAX;
+    s_gal = (GalaxyInst *)calloc((size_t)s_gal_cap, sizeof(GalaxyInst));
+    if (!s_gal) { fprintf(stderr, "[Galaxy] alloc failed\n"); return; }
+    s_gal_n = GALAXY_COUNT;
+    for (int i = 0; i < GALAXY_COUNT; i++) {   /* catalogue rows only */
         double dir[3];
         equatorial_to_gl(GALAXIES[i].ra_deg, GALAXIES[i].dec_deg, dir);
         double dist_au = GALAXIES[i].dist_ly * AU_PER_LY;
@@ -364,7 +497,8 @@ void galaxy_render(const float vp_camrel[16],
     glBindVertexArray(s_vao);
 
     float half_h = (float)screen_h * 0.5f;
-    for (int i = 0; i < GALAXY_COUNT; i++) {
+    s_imp_n = 0;
+    for (int i = 0; i < s_gal_n; i++) {
         double rx = s_gal[i].pos[0] - cam_pos[0];
         double ry = s_gal[i].pos[1] - cam_pos[1];
         double rz = s_gal[i].pos[2] - cam_pos[2];
@@ -387,7 +521,38 @@ void galaxy_render(const float vp_camrel[16],
                         + center[2]*cam_fwd[2];
             if (eye_z <= 0.0f) continue;                 /* behind camera */
             float proj_px = radf / eye_z / fov_tan * half_h;
-            if (proj_px < 0.7f) continue;                /* sub-pixel: skip */
+            if (proj_px < GAL_IMPOSTOR_PX) {
+                /* Too small to raymarch: emit a point sprite instead of
+                 * dropping it, or the deep sky reads as empty. */
+                if (s_imp_buf && s_imp_n < s_imp_cap) {
+                    float r_ly  = (float)(s_gal[i].radius / AU_PER_LY);
+                    float absmag = GAL_M_REF - 5.0f * log10f(r_ly / GAL_R_REF);
+                    float d_pc   = (float)(dist / (AU_PER_LY * 3.261563));
+                    if (d_pc < 1e-6f) d_pc = 1e-6f;
+                    float m = absmag + 5.0f * log10f(d_pc) - 5.0f;
+                    /* star_field.vert's curves, verbatim. */
+                    float a = powf(10.0f, -0.4f * (m - 9.0f));
+                    if (a > 1.0f) a = 1.0f;
+                    if (a > GAL_IMPOSTOR_MINA) {
+                        /* A galaxy is an EXTENDED source, not a point. Giving
+                         * it the stars' 1.4 px floor is what made the deep
+                         * field read as a thin starfield: the objects were
+                         * there and correctly bright, they just looked like
+                         * stars. A resolved fuzzy patch is both truer and what
+                         * makes the sky legible as galaxies. */
+                        float sz = 7.0f - 0.45f * (m + 1.0f);
+                        if (sz < GAL_IMPOSTOR_MINPX) sz = GAL_IMPOSTOR_MINPX;
+                        if (proj_px * 2.4f > sz) sz = proj_px * 2.4f;
+                        if (sz > 40.0f) sz = 40.0f;
+                        float *o = &s_imp_buf[s_imp_n * 8];
+                        o[0]=center[0]; o[1]=center[1]; o[2]=center[2];
+                        o[3]=s_gal[i].col[0]; o[4]=s_gal[i].col[1];
+                        o[5]=s_gal[i].col[2]; o[6]=a; o[7]=sz;
+                        s_imp_n++;
+                    }
+                }
+                continue;
+            }
             float f = proj_px / (half_h * 0.5f);
             if (f > 1.0f) f = 1.0f;
             steps = (int)(base_steps * f);
@@ -421,6 +586,10 @@ void galaxy_render(const float vp_camrel[16],
     glBindVertexArray(0);
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
+
+    { static int f=0; if(f++==3) fprintf(stderr,"[GN] impostors=%d set=%d\n", s_imp_n, s_gal_n); }
+    /* Everything the loop above was too small to march. */
+    galaxy_render_impostors(vp_camrel, time_s);
 }
 
 void galaxy_render_stars(const float vp_camrel[16], const double cam_pos[3],
@@ -452,7 +621,7 @@ void galaxy_render_stars(const float vp_camrel[16], const double cam_pos[3],
 
     const int n_points = GS_GRID_DIM * GS_GRID_DIM * GS_GRID_DIM * GS_PER_CELL;
 
-    for (int i = 0; i < GALAXY_COUNT; i++) {
+    for (int i = 0; i < s_gal_n; i++) {
         /* Camera in this galaxy's frame (double: centres are up to 3e12 AU
          * out; all camera-relative floats below stay small). */
         double gx = cam_pos[0] - s_gal[i].pos[0];
@@ -522,6 +691,35 @@ void galaxy_render_stars(const float vp_camrel[16], const double cam_pos[3],
     glDisable(GL_PROGRAM_POINT_SIZE);
 }
 
+/* Draw the galaxies the volumetric pass was too small to march, as additive
+ * point sprites. Called at the end of galaxy_render(), after s_imp_buf has
+ * been filled by that pass. */
+static void galaxy_render_impostors(const float vp_camrel[16], float time_s)
+{
+    if (!s_imp_shader || !s_imp_vao || s_imp_n <= 0) return;
+
+    glBindVertexArray(s_imp_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, s_imp_vbo);
+    glBufferSubData(GL_ARRAY_BUFFER, 0,
+                    (GLsizeiptr)s_imp_n * 8 * sizeof(float), s_imp_buf);
+
+    glUseProgram(s_imp_shader);
+    glUniformMatrix4fv(s_imp_vp, 1, GL_FALSE, vp_camrel);
+    glUniform1f(s_imp_time, time_s);
+    glUniform1f(s_imp_twinkle, 0.0f);      /* galaxies do not scintillate */
+
+    glEnable(GL_PROGRAM_POINT_SIZE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE);           /* additive, like the glow it replaces */
+    glDepthMask(GL_FALSE);
+    glEnable(GL_DEPTH_TEST);
+    glDrawArrays(GL_POINTS, 0, s_imp_n);
+    glBindVertexArray(0);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+    glDisable(GL_PROGRAM_POINT_SIZE);
+}
+
 void galaxy_shutdown(void)
 {
     glDeleteBuffers(1, &s_vbo);
@@ -555,7 +753,136 @@ void galaxy_set_params(int enabled, float density, int steps,
     s_stars_enabled = stars_enabled ? 1 : 0;
 }
 
-int         galaxy_count(void)       { return GALAXY_COUNT; }
+/* Regenerate the procedural galaxies around `cam`. Cheap and idempotent: it
+ * returns immediately unless the camera has moved GAL_REBUILD_MLY since the
+ * last build, so this can be called every frame.
+ *
+ * Candidates are scored by ANGULAR size and only the largest GAL_PROC_MAX are
+ * kept. That is the LOD: each galaxy is a raymarched volume, so instantiating
+ * every one within the search radius would be thousands of them. Keeping the
+ * biggest on screen is both the cheapest and the most faithful cut -- the ones
+ * dropped are the ones you could not resolve anyway. A proper cascade (coarser
+ * lattices contributing only their brightest members, as galaxy_stars.vert
+ * already does for stars) is the next step and is what lets the search radius
+ * grow without the count growing with it. */
+void galaxy_proc_update(const double cam[3])
+{
+    if (!s_gal || s_gal_cap <= GALAXY_COUNT) return;
+    double mv = 0.0;
+    for (int k = 0; k < 3; k++) {
+        double d = cam[k] - s_gal_built_cam[k];
+        mv += d * d;
+    }
+    const double reb_au = GAL_REBUILD_MLY * 1e6 * AU_PER_LY;
+    if (mv < reb_au * reb_au) return;
+    for (int k = 0; k < 3; k++) s_gal_built_cam[k] = cam[k];
+
+    /* Insertion sort into a fixed top-N by angular radius. */
+    /* static: GAL_PROC_MAX entries is large, too much for the stack */
+    static struct { double ang, pos[3], radius; int type; float seed, z; } best[GAL_PROC_MAX];
+    int nb = 0;
+
+    /* Budget PER LEVEL, not globally. A single top-N by angular size is always
+     * won by the nearest shell -- coarse levels produce genuinely smaller
+     * angular sizes, so they lose every comparison and the deep sky stays
+     * empty however many are generated. Each shell keeps its own share. */
+    const int lvl_budget = GAL_PROC_MAX / GAL_CASCADES;
+
+    double inner_au = 0.0;
+    for (int lv = 0; lv < GAL_CASCADES; lv++) {
+        const int lv_base = nb;
+        const int lv_cap  = lv_base + lvl_budget;
+        const double cell_au  = GAL_CELL_MLY[lv] * 1e6 * AU_PER_LY;
+        const double outer_au = cell_au * GAL_SPAN_CELLS;
+        const int    span     = GAL_SPAN_CELLS;
+        long bx = (long)floor(cam[0] / cell_au);
+        long by = (long)floor(cam[1] / cell_au);
+        long bz = (long)floor(cam[2] / cell_au);
+
+        /* Coarse levels stand in for volumes holding orders of magnitude more
+         * galaxies than they can emit, so they draw only from the big end of
+         * the size distribution -- the ones that would actually be visible. */
+        double t_lo = (double)lv / (double)GAL_CASCADES;
+
+        for (long dz = -span; dz <= span; dz++)
+        for (long dy = -span; dy <= span; dy++)
+        for (long dx = -span; dx <= span; dx++) {
+            long cx = bx + dx, cy = by + dy, cz = bz + dz;
+            double occ = gh_structure((double)cx * (GAL_CELL_MLY[lv] / 12.0),
+                                      (double)cy * (GAL_CELL_MLY[lv] / 12.0),
+                                      (double)cz * (GAL_CELL_MLY[lv] / 12.0));
+            if (occ <= 0.001) continue;                  /* void */
+            for (int k = 0; k < GAL_PER_CELL; k++) {
+                int kk = k * 31 + lv * 7919;
+                if (gh_hash(cx, cy, cz, kk + 1) > occ) continue;
+                double px = ((double)cx + gh_hash(cx, cy, cz, kk+2)) * cell_au;
+                double py = ((double)cy + gh_hash(cx, cy, cz, kk+3)) * cell_au;
+                double pz = ((double)cz + gh_hash(cx, cy, cz, kk+4)) * cell_au;
+                double rx = px - cam[0], ry = py - cam[1], rz = pz - cam[2];
+                double d2 = rx*rx + ry*ry + rz*rz;
+                double dist = sqrt(d2);
+                if (dist < inner_au || dist > outer_au) continue;  /* this shell only */
+                if (dist < 1.0) dist = 1.0;
+
+                double t = t_lo + (1.0 - t_lo) * gh_hash(cx, cy, cz, kk+5);
+                double r_ly = 3.0e3 * pow(8.0e4 / 3.0e3, t);
+                double r_au = r_ly * AU_PER_LY;
+                double ang  = r_au / dist;               /* angular radius, rad */
+
+                if (nb == lv_cap && ang <= best[nb-1].ang) continue;
+                int at = (nb < lv_cap) ? nb : lv_cap - 1;
+                while (at > lv_base && best[at-1].ang < ang) { best[at] = best[at-1]; at--; }
+                best[at].ang = ang;
+                best[at].pos[0]=px; best[at].pos[1]=py; best[at].pos[2]=pz;
+                best[at].radius = r_au;
+                double ht = gh_hash(cx, cy, cz, kk+6);
+                best[at].type = ht < 0.60 ? GAL_SPIRAL
+                              : (ht < 0.85 ? GAL_ELLIPTICAL : GAL_IRREGULAR);
+                best[at].seed = (float)(gh_hash(cx, cy, cz, kk+7) * 977.0);
+                /* Cosmological redshift: z ~ d / (c/H0), Hubble distance
+                 * ~14.4 Gly. This is what makes the deep field warm -- distant
+                 * galaxies really are redder, and it is the colour gradient a
+                 * flat tint cannot produce. */
+                best[at].z = (float)(dist / (AU_PER_LY * 14.4e9));
+                if (nb < lv_cap) nb++;
+            }
+        }
+        inner_au = outer_au;
+    }
+
+    s_gal_n = GALAXY_COUNT;
+    for (int i = 0; i < nb; i++) {
+        GalaxyInst *g = &s_gal[s_gal_n++];
+        for (int k = 0; k < 3; k++) g->pos[k] = best[i].pos[k];
+        g->radius = best[i].radius;
+        g->type   = best[i].type;
+        g->seed   = best[i].seed;
+        g->brightness = 1.0f;
+        /* Population tint by morphology: ellipticals old and red, spirals
+         * mixed, irregulars blue with young star formation. */
+        if (best[i].type == GAL_ELLIPTICAL) {
+            g->col[0]=1.00f; g->col[1]=0.80f; g->col[2]=0.60f;   /* old, red   */
+        } else if (best[i].type == GAL_IRREGULAR) {
+            g->col[0]=0.70f; g->col[1]=0.82f; g->col[2]=1.00f;   /* young, blue*/
+        } else {
+            g->col[0]=0.92f; g->col[1]=0.90f; g->col[2]=0.88f;   /* mixed      */
+        }
+        /* Redden with redshift: boost red, suppress blue. */
+        float zz = best[i].z; if (zz > 2.0f) zz = 2.0f;
+        float warm = zz / (1.0f + zz);
+        g->col[0] = g->col[0] * (1.0f - warm) + 1.00f * warm;
+        g->col[1] = g->col[1] * (1.0f - warm) + 0.62f * warm;
+        g->col[2] = g->col[2] * (1.0f - warm) + 0.34f * warm;
+        /* Orientation: a unit axis from the same seed, so it is stable. */
+        double u = best[i].seed * 0.01731, v = best[i].seed * 0.00977;
+        double sz = cos(u), sr = sqrt(1.0 - sz*sz);
+        g->axis[0] = (float)(sr * cos(v * 6.2831853));
+        g->axis[1] = (float)(sr * sin(v * 6.2831853));
+        g->axis[2] = (float)sz;
+    }
+}
+
+int         galaxy_count(void)       { return s_gal_n; }
 const char *galaxy_name(int i)
 {
     return (i >= 0 && i < GALAXY_COUNT) ? GALAXIES[i].name : "";
@@ -563,7 +890,7 @@ const char *galaxy_name(int i)
 
 void galaxy_position(int i, double out[3])
 {
-    if (i < 0 || i >= GALAXY_COUNT) { out[0] = out[1] = out[2] = 0.0; return; }
+    if (i < 0 || i >= s_gal_n) { out[0] = out[1] = out[2] = 0.0; return; }
     out[0] = s_gal[i].pos[0];
     out[1] = s_gal[i].pos[1];
     out[2] = s_gal[i].pos[2];
@@ -571,12 +898,12 @@ void galaxy_position(int i, double out[3])
 
 double galaxy_radius_au(int i)
 {
-    return (i >= 0 && i < GALAXY_COUNT) ? s_gal[i].radius : 0.0;
+    return (i >= 0 && i < s_gal_n) ? s_gal[i].radius : 0.0;
 }
 
 void galaxy_color(int i, float out[3])
 {
-    if (i < 0 || i >= GALAXY_COUNT) { out[0] = out[1] = out[2] = 1.0f; return; }
+    if (i < 0 || i >= s_gal_n) { out[0] = out[1] = out[2] = 1.0f; return; }
     out[0] = s_gal[i].col[0];
     out[1] = s_gal[i].col[1];
     out[2] = s_gal[i].col[2];
@@ -584,17 +911,17 @@ void galaxy_color(int i, float out[3])
 
 int galaxy_type(int i)
 {
-    return (i >= 0 && i < GALAXY_COUNT) ? s_gal[i].type : 0;
+    return (i >= 0 && i < s_gal_n) ? s_gal[i].type : 0;
 }
 
 float galaxy_seed(int i)
 {
-    return (i >= 0 && i < GALAXY_COUNT) ? s_gal[i].seed : 0.0f;
+    return (i >= 0 && i < s_gal_n) ? s_gal[i].seed : 0.0f;
 }
 
 void galaxy_axis(int i, float out[3])
 {
-    if (i < 0 || i >= GALAXY_COUNT) { out[0] = 0; out[1] = 1; out[2] = 0; return; }
+    if (i < 0 || i >= s_gal_n) { out[0] = 0; out[1] = 1; out[2] = 0; return; }
     out[0] = s_gal[i].axis[0];
     out[1] = s_gal[i].axis[1];
     out[2] = s_gal[i].axis[2];
@@ -618,7 +945,7 @@ void galaxy_spawn_agn(void)
 {
     if (!g_settings.galaxy_agn) return;
 
-    for (int i = 0; i < GALAXY_COUNT; i++) {
+    for (int i = 0; i < s_gal_n; i++) {
         double mass_kg; float activity, torus;
         if (!galaxy_agn(i, &mass_kg, &activity, &torus)) continue;
 
@@ -652,9 +979,9 @@ void galaxy_spawn_agn(void)
 
         Body *b = &g_bodies[idx];
         b->is_black_hole  = 1;
-        b->agn_activity   = activity;
-        b->accretion_disk = 1.0f;       /* even quiescent holes get a faint disk */
-        b->dust_torus     = torus;
+        body_bh_mut(b)->agn_activity   = activity;
+        body_bh_mut(b)->accretion_disk = 1.0f;       /* even quiescent holes get a faint disk */
+        body_bh_mut(b)->dust_torus     = torus;
         b->radius         = laws_schwarzschild_radius(b->mass);
         accretion_init_body(b);         /* seed spin_a + gas reservoir */
 
@@ -665,12 +992,12 @@ void galaxy_spawn_agn(void)
          * BH mass; a scale of 1 (quiescent hosts) leaves the jet physical. */
         if (activity > 0.0f) {
             double rs_au    = b->radius / AU;               /* Rs in AU           */
-            double spin     = fabs(b->spin_a);
+            double spin     = fabs(body_bh(b)->spin_a);
             double base_len = rs_au * (12.0 + 46.0 * spin); /* physical jet (AU)  */
             double target   = 1.0 * galaxy_radius_au(i);    /* per-lobe reach     */
             if (base_len > 0.0)
-                b->agn_visual_scale = (float)(target / base_len);
-            galaxy_axis(i, b->agn_axis);                    /* disc axis = jet axis */
+                body_bh_mut(b)->agn_visual_scale = (float)(target / base_len);
+            galaxy_axis(i, body_bh_mut(b)->agn_axis);                /* disc axis = jet axis */
         }
     }
 }

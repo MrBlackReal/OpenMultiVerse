@@ -188,16 +188,8 @@ static void trail_free_body(int i)
 {
     if (i < 0 || i >= g_nbodies) return;
     Body *b = &g_bodies[i];
-    free(b->trail);          b->trail = NULL;
-    free(b->trail_seg_len);  b->trail_seg_len = NULL;
-    b->trail_head = 0;
-    b->trail_count = 0;
-    b->trail_accum = 0.0;
-    b->trail_total_len = 0.0;
-    b->trail_frame_head = 0;
-    b->trail_frame_count = 0;
-    b->trail_frame_accum = 0.0;
-    b->trail_frame_total_len = 0.0;
+    free(b->trail);
+    b->trail = NULL;
     if (i < s_n) {
         if (s_vbo[i]) { glDeleteBuffers(1, &s_vbo[i]);      s_vbo[i] = 0; }
         if (s_vao[i]) { glDeleteVertexArrays(1, &s_vao[i]); s_vao[i] = 0; }
@@ -216,28 +208,10 @@ static void trail_acquire(int i)
     if (i >= s_n && !trails_grow(i + 1)) return;
 
     if (!b->trail) {
-        b->trail = (double(*)[3])calloc(TRAIL_LEN, 3 * sizeof(double));
-        b->trail_seg_len = (double*)calloc(TRAIL_LEN, sizeof(double));
-        if (!b->trail || !b->trail_seg_len) {   /* out of memory: stay trail-less */
-            free(b->trail);          b->trail = NULL;
-            free(b->trail_seg_len);  b->trail_seg_len = NULL;
-            return;
-        }
         /* Seed the Hermite tangent from where the body is NOW, not from its
          * load-time state — arbitrarily much sim time may have passed. */
-        b->trail_head = 0;  b->trail_count = 0;
-        b->trail_accum = 0.0;  b->trail_total_len = 0.0;
-        b->trail_fade = 1.0;
-        for (int k = 0; k < 3; k++) {
-            b->trail_prev_pos[k] = b->pos[k];
-            b->trail_prev_vel[k] = b->vel[k];
-            b->trail_frame_pos[k] = b->pos[k];
-            b->trail_frame_vel[k] = b->vel[k];
-            b->trail_frame_prev_pos[k] = b->pos[k];
-            b->trail_frame_prev_vel[k] = b->vel[k];
-        }
-        b->trail_frame_head = 0;  b->trail_frame_count = 0;
-        b->trail_frame_accum = 0.0;  b->trail_frame_total_len = 0.0;
+        b->trail = trail_new(b->pos, b->vel);
+        if (!b->trail) return;                   /* out of memory: stay trail-less */
         s_last_head[i] = 0;  s_last_count[i] = 0;  s_emitted[i] = 0;
         trail_gl_alloc(i);
     }
@@ -292,12 +266,12 @@ void trails_remove_body(int body_idx)
     if (body_idx < 0 || body_idx >= s_n) return;
     s_last_head[body_idx] = 0;
     s_last_count[body_idx] = 0;
-    if (body_idx < g_nbodies) {
-        g_bodies[body_idx].trail_head = 0;
-        g_bodies[body_idx].trail_count = 0;
-        g_bodies[body_idx].trail_accum = 0.0;
-        g_bodies[body_idx].trail_total_len = 0.0;
-        g_bodies[body_idx].trail_emitting = 0;
+    if (body_idx < g_nbodies && g_bodies[body_idx].trail) {
+        g_bodies[body_idx].trail->head = 0;
+        g_bodies[body_idx].trail->count = 0;
+        g_bodies[body_idx].trail->accum = 0.0;
+        g_bodies[body_idx].trail->total_len = 0.0;
+        g_bodies[body_idx].trail->emitting = 0;
     }
 }
 
@@ -314,40 +288,38 @@ void trails_reset_body(int body_idx)
     y = b->pos[1] * RS;
     z = b->pos[2] * RS;
     for (int i = 0; i < TRAIL_LEN; i++) {
-        b->trail[i][0] = x;
-        b->trail[i][1] = y;
-        b->trail[i][2] = z;
+        b->trail->pts[i][0] = x;
+        b->trail->pts[i][1] = y;
+        b->trail->pts[i][2] = z;
     }
-    b->trail_head = 2 % TRAIL_LEN;
-    b->trail_count = 2;
-    b->trail_accum = 0.0;
-    if (b->trail_seg_len) {
-        for (int i = 0; i < TRAIL_LEN; i++) b->trail_seg_len[i] = 0.0;
-    }
-    b->trail_total_len = 0.0;
-    b->trail_emitting = 1;
-    b->trail_prev_pos[0] = b->pos[0];
-    b->trail_prev_pos[1] = b->pos[1];
-    b->trail_prev_pos[2] = b->pos[2];
-    b->trail_prev_vel[0] = b->vel[0];
-    b->trail_prev_vel[1] = b->vel[1];
-    b->trail_prev_vel[2] = b->vel[2];
-    b->trail_frame_accum = 0.0;
-    b->trail_frame_head = b->trail_head;
-    b->trail_frame_count = b->trail_count;
-    b->trail_frame_total_len = b->trail_total_len;
-    b->trail_frame_pos[0] = b->pos[0];
-    b->trail_frame_pos[1] = b->pos[1];
-    b->trail_frame_pos[2] = b->pos[2];
-    b->trail_frame_vel[0] = b->vel[0];
-    b->trail_frame_vel[1] = b->vel[1];
-    b->trail_frame_vel[2] = b->vel[2];
-    b->trail_frame_prev_pos[0] = b->trail_prev_pos[0];
-    b->trail_frame_prev_pos[1] = b->trail_prev_pos[1];
-    b->trail_frame_prev_pos[2] = b->trail_prev_pos[2];
-    b->trail_frame_prev_vel[0] = b->trail_prev_vel[0];
-    b->trail_frame_prev_vel[1] = b->trail_prev_vel[1];
-    b->trail_frame_prev_vel[2] = b->trail_prev_vel[2];
+    b->trail->head = 2 % TRAIL_LEN;
+    b->trail->count = 2;
+    b->trail->accum = 0.0;
+    memset(b->trail->seg_len, 0, sizeof b->trail->seg_len);
+    b->trail->total_len = 0.0;
+    b->trail->emitting = 1;
+    b->trail->prev_pos[0] = b->pos[0];
+    b->trail->prev_pos[1] = b->pos[1];
+    b->trail->prev_pos[2] = b->pos[2];
+    b->trail->prev_vel[0] = b->vel[0];
+    b->trail->prev_vel[1] = b->vel[1];
+    b->trail->prev_vel[2] = b->vel[2];
+    b->trail->frame_accum = 0.0;
+    b->trail->frame_head = b->trail->head;
+    b->trail->frame_count = b->trail->count;
+    b->trail->frame_total_len = b->trail->total_len;
+    b->trail->frame_pos[0] = b->pos[0];
+    b->trail->frame_pos[1] = b->pos[1];
+    b->trail->frame_pos[2] = b->pos[2];
+    b->trail->frame_vel[0] = b->vel[0];
+    b->trail->frame_vel[1] = b->vel[1];
+    b->trail->frame_vel[2] = b->vel[2];
+    b->trail->frame_prev_pos[0] = b->trail->prev_pos[0];
+    b->trail->frame_prev_pos[1] = b->trail->prev_pos[1];
+    b->trail->frame_prev_pos[2] = b->trail->prev_pos[2];
+    b->trail->frame_prev_vel[0] = b->trail->prev_vel[0];
+    b->trail->frame_prev_vel[1] = b->trail->prev_vel[1];
+    b->trail->frame_prev_vel[2] = b->trail->prev_vel[2];
 
     if (body_idx < s_n) {
         s_last_head[body_idx] = -1;
@@ -404,8 +376,8 @@ void trails_render(const float vp[16])
             continue;
         }
         Body *b = &g_bodies[i];
-        if (b->is_star || b->trail_count < 2 || !b->trail) continue;
-        if (!b->alive && b->trail_fade <= 0.0) continue;
+        if (b->is_star || !b->trail || b->trail->count < 2) continue;
+        if (!b->alive && b->trail->fade <= 0.0) continue;
 
         /* Screen-space cull. Every surviving body below costs a VAO bind, a VBO
          * bind, at least one glBufferSubData and a draw call — thousands of tiny
@@ -423,7 +395,7 @@ void trails_render(const float vp[16])
             double dz = b->pos[2] * RS - g_cam.pos[2];
             double dist_au = sqrt(dx*dx + dy*dy + dz*dz);
             if (dist_au > 1e-9) {
-                double extent_au = b->trail_total_len * RS;
+                double extent_au = b->trail->total_len * RS;
                 /* pixels ~= (extent / dist) / fov_rad * screen_height */
                 px = (extent_au / dist_au) / (FOV * PI / 180.0) * (double)WIN_H;
                 if (px < TRAIL_MIN_PIXELS) { s_culled++; continue; }
@@ -431,8 +403,8 @@ void trails_render(const float vp[16])
         }
         s_drawn++;
 
-        const int head  = b->trail_head;
-        const int count = b->trail_count;
+        const int head  = b->trail->head;
+        const int count = b->trail->count;
 
         /* Screen-space decimation. A trail holds up to TRAIL_LEN (16384)
          * samples, and appending one sample renormalises every vertex's alpha
@@ -473,15 +445,15 @@ void trails_render(const float vp[16])
 
             /* Linearise circular buffer: oldest → newest, ref-relative.
              * Alpha follows cumulative world length, not vertex index. */
-            double total_len = b->trail_total_len;
+            double total_len = b->trail->total_len;
             double cumulative_len = 0.0;
             int oldest_idx = (head - count + TRAIL_LEN) & TRAIL_MASK;
             int e = 0;                                 /* emitted vertex count */
             for (int k = 0; k < count; k++) {
                 int idx = (head - count + k + TRAIL_LEN) & TRAIL_MASK;
                 float alpha_t;
-                if (idx != oldest_idx && b->trail_seg_len) {
-                    cumulative_len += b->trail_seg_len[idx];
+                if (idx != oldest_idx) {
+                    cumulative_len += b->trail->seg_len[idx];
                     if (cumulative_len > total_len) cumulative_len = total_len;
                 }
                 /* Always keep the first and last sample; thin the middle. */
@@ -489,9 +461,9 @@ void trails_render(const float vp[16])
                     continue;
                 if (total_len > 0.0) alpha_t = (float)(cumulative_len / total_len);
                 else alpha_t = (k == count - 1) ? 1.0f : 0.0f;
-                s_scratch[e*4+0] = (float)(b->trail[idx][0] - s_ref_pos[i][0]);
-                s_scratch[e*4+1] = (float)(b->trail[idx][1] - s_ref_pos[i][1]);
-                s_scratch[e*4+2] = (float)(b->trail[idx][2] - s_ref_pos[i][2]);
+                s_scratch[e*4+0] = (float)(b->trail->pts[idx][0] - s_ref_pos[i][0]);
+                s_scratch[e*4+1] = (float)(b->trail->pts[idx][1] - s_ref_pos[i][1]);
+                s_scratch[e*4+2] = (float)(b->trail->pts[idx][2] - s_ref_pos[i][2]);
                 /* alpha_t^1.5 (= alpha_t * sqrt(alpha_t)): power curve that
                  * keeps the tail nearly invisible and snaps bright only near
                  * the current position. Linear fade looks too uniform. */
@@ -518,7 +490,7 @@ void trails_render(const float vp[16])
         glUniform3fv(s_loc_body_offset, 1, off);
 
         int draw_count;
-        if (b->alive && b->trail_emitting) {
+        if (b->alive && b->trail->emitting) {
             /* Append the live planet position as the final vertex so the
              * trail tip follows the planet every frame without a new sample.
              * Stored ref-relative so it matches the VBO coordinate space. */
@@ -535,7 +507,7 @@ void trails_render(const float vp[16])
             draw_count = s_emitted[i];
         }
 
-        float alpha = 0.6f * (float)b->trail_fade * trail_fade;
+        float alpha = 0.6f * (float)b->trail->fade * trail_fade;
         glUniform4f(s_loc_color, b->col[0], b->col[1], b->col[2], alpha);
         glDrawArrays(GL_LINE_STRIP, 0, draw_count);
     }

@@ -1804,7 +1804,7 @@ static void finalize_absorb_body(int target, int impactor, double rel_speed,
     b->alive = 0;
     invalidate_membership();   /* CSR caches root -> members; this changes it */
     b->mass = 0.0;
-    a->trail_emitting = 1;
+    if (a->trail) a->trail->emitting = 1;
     physics_mark_timestep_dirty();   /* impactor removed — rebuild timestep model */
     labels_add_body(target);
     labels_remove_body(impactor);
@@ -1844,10 +1844,11 @@ static void absorb_body_into_star(int star_idx, int body_idx, double rel_speed,
     touch_pos[1] = star->pos[1] + dir[1] * (old_radius + body->radius);
     touch_pos[2] = star->pos[2] + dir[2] * (old_radius + body->radius);
 
-    if (body->trail)
+    if (body->trail) {
         trails_cut_body_at_time(body_idx, collision_dt, frame_dt, touch_pos);
-    body->trail_emitting = 0;
-    body->trail_accum = 0.0;
+        body->trail->emitting = 0;
+        body->trail->accum = 0.0;
+    }
 
     total = star->mass + body->mass;
     if (total > 0.0) {
@@ -1937,7 +1938,7 @@ static void bh_tidal_pass(int hole, double dt)
             h->vel[2] = (h->vel[2] * h->mass + b->vel[2] * shed) / hm_new;
         }
         h->mass          = hm_new;
-        h->gas_reservoir += shed;
+        body_bh_mut(h)->gas_reservoir += shed;
         h->radius         = laws_schwarzschild_radius(h->mass);  /* horizon tracks mass */
         horizon           = h->radius;   /* keep depth/inspiral/devour tests in
                                             step with the growing horizon across
@@ -2013,7 +2014,7 @@ static void bh_tidal_pass(int hole, double dt)
                 h->vel[2] = (h->vel[2] * h->mass + b->vel[2] * b->mass) / hm_fin;
             }
             h->mass          = hm_fin;
-            h->gas_reservoir += b->mass;
+            body_bh_mut(h)->gas_reservoir += b->mass;
             b->mass       = 0.0;
             b->tidal_frac = 0.0f;
             finalize_absorb_body(hole, i, 0.0, 0, old_radius, 1);
@@ -2023,8 +2024,8 @@ static void bh_tidal_pass(int hole, double dt)
     /* A feeding hole lights up: guarantee a visible disk + flare while it eats,
      * even if the stellar clock (accretion.c) is paused. */
     if (fed) {
-        if (h->accretion_disk < 1.0f) h->accretion_disk = 1.0f;
-        if (h->agn_activity  < 1.0f) h->agn_activity  = 1.0f;
+        if (body_bh(h)->accretion_disk < 1.0f) body_bh_mut(h)->accretion_disk = 1.0f;
+        if (body_bh(h)->agn_activity  < 1.0f) body_bh_mut(h)->agn_activity  = 1.0f;
     }
 }
 
@@ -2299,14 +2300,16 @@ static void begin_merge_event(int target, int impactor, double rel_speed,
      * immediately instead of clobbering an active merge record — overwriting one
      * left its impactor stranded as an alive, zero-mass "zombie" body. */
 
-    if (b->trail && b->trail_count > 0) {
+    if (b->trail && b->trail->count > 0) {
         touch_pos[0] = a->pos[0] + dir[0] * (old_radius + b->radius);
         touch_pos[1] = a->pos[1] + dir[1] * (old_radius + b->radius);
         touch_pos[2] = a->pos[2] + dir[2] * (old_radius + b->radius);
         trails_cut_body_at_time(impactor, collision_dt, frame_dt, touch_pos);
     }
-    b->trail_emitting = 0;
-    b->trail_accum = 0.0;
+    if (b->trail) {
+        b->trail->emitting = 0;
+        b->trail->accum = 0.0;
+    }
 
 
     if (total <= 0.0) return;
@@ -2913,11 +2916,11 @@ void collision_step(double dt)
 
     for (int i = 0; i < cnb(); i++) {
         Body *b = &g_bodies[i];
-        if (b->alive || !b->trail || b->trail_count < 1 || b->trail_fade <= 0.0) continue;
-        b->trail_fade -= dt / TRAIL_FADE_DURATION;
-        if (b->trail_fade <= 0.0) {
-            b->trail_fade = 0.0;
-            b->trail_count = 0;
+        if (b->alive || !b->trail || b->trail->count < 1 || b->trail->fade <= 0.0) continue;
+        b->trail->fade -= dt / TRAIL_FADE_DURATION;
+        if (b->trail->fade <= 0.0) {
+            b->trail->fade = 0.0;
+            b->trail->count = 0;
         }
     }
 

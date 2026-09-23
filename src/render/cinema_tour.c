@@ -248,18 +248,18 @@ static void add_body_subject(int i, double score, SubCat cat)
     case CAT_PLANET: k = 1.6;   break;   /* atmosphere + rings   */
     case CAT_BH:
         k = 25.0;                         /* bare hole: disc + shadow */
-        if (b->agn_activity > 0.0f && b->agn_visual_scale > 1.0f)
-            k *= (double)b->agn_visual_scale;   /* jets reach galaxy scale */
+        if (body_bh(b)->agn_activity > 0.0f && body_bh(b)->agn_visual_scale > 1.0f)
+            k *= (double)body_bh(b)->agn_visual_scale;   /* jets reach galaxy scale */
         break;
     default:         k = 1.0;   break;
     }
     s->vis_au = s->radius_au * k;
-    if (b->agn_axis[0] || b->agn_axis[1] || b->agn_axis[2]) {
+    if (body_bh(b)->agn_axis[0] || body_bh(b)->agn_axis[1] || body_bh(b)->agn_axis[2]) {
         /* Jets run along this axis; approaching down it just looks at the
          * beam end-on, so the caller offsets away from it. */
-        s->axis[0] = b->agn_axis[0];
-        s->axis[1] = b->agn_axis[1];
-        s->axis[2] = b->agn_axis[2];
+        s->axis[0] = body_bh(b)->agn_axis[0];
+        s->axis[1] = body_bh(b)->agn_axis[1];
+        s->axis[2] = body_bh(b)->agn_axis[2];
     }
     s->pos[0] = g_bodies[i].pos[0] * RS;
     s->pos[1] = g_bodies[i].pos[1] * RS;
@@ -293,8 +293,8 @@ static double score_body(int i)
 
     double sc = 0.0;
     if (b->is_black_hole) {
-        sc = 100.0 + 120.0 * (double)b->agn_activity;   /* jets are the draw */
-        if (b->accretion_disk > 0.0f) sc += 25.0;
+        sc = 100.0 + 120.0 * (double)body_bh(b)->agn_activity;   /* jets are the draw */
+        if (body_bh(b)->accretion_disk > 0.0f) sc += 25.0;
     } else if (b->is_star) {
         sc = 30.0;
         /* A star with planets is a system you can fly through, not a dot. */

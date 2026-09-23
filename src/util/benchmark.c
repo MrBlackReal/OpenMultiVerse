@@ -192,8 +192,8 @@ static void wp_push_body(int bi, double mult, const char *label,
     /* Off-axis so a disk reads as an ellipse and a jet is not end-on. For an
      * AGN the jet follows agn_axis when authored; tilt away from it. */
     double axis[3] = { 0.0, 1.0, 0.0 };
-    if (b->agn_axis[0] != 0.0f || b->agn_axis[1] != 0.0f || b->agn_axis[2] != 0.0f) {
-        axis[0] = b->agn_axis[0]; axis[1] = b->agn_axis[1]; axis[2] = b->agn_axis[2];
+    if (body_bh(b)->agn_axis[0] != 0.0f || body_bh(b)->agn_axis[1] != 0.0f || body_bh(b)->agn_axis[2] != 0.0f) {
+        axis[0] = body_bh(b)->agn_axis[0]; axis[1] = body_bh(b)->agn_axis[1]; axis[2] = body_bh(b)->agn_axis[2];
     }
     v_norm(axis);
     double up[3] = {0.0, 0.0, 1.0};

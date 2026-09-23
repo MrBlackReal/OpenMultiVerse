@@ -315,8 +315,10 @@ static void apply_velocity_to_subtree(int root_idx, const double dv[3])
 static void disable_body_visuals(int body_idx)
 {
     if (body_idx < 0 || body_idx >= g_nbodies) return;
-    g_bodies[body_idx].trail_emitting = 0;
-    g_bodies[body_idx].trail_accum = 0.0;
+    if (g_bodies[body_idx].trail) {
+        g_bodies[body_idx].trail->emitting = 0;
+        g_bodies[body_idx].trail->accum = 0.0;
+    }
     labels_remove_body(body_idx);
 }
 
@@ -660,7 +662,7 @@ int supernova_detonate(int star_idx)
     /* A freshly collapsed hole is fed by the infalling stellar envelope — give
      * it an accretion disk (the raymarched BH pass draws it). */
     if (remnant_is_bh) {
-        g_bodies[remnant_idx].accretion_disk = 1.0f;
+        body_bh_mut(&g_bodies[remnant_idx])->accretion_disk = 1.0f;
         /* Clean accretion state for the reused slot (quiet: no authored
          * activity → empty reservoir; a real fallback-fed model is future work). */
         accretion_init_body(&g_bodies[remnant_idx]);

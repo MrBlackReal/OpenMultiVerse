@@ -334,11 +334,14 @@ void loading_indeterminate(void) {
 
 void loading_tick(void) {
     if (!s_active || !s_shader) return;
+    
     Uint64 now  = SDL_GetPerformanceCounter();
     Uint64 freq = SDL_GetPerformanceFrequency();
+    
     if (s_last_present &&
         (double)(now - s_last_present) / (double)freq < PRESENT_DT)
         return;                      /* throttle: cheap to call in a tight loop */
+    
     step_anim();
     present();
 }

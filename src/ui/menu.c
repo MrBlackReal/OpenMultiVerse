@@ -527,12 +527,12 @@ static void menu_render_inspect(void)
         igSeparator();
         igText("Accretion (AGN engine)");
         igSpacing();
-        igText("Spin a*          %.4f", b->spin_a);
-        igText("Eddington ratio  %.3g  (L/L_edd)", b->eddington_ratio);
+        igText("Spin a*          %.4f", body_bh(b)->spin_a);
+        igText("Eddington ratio  %.3g  (L/L_edd)", body_bh(b)->eddington_ratio);
         igText("Accretion rate   %.3g Msun/yr",
-               b->mdot * 3.15576e7 / SOLAR_MASS_KG);
-        igText("Gas reservoir    %.3g Msun", b->gas_reservoir / SOLAR_MASS_KG);
-        igTextDisabled(b->gas_reservoir > 0.0
+               body_bh(b)->mdot * 3.15576e7 / SOLAR_MASS_KG);
+        igText("Gas reservoir    %.3g Msun", body_bh(b)->gas_reservoir / SOLAR_MASS_KG);
+        igTextDisabled(body_bh(b)->gas_reservoir > 0.0
                        ? "Fuelled — activity drives the disk/jets/torus."
                        : "Starved — quiescent hole.");
         igTextDisabled("Advance Stellar time to evolve (fade + grow).");

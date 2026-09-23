@@ -166,8 +166,74 @@ def probe(path):
 
 # ------------------------------------------------------- HEALPix RING index
 
+def _interleave(ix, iy):
+    """Spread the bits of ix into even positions and iy into odd ones.
+
+    This is what makes NESTED indexing hierarchical: a pixel's index is its
+    position within a base face written as interleaved x/y bits, so truncating
+    low bits zooms out by powers of two.
+    """
+    b = np.zeros(ix.shape, dtype=np.int64)
+    for k in range(16):                       # nside <= 65536
+        b |= ((ix >> k) & 1) << (2 * k)
+        b |= ((iy >> k) & 1) << (2 * k + 1)
+    return b
+
+
+def ang2pix_nest(nside, theta, phi):
+    """Vectorised HEALPix NESTED ang2pix (Gorski+ 2005 sec. 4.1).
+
+    The Edenhofer cube is ORDERING = 'NEST' (confirmed from its FITS header),
+    not RING. The two number the same 786,432 pixels completely differently,
+    so using the wrong one does not fail -- it silently scrambles the sky.
+    """
+    theta = np.asarray(theta, dtype=np.float64)
+    phi = np.mod(np.asarray(phi, dtype=np.float64), 2.0 * math.pi)
+    order = int(round(math.log2(nside)))
+    z = np.cos(theta)
+    za = np.abs(z)
+    tt = phi * (2.0 / math.pi)                          # [0, 4)
+
+    face = np.zeros(z.shape, dtype=np.int64)
+    ix = np.zeros(z.shape, dtype=np.int64)
+    iy = np.zeros(z.shape, dtype=np.int64)
+
+    eq = za <= 2.0 / 3.0
+    if np.any(eq):
+        tt_e, z_e = tt[eq], z[eq]
+        temp1 = nside * (0.5 + tt_e)
+        temp2 = nside * z_e * 0.75
+        jp = np.floor(temp1 - temp2).astype(np.int64)   # ascending edge
+        jm = np.floor(temp1 + temp2).astype(np.int64)   # descending edge
+        ifp = jp >> order
+        ifm = jm >> order
+        f = np.where(ifp == ifm, (ifp & 3) + 4,
+            np.where(ifp < ifm, ifp & 3, (ifm & 3) + 8))
+        face[eq] = f
+        ix[eq] = jm & (nside - 1)
+        iy[eq] = nside - (jp & (nside - 1)) - 1
+
+    po = ~eq
+    if np.any(po):
+        tt_p, z_p, za_p = tt[po], z[po], za[po]
+        ntt = np.minimum(3, tt_p.astype(np.int64))
+        tp = tt_p - ntt
+        tmp = nside * np.sqrt(np.maximum(3.0 * (1.0 - za_p), 0.0))
+        jp = np.minimum(nside - 1, (tp * tmp).astype(np.int64))
+        jm = np.minimum(nside - 1, ((1.0 - tp) * tmp).astype(np.int64))
+        north = z_p >= 0
+        face[po] = np.where(north, ntt, ntt + 8)
+        ix[po] = np.where(north, nside - jm - 1, jp)
+        iy[po] = np.where(north, nside - jp - 1, jm)
+
+    return face * (nside * nside) + _interleave(ix, iy)
+
+
 def ang2pix_ring(nside, theta, phi):
     """Vectorised HEALPix RING ang2pix (HEALPix primer, Gorski+ 2005).
+
+    Kept for validation: RING and NESTED must partition the sphere into the
+    same equal-area pixels, so both are checked against that property.
 
     theta = colatitude in [0, pi], phi = longitude in [0, 2pi).
     """
@@ -325,7 +391,7 @@ def bake(fits_path, out_path, dim, half_pc, gamma, preview):
         ri = r[inside]
         theta = np.arccos(np.clip(pz[inside] / ri, -1.0, 1.0))
         phi = np.arctan2(py[inside], px[inside])
-        pix = ang2pix_ring(NSIDE, theta, phi)
+        pix = ang2pix_nest(NSIDE, theta, phi)   # header says ORDERING = NEST
         # Nearest log-spaced shell.
         t = (np.log(ri) - log_r0) / (log_r1 - log_r0)
         si = np.clip(np.rint(t * (nshell - 1)).astype(np.int64), 0, nshell - 1)

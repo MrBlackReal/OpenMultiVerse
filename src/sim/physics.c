@@ -794,7 +794,7 @@ static int sanitize_body(int i)
         if (!isfinite(b->pos[k]) || !isfinite(b->vel[k])) {
             b->alive = 0;
             b->mass = 0.0;
-            b->trail_emitting = 0;
+            if (b->trail) b->trail->emitting = 0;
             return 1;
         }
     }
@@ -1433,7 +1433,7 @@ void physics_step(double dt) {
  * TRAIL_TARGET_WORLD_LEN because their orbits are much shorter than planets'.
  */
 static void sample_body_pos(Body *b, const double pos[3]) {
-    int write_idx = b->trail_head;
+    int write_idx = b->trail->head;
     double seg_len = 0.0;
     double target_world_len = TRAIL_TARGET_WORLD_LEN;
     int body_idx = (int)(b - g_bodies);
@@ -1441,44 +1441,41 @@ static void sample_body_pos(Body *b, const double pos[3]) {
     if (body_idx >= 0 && body_idx < g_nbodies && is_satellite(body_idx))
         target_world_len = TRAIL_SATELLITE_WORLD_LEN;
 
-    if (b->trail_count > 0) {
-        int prev_idx = (b->trail_head - 1 + TRAIL_LEN) & TRAIL_MASK;
-        double dx = pos[0] * RS - b->trail[prev_idx][0];
-        double dy = pos[1] * RS - b->trail[prev_idx][1];
-        double dz = pos[2] * RS - b->trail[prev_idx][2];
+    if (b->trail->count > 0) {
+        int prev_idx = (b->trail->head - 1 + TRAIL_LEN) & TRAIL_MASK;
+        double dx = pos[0] * RS - b->trail->pts[prev_idx][0];
+        double dy = pos[1] * RS - b->trail->pts[prev_idx][1];
+        double dz = pos[2] * RS - b->trail->pts[prev_idx][2];
         /* RS converts metres → AU-units; multiply back by AU for metres */
         seg_len = sqrt(dx*dx + dy*dy + dz*dz) * AU;
     }
 
-    b->trail[b->trail_head][0] = pos[0] * RS;
-    b->trail[b->trail_head][1] = pos[1] * RS;
-    b->trail[b->trail_head][2] = pos[2] * RS;
-    if (b->trail_seg_len) b->trail_seg_len[write_idx] = seg_len;
-    b->trail_head = (b->trail_head + 1) & TRAIL_MASK;
-    if (b->trail_count < TRAIL_LEN) {
-        b->trail_count++;
-        b->trail_total_len += seg_len;
+    b->trail->pts[b->trail->head][0] = pos[0] * RS;
+    b->trail->pts[b->trail->head][1] = pos[1] * RS;
+    b->trail->pts[b->trail->head][2] = pos[2] * RS;
+    b->trail->seg_len[write_idx] = seg_len;
+    b->trail->head = (b->trail->head + 1) & TRAIL_MASK;
+    if (b->trail->count < TRAIL_LEN) {
+        b->trail->count++;
+        b->trail->total_len += seg_len;
     } else {
         /* Buffer full: the just-overwritten slot was the old oldest sample, so
          * the segment that left the retained polyline is the one ENDING at the
          * new oldest sample (trail_head, after the advance above) — not its
          * successor.  (The length-pruning branch below uses next_oldest because
          * there oldest_idx is the still-present sample being dropped.) */
-        int oldest_idx = b->trail_head;
-        if (b->trail_seg_len)
-            b->trail_total_len += seg_len - b->trail_seg_len[oldest_idx];
-        else
-            b->trail_total_len += seg_len;
+        int oldest_idx = b->trail->head;
+        b->trail->total_len += seg_len - b->trail->seg_len[oldest_idx];
     }
 
     /* Prune excess length by evicting oldest samples */
-    while (b->trail_count > 2 && b->trail_total_len > target_world_len) {
-        int oldest_idx = (b->trail_head - b->trail_count + TRAIL_LEN) & TRAIL_MASK;
+    while (b->trail->count > 2 && b->trail->total_len > target_world_len) {
+        int oldest_idx = (b->trail->head - b->trail->count + TRAIL_LEN) & TRAIL_MASK;
         int next_oldest_idx = (oldest_idx + 1) & TRAIL_MASK;
-        double drop_len = b->trail_seg_len ? b->trail_seg_len[next_oldest_idx] : 0.0;
-        b->trail_total_len -= drop_len;
-        if (b->trail_total_len < 0.0) b->trail_total_len = 0.0;
-        b->trail_count--;
+        double drop_len = b->trail->seg_len[next_oldest_idx];
+        b->trail->total_len -= drop_len;
+        if (b->trail->total_len < 0.0) b->trail->total_len = 0.0;
+        b->trail->count--;
     }
 }
 
@@ -1657,8 +1654,8 @@ static void trail_rebuild_segment(Body *b,
         traveled = 0.0;
 
         /* Emit a sample every segment_len metres of arc walked */
-        while (b->trail_accum + (seg_dist - traveled) >= segment_len) {
-            double need = segment_len - b->trail_accum;
+        while (b->trail->accum + (seg_dist - traveled) >= segment_len) {
+            double need = segment_len - b->trail->accum;
             double u;
             double sample_pos[3];
 
@@ -1673,10 +1670,10 @@ static void trail_rebuild_segment(Body *b,
             sample_body_pos(b, sample_pos);
             traveled += need;
             if (traveled > seg_dist) traveled = seg_dist;
-            b->trail_accum = 0.0;
+            b->trail->accum = 0.0;
         }
 
-        b->trail_accum += seg_dist - traveled;
+        b->trail->accum += seg_dist - traveled;
     }
 }
 
@@ -1699,22 +1696,23 @@ static void trail_rebuild_segment(Body *b,
  */
 static void snapshot_body_trail(Body *b)
 {
-    b->trail_frame_accum = b->trail_accum;
-    b->trail_frame_head = b->trail_head;
-    b->trail_frame_count = b->trail_count;
-    b->trail_frame_total_len = b->trail_total_len;
-    b->trail_frame_pos[0] = b->pos[0];
-    b->trail_frame_pos[1] = b->pos[1];
-    b->trail_frame_pos[2] = b->pos[2];
-    b->trail_frame_vel[0] = b->vel[0];
-    b->trail_frame_vel[1] = b->vel[1];
-    b->trail_frame_vel[2] = b->vel[2];
-    b->trail_frame_prev_pos[0] = b->trail_prev_pos[0];
-    b->trail_frame_prev_pos[1] = b->trail_prev_pos[1];
-    b->trail_frame_prev_pos[2] = b->trail_prev_pos[2];
-    b->trail_frame_prev_vel[0] = b->trail_prev_vel[0];
-    b->trail_frame_prev_vel[1] = b->trail_prev_vel[1];
-    b->trail_frame_prev_vel[2] = b->trail_prev_vel[2];
+    if (!b->trail) return;
+    b->trail->frame_accum = b->trail->accum;
+    b->trail->frame_head = b->trail->head;
+    b->trail->frame_count = b->trail->count;
+    b->trail->frame_total_len = b->trail->total_len;
+    b->trail->frame_pos[0] = b->pos[0];
+    b->trail->frame_pos[1] = b->pos[1];
+    b->trail->frame_pos[2] = b->pos[2];
+    b->trail->frame_vel[0] = b->vel[0];
+    b->trail->frame_vel[1] = b->vel[1];
+    b->trail->frame_vel[2] = b->vel[2];
+    b->trail->frame_prev_pos[0] = b->trail->prev_pos[0];
+    b->trail->frame_prev_pos[1] = b->trail->prev_pos[1];
+    b->trail->frame_prev_pos[2] = b->trail->prev_pos[2];
+    b->trail->frame_prev_vel[0] = b->trail->prev_vel[0];
+    b->trail->frame_prev_vel[1] = b->trail->prev_vel[1];
+    b->trail->frame_prev_vel[2] = b->trail->prev_vel[2];
 }
 
 void trails_begin_frame_snapshot(void)
@@ -1777,29 +1775,29 @@ void trails_cut_body_at_time(int body_idx, double hit_dt, double frame_dt,
     if (!b->trail) return;
 
     /* Restore to beginning-of-frame snapshot */
-    b->trail_head = b->trail_frame_head;
-    b->trail_count = b->trail_frame_count;
-    b->trail_accum = b->trail_frame_accum;
-    b->trail_total_len = b->trail_frame_total_len;
-    b->trail_prev_pos[0] = b->trail_frame_prev_pos[0];
-    b->trail_prev_pos[1] = b->trail_frame_prev_pos[1];
-    b->trail_prev_pos[2] = b->trail_frame_prev_pos[2];
-    b->trail_prev_vel[0] = b->trail_frame_prev_vel[0];
-    b->trail_prev_vel[1] = b->trail_frame_prev_vel[1];
-    b->trail_prev_vel[2] = b->trail_frame_prev_vel[2];
+    b->trail->head = b->trail->frame_head;
+    b->trail->count = b->trail->frame_count;
+    b->trail->accum = b->trail->frame_accum;
+    b->trail->total_len = b->trail->frame_total_len;
+    b->trail->prev_pos[0] = b->trail->frame_prev_pos[0];
+    b->trail->prev_pos[1] = b->trail->frame_prev_pos[1];
+    b->trail->prev_pos[2] = b->trail->frame_prev_pos[2];
+    b->trail->prev_vel[0] = b->trail->frame_prev_vel[0];
+    b->trail->prev_vel[1] = b->trail->frame_prev_vel[1];
+    b->trail->prev_vel[2] = b->trail->frame_prev_vel[2];
 
     if (frame_dt <= 0.0 || hit_dt <= 0.0) {
         /* Impact at frame start — use the snapshot velocity as cut_vel */
-        cut_vel[0] = b->trail_frame_prev_vel[0];
-        cut_vel[1] = b->trail_frame_prev_vel[1];
-        cut_vel[2] = b->trail_frame_prev_vel[2];
+        cut_vel[0] = b->trail->frame_prev_vel[0];
+        cut_vel[1] = b->trail->frame_prev_vel[1];
+        cut_vel[2] = b->trail->frame_prev_vel[2];
     } else {
         /* τ ∈ [0,1]: fractional time within the frame at which impact occurred */
         tau = hit_dt / frame_dt;
         if (tau < 0.0) tau = 0.0;
         if (tau > 1.0) tau = 1.0;
         /* Interpolate velocity at impact time using Hermite derivative */
-        trail_curve_eval_vel(b->trail_frame_pos, b->trail_frame_vel,
+        trail_curve_eval_vel(b->trail->frame_pos, b->trail->frame_vel,
                              b->pos, b->vel, frame_dt, tau, cut_vel);
         segment_len = trail_segment_len_for_body(b);
         max_err = segment_len * TRAIL_CURVE_ERROR_RATIO;
@@ -1807,22 +1805,22 @@ void trails_cut_body_at_time(int body_idx, double hit_dt, double frame_dt,
         if (max_err > TRAIL_CURVE_MAX_ERROR) max_err = TRAIL_CURVE_MAX_ERROR;
         /* Re-emit the partial trail from snapshot prev_pos up to cut_pos */
         trail_rebuild_segment(b,
-                              b->trail_frame_prev_pos, b->trail_frame_prev_vel,
+                              b->trail->frame_prev_pos, b->trail->frame_prev_vel,
                               cut_pos, cut_vel, hit_dt, segment_len, max_err);
     }
 
     /* Snap or append the final point exactly at cut_pos */
-    if (b->trail_count > 0) {
-        int last_idx = (b->trail_head - 1 + TRAIL_LEN) & TRAIL_MASK;
-        dx = b->trail[last_idx][0] - cut_pos[0] * RS;
-        dy = b->trail[last_idx][1] - cut_pos[1] * RS;
-        dz = b->trail[last_idx][2] - cut_pos[2] * RS;
+    if (b->trail->count > 0) {
+        int last_idx = (b->trail->head - 1 + TRAIL_LEN) & TRAIL_MASK;
+        dx = b->trail->pts[last_idx][0] - cut_pos[0] * RS;
+        dy = b->trail->pts[last_idx][1] - cut_pos[1] * RS;
+        dz = b->trail->pts[last_idx][2] - cut_pos[2] * RS;
         dist2 = dx*dx + dy*dy + dz*dz;
         if (dist2 <= (TRAIL_MIN_SEGMENT_LEN * RS) * (TRAIL_MIN_SEGMENT_LEN * RS)) {
             /* Close enough — snap in place rather than emitting a micro-segment */
-            b->trail[last_idx][0] = cut_pos[0] * RS;
-            b->trail[last_idx][1] = cut_pos[1] * RS;
-            b->trail[last_idx][2] = cut_pos[2] * RS;
+            b->trail->pts[last_idx][0] = cut_pos[0] * RS;
+            b->trail->pts[last_idx][1] = cut_pos[1] * RS;
+            b->trail->pts[last_idx][2] = cut_pos[2] * RS;
         } else {
             sample_body_pos(b, cut_pos);
         }
@@ -1831,12 +1829,12 @@ void trails_cut_body_at_time(int body_idx, double hit_dt, double frame_dt,
     }
 
     /* Update prev_* so the next trail_tick starts from the impact site */
-    b->trail_prev_pos[0] = cut_pos[0];
-    b->trail_prev_pos[1] = cut_pos[1];
-    b->trail_prev_pos[2] = cut_pos[2];
-    b->trail_prev_vel[0] = cut_vel[0];
-    b->trail_prev_vel[1] = cut_vel[1];
-    b->trail_prev_vel[2] = cut_vel[2];
+    b->trail->prev_pos[0] = cut_pos[0];
+    b->trail->prev_pos[1] = cut_pos[1];
+    b->trail->prev_pos[2] = cut_pos[2];
+    b->trail->prev_vel[0] = cut_vel[0];
+    b->trail->prev_vel[1] = cut_vel[1];
+    b->trail->prev_vel[2] = cut_vel[2];
 }
 
 /* ── trail tick ─────────────────────────────────────────────────────────── */
@@ -1867,19 +1865,19 @@ void trails_tick_system(int root, double dt) {
             Body *b = &g_bodies[i];
             double segment_len, max_err, start[3], start_vel[3], end[3], end_vel[3];
 
-            if (!b->alive || !in_system(i, root) || !b->trail || !b->trail_emitting) {
+            if (!b->alive || !in_system(i, root) || !b->trail || !b->trail->emitting) {
                 continue;
             }
             segment_len = trail_segment_len_for_body(b);
             max_err = segment_len * TRAIL_CURVE_ERROR_RATIO;
             if (max_err < TRAIL_CURVE_MIN_ERROR) max_err = TRAIL_CURVE_MIN_ERROR;
             if (max_err > TRAIL_CURVE_MAX_ERROR) max_err = TRAIL_CURVE_MAX_ERROR;
-            start[0] = b->trail_prev_pos[0];
-            start[1] = b->trail_prev_pos[1];
-            start[2] = b->trail_prev_pos[2];
-            start_vel[0] = b->trail_prev_vel[0];
-            start_vel[1] = b->trail_prev_vel[1];
-            start_vel[2] = b->trail_prev_vel[2];
+            start[0] = b->trail->prev_pos[0];
+            start[1] = b->trail->prev_pos[1];
+            start[2] = b->trail->prev_pos[2];
+            start_vel[0] = b->trail->prev_vel[0];
+            start_vel[1] = b->trail->prev_vel[1];
+            start_vel[2] = b->trail->prev_vel[2];
             end[0] = b->pos[0];
             end[1] = b->pos[1];
             end[2] = b->pos[2];
@@ -1889,12 +1887,12 @@ void trails_tick_system(int root, double dt) {
             trail_rebuild_segment(b, start, start_vel, end, end_vel,
                                   dt, segment_len, max_err);
 
-            b->trail_prev_pos[0] = end[0];
-            b->trail_prev_pos[1] = end[1];
-            b->trail_prev_pos[2] = end[2];
-            b->trail_prev_vel[0] = end_vel[0];
-            b->trail_prev_vel[1] = end_vel[1];
-            b->trail_prev_vel[2] = end_vel[2];
+            b->trail->prev_pos[0] = end[0];
+            b->trail->prev_pos[1] = end[1];
+            b->trail->prev_pos[2] = end[2];
+            b->trail->prev_vel[0] = end_vel[0];
+            b->trail->prev_vel[1] = end_vel[1];
+            b->trail->prev_vel[2] = end_vel[2];
         }
         return;
     }
@@ -1904,19 +1902,19 @@ void trails_tick_system(int root, double dt) {
         Body *b = &g_bodies[i];
         double segment_len, max_err, start[3], start_vel[3], end[3], end_vel[3];
 
-        if (!b->alive || !b->trail || !b->trail_emitting) {
+        if (!b->alive || !b->trail || !b->trail->emitting) {
             continue;
         }
         segment_len = trail_segment_len_for_body(b);
         max_err = segment_len * TRAIL_CURVE_ERROR_RATIO;
         if (max_err < TRAIL_CURVE_MIN_ERROR) max_err = TRAIL_CURVE_MIN_ERROR;
         if (max_err > TRAIL_CURVE_MAX_ERROR) max_err = TRAIL_CURVE_MAX_ERROR;
-        start[0] = b->trail_prev_pos[0];
-        start[1] = b->trail_prev_pos[1];
-        start[2] = b->trail_prev_pos[2];
-        start_vel[0] = b->trail_prev_vel[0];
-        start_vel[1] = b->trail_prev_vel[1];
-        start_vel[2] = b->trail_prev_vel[2];
+        start[0] = b->trail->prev_pos[0];
+        start[1] = b->trail->prev_pos[1];
+        start[2] = b->trail->prev_pos[2];
+        start_vel[0] = b->trail->prev_vel[0];
+        start_vel[1] = b->trail->prev_vel[1];
+        start_vel[2] = b->trail->prev_vel[2];
         end[0] = b->pos[0];
         end[1] = b->pos[1];
         end[2] = b->pos[2];
@@ -1926,11 +1924,11 @@ void trails_tick_system(int root, double dt) {
         trail_rebuild_segment(b, start, start_vel, end, end_vel,
                               dt, segment_len, max_err);
 
-        b->trail_prev_pos[0] = end[0];
-        b->trail_prev_pos[1] = end[1];
-        b->trail_prev_pos[2] = end[2];
-        b->trail_prev_vel[0] = end_vel[0];
-        b->trail_prev_vel[1] = end_vel[1];
-        b->trail_prev_vel[2] = end_vel[2];
+        b->trail->prev_pos[0] = end[0];
+        b->trail->prev_pos[1] = end[1];
+        b->trail->prev_pos[2] = end[2];
+        b->trail->prev_vel[0] = end_vel[0];
+        b->trail->prev_vel[1] = end_vel[1];
+        b->trail->prev_vel[2] = end_vel[2];
     }
 }

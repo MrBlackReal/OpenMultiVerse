@@ -48,9 +48,17 @@ static double kerr_l_isco(double a)
 
 void accretion_init_body(Body *b)
 {
-    b->mdot            = 0.0;
-    b->eddington_ratio = 0.0;
-    if (!b->is_black_hole) { b->gas_reservoir = 0.0; b->spin_a = 0.0; return; }
+    /* Called for every loaded body: a non-hole that owns no BlackHole already
+     * reads as the all-zero state this would write, so don't allocate one. */
+    if (!b->is_black_hole) {
+        if (b->bh) {
+            b->bh->mdot = b->bh->eddington_ratio = 0.0;
+            b->bh->gas_reservoir = b->bh->spin_a = 0.0;
+        }
+        return;
+    }
+    body_bh_mut(b)->mdot            = 0.0;
+    body_bh_mut(b)->eddington_ratio = 0.0;
 
     /* Seed the dimensionless spin a* from the authored rotation_rate: a* = Ω·Rs/c
      * (matches render.c bh_scales), signed by rotation sense, clamped to the
@@ -62,18 +70,18 @@ void accretion_init_body(Body *b)
     double a  = b->rotation_rate * Rs / C_LIGHT;
     if (a >  A_MAX) a =  A_MAX;
     if (a < -A_MAX) a = -A_MAX;
-    b->spin_a = a;
+    body_bh_mut(b)->spin_a = a;
 
     /* Only active holes start with fuel; a bare/quiet hole stays starved unless
      * a companion feeds it later. */
-    if (b->agn_activity <= 0.0f || b->mass <= 0.0) { b->gas_reservoir = 0.0; return; }
+    if (body_bh(b)->agn_activity <= 0.0f || b->mass <= 0.0) { body_bh_mut(b)->gas_reservoir = 0.0; return; }
     double L_edd  = eddington_luminosity(b->mass);
-    double edd0   = b->agn_activity;                  /* authored Eddington ratio */
+    double edd0   = body_bh(b)->agn_activity;                  /* authored Eddington ratio */
     double mdot0  = edd0 * L_edd / (ACC_ETA * C_LIGHT * C_LIGHT);
     double t_visc = ACC_T_VISC_YR * SEC_PER_YEAR;
-    b->gas_reservoir   = mdot0 * t_visc;              /* fuel to sustain ~t_visc  */
-    b->mdot            = mdot0;
-    b->eddington_ratio = edd0;
+    body_bh_mut(b)->gas_reservoir   = mdot0 * t_visc;              /* fuel to sustain ~t_visc  */
+    body_bh_mut(b)->mdot            = mdot0;
+    body_bh_mut(b)->eddington_ratio = edd0;
 }
 
 /* Roche streams seen during the most recent step, for field_graph.c. A pair
@@ -129,7 +137,7 @@ static void roche_feed(int hole, double dt_sec)
         double dM = d->mass * (dt_sec / t_transfer) * overflow;
         if (dM > 0.02 * d->mass) dM = 0.02 * d->mass; /* cap per step (stability) */
         d->mass          -= dM;
-        h->gas_reservoir += dM;                       /* fuels the hole           */
+        body_bh_mut(h)->gas_reservoir += dM;                       /* fuels the hole           */
 
         /* Record the stream for the field graph (donor → hole, kg/s). */
         if (dM > 0.0 && dt_sec > 0.0 && s_flow_count < ACC_MAX_FLOWS) {
@@ -156,22 +164,22 @@ void accretion_step(double dt_real_sec)
         /* Companion Roche-lobe overflow tops up the reservoir first. */
         roche_feed(i, dt_sec);
 
-        if (b->gas_reservoir <= 0.0) {
-            b->mdot = 0.0;
-            b->eddington_ratio = 0.0;
-            b->agn_activity = 0.0f;          /* starved: fades to a quiet hole   */
+        if (body_bh(b)->gas_reservoir <= 0.0) {
+            body_bh_mut(b)->mdot = 0.0;
+            body_bh_mut(b)->eddington_ratio = 0.0;
+            body_bh_mut(b)->agn_activity = 0.0f;          /* starved: fades to a quiet hole   */
             continue;
         }
 
-        double mdot = b->gas_reservoir / t_visc;
+        double mdot = body_bh(b)->gas_reservoir / t_visc;
         double dM   = mdot * dt_sec;
-        if (dM > b->gas_reservoir) dM = b->gas_reservoir;
+        if (dM > body_bh(b)->gas_reservoir) dM = body_bh(b)->gas_reservoir;
 
         /* Spin-up: matter falling in from the prograde ISCO carries specific
          * angular momentum ℓ = L̃·GM/c, so J += ℓ·dM and a* = Jc/(GM²) climbs
          * toward the Thorne limit (Bardeen 1970). Use the pre-accretion mass. */
         double Mold = b->mass;
-        double a_old = b->spin_a;                       /* signed: +prograde       */
+        double a_old = body_bh(b)->spin_a;                       /* signed: +prograde       */
         /* Work in SIGNED angular momentum: prograde accretion adds a POSITIVE dJ,
          * so a retrograde hole (a<0) spins DOWN through zero and flips prograde
          * rather than spinning further retrograde. */
@@ -181,16 +189,16 @@ void accretion_step(double dt_real_sec)
         double anew = (J + dJ) * C_LIGHT / (G_GRAV * Mnew * Mnew);
         if (anew >  A_MAX) anew =  A_MAX;
         if (anew < -A_MAX) anew = -A_MAX;
-        b->spin_a = anew;
+        body_bh_mut(b)->spin_a = anew;
 
-        b->gas_reservoir -= dM;              /* deplete */
+        body_bh_mut(b)->gas_reservoir -= dM;              /* deplete */
         b->mass           = Mnew;            /* the hole grows as it eats */
         b->radius         = laws_schwarzschild_radius(Mnew);   /* horizon tracks mass */
 
         double L   = ACC_ETA * mdot * C_LIGHT * C_LIGHT;
         double edd = L / eddington_luminosity(b->mass);
-        b->mdot            = mdot;
-        b->eddington_ratio = edd;
-        b->agn_activity    = (float)(edd > EDD_MAX ? EDD_MAX : edd);
+        body_bh_mut(b)->mdot            = mdot;
+        body_bh_mut(b)->eddington_ratio = edd;
+        body_bh_mut(b)->agn_activity    = (float)(edd > EDD_MAX ? EDD_MAX : edd);
     }
 }

@@ -122,11 +122,24 @@ static int    s_last_nbodies  = -1;
 static int    s_had_sn        = 0;   /* last rebuild harvested a supernova */
 #define REBUILD_PERIOD_SEC 0.5
 
-/* Irradiance cull thresholds (see radiance_field_rebuild). Relative: fraction
- * of the brightest emitter's irradiance below which one cannot matter.
- * Absolute: W/m^2 floor so empty space does not readmit the whole catalog. */
-#define RADIANCE_REL_FLOOR 1e-7
-#define RADIANCE_ABS_FLOOR 1e-12
+/* Irradiance cull threshold (see radiance_field_rebuild).
+ *
+ * Absolute only. An earlier version also used a floor relative to the
+ * BRIGHTEST emitter, which failed badly whenever the camera sat on something
+ * blazing: parked on a neutron-star remnant, max_irr is enormous, the relative
+ * floor rises with it, and every star lighting the surrounding ejecta is
+ * culled -- the 05_neutron_star benchmark shot lost 6.2 mean brightness.
+ * Irradiance is not relative to the view; the threshold must not be either.
+ *
+ * RADIANCE_REGION_LY widens the test from a point to a neighbourhood: an
+ * emitter is kept if it could light anything within that radius of the camera,
+ * not merely the camera itself. Volumetrics (supernova ejecta, nebulae) are
+ * sampled away from the eye, so a point test drops the stars illuminating
+ * them. */
+#define RADIANCE_ABS_FLOOR  1e-13   /* cheap pre-filter only; the cap does the work */
+#define RADIANCE_REGION_LY  12.0
+#define RADIANCE_MAX_EMIT   1024    /* budget: keep the brightest this many     */
+#define RADIANCE_HIST_BINS  96      /* log-irradiance histogram for the cutoff  */
 
 /* Thermal (photosphere) luminosity of a star-flagged body, W. */
 static double star_luminosity(const Body *b)
@@ -145,11 +158,11 @@ static double bh_luminosity(const Body *b)
 {
     double edd = EDD_PER_MSUN * (b->mass / M_SUN);
     double l = 0.0;
-    if (b->mdot > 0.0)
-        l = ACC_EFF * b->mdot * C_LIGHT * C_LIGHT;
-    else if (b->agn_activity > 0.0f)
-        l = (double)b->agn_activity * edd;
-    if (b->accretion_disk > 0.0f && l < DISK_FLOOR_EDD * edd)
+    if (body_bh(b)->mdot > 0.0)
+        l = ACC_EFF * body_bh(b)->mdot * C_LIGHT * C_LIGHT;
+    else if (body_bh(b)->agn_activity > 0.0f)
+        l = (double)body_bh(b)->agn_activity * edd;
+    if (body_bh(b)->accretion_disk > 0.0f && l < DISK_FLOOR_EDD * edd)
         l = DISK_FLOOR_EDD * edd;
     return l;
 }
@@ -387,8 +400,53 @@ void radiance_field_rebuild(void)
             double irr = lum / (d2 > 1.0 ? d2 : 1.0);
             if (irr > max_irr) max_irr = irr;
         }
-        double floor_irr = max_irr * RADIANCE_REL_FLOOR;
-        if (floor_irr < RADIANCE_ABS_FLOOR) floor_irr = RADIANCE_ABS_FLOOR;
+        (void)max_irr;
+        const double region_m = RADIANCE_REGION_LY * LY;
+        double floor_irr = RADIANCE_ABS_FLOOR;
+
+        /* Raise the floor until at most RADIANCE_MAX_EMIT survive.
+         *
+         * A fixed threshold cannot work: loose keeps the whole catalog, tight
+         * goes dark on volumetric scenes because the stars lighting ejecta are
+         * dropped. A COUNT is self-balancing -- the brightest 1024 always
+         * include whatever is actually lighting the scene, whatever the scene
+         * is -- and bounds the per-sample cost, which is the thing that made
+         * 203,972 emitters untenable.
+         *
+         * The cutoff comes from one extra O(n) pass over a log-irradiance
+         * histogram rather than a sort: 96 decade-ish bins, walk from the
+         * bright end until the budget fills. */
+        {
+            int hist[RADIANCE_HIST_BINS];
+            for (int h = 0; h < RADIANCE_HIST_BINS; h++) hist[h] = 0;
+            for (int i = 0; i < g_nbodies; i++) {
+                if (i >= g_field_star_begin && i < g_field_star_end) {
+                    i = g_field_star_end - 1; continue;
+                }
+                double lum = s_body_lum[i];
+                if (lum <= 0.0) continue;
+                double dx = g_bodies[i].pos[0] - cam_m[0];
+                double dy = g_bodies[i].pos[1] - cam_m[1];
+                double dz = g_bodies[i].pos[2] - cam_m[2];
+                double d = sqrt(dx*dx + dy*dy + dz*dz) - region_m;
+                if (d < 1.0) d = 1.0;
+                double irr = lum / (d * d);
+                if (irr < floor_irr) continue;
+                int h = (int)((log10(irr) + 20.0) * 2.0);   /* -20..28 -> 0..95 */
+                if (h < 0) h = 0;
+                if (h >= RADIANCE_HIST_BINS) h = RADIANCE_HIST_BINS - 1;
+                hist[h]++;
+            }
+            int acc = 0;
+            for (int h = RADIANCE_HIST_BINS - 1; h >= 0; h--) {
+                acc += hist[h];
+                if (acc > RADIANCE_MAX_EMIT) {
+                    double cut = pow(10.0, (double)h / 2.0 - 20.0);
+                    if (cut > floor_irr) floor_irr = cut;
+                    break;
+                }
+            }
+        }
         for (int i = 0; i < g_nbodies; i++) {
             if (i >= g_field_star_begin && i < g_field_star_end) {
                 i = g_field_star_end - 1;
@@ -399,8 +457,10 @@ void radiance_field_rebuild(void)
             double dx = g_bodies[i].pos[0] - cam_m[0];
             double dy = g_bodies[i].pos[1] - cam_m[1];
             double dz = g_bodies[i].pos[2] - cam_m[2];
-            double d2 = dx * dx + dy * dy + dz * dz;
-            if (lum / (d2 > 1.0 ? d2 : 1.0) < floor_irr) {
+            /* Closest approach to the sampled neighbourhood, not to the eye. */
+            double d  = sqrt(dx * dx + dy * dy + dz * dz) - region_m;
+            if (d < 1.0) d = 1.0;
+            if (lum / (d * d) < floor_irr) {
                 s_body_lum[i] = 0.0;        /* culled: not an emitter */
                 continue;
             }

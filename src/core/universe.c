@@ -97,88 +97,6 @@ static void ensure_capacity(int needed)
     g_bodies_cap = new_cap;
 }
 
-/*
- * alloc_trail — allocate and zero-initialise all trail state for a body.
- *
- * Two parallel trail systems live side-by-side:
- *
- *   Simulation trail ("trail_*"):
- *     The authoritative, accumulated path.  TRAIL_LEN double[3] positions plus
- *     per-segment arc lengths.  Used by trails_render() for the visible ribbon.
- *
- *   Frame-snapshot trail ("trail_frame_*"):
- *     A snapshot of the trail state as it was at the start of the current
- *     physics frame.  The collision system uses this to roll back and re-emit
- *     the trail from its pre-impact state when two bodies merge, preventing
- *     a visual glitch where the trail suddenly jumps to the collision point.
- *
- * Both systems share the same circular-buffer structure (head, count, accum,
- * total_len) and a "prev" sample for Hermite spline tangent computation.
- * Initialising prev_pos/vel to the body's current position and velocity at
- * load time ensures the first trail segment has a valid tangent.
- */
-static void alloc_trail(Body *bo)
-{
-    /* Stars (and black holes, which set is_star) never render a trail —
-     * trails.c skips is_star bodies unconditionally.  Allocating the ~0.5 MB
-     * circular buffer for each is pure waste and the single largest per-body
-     * cost at galaxy scale (millions of stars), so leave trail == NULL for
-     * them.  Every trail consumer already guards on b->trail, so a NULL trail
-     * is safe.  Release any buffer a reused slot carried over from a prior
-     * planet life. */
-    if (bo->is_star) {
-        free(bo->trail);          bo->trail = NULL;
-        free(bo->trail_seg_len);  bo->trail_seg_len = NULL;
-        bo->trail_head = 0;
-        bo->trail_count = 0;
-        bo->trail_accum = 0.0;
-        bo->trail_total_len = 0.0;
-        bo->trail_fade = 1.0;
-        bo->trail_emitting = 0;
-        return;
-    }
-    /* Non-stars get their buffers ON DEMAND, not here.  Only bodies inside
-     * ACTIVE_RADIUS_LY ever record a sample — trails_tick_system() runs per
-     * active system root — so a body light-years away holds 512 KiB of heap
-     * (TRAIL_LEN double[3] + seg lengths) and a 256 KiB GL_DYNAMIC_DRAW VBO
-     * that can never change.  Across the shipped catalog's ~6.3k non-star
-     * bodies that is ~3.2 GiB of heap and ~1.6 GiB of requested VRAM.
-     * trails_render() now allocates when a body enters the active set and
-     * releases it after it leaves; NULL is already the safe state (stars have
-     * used it since load RAM went 2.34 GB -> 1.2 GB) because every consumer
-     * guards on b->trail. */
-    free(bo->trail);          bo->trail = NULL;
-    free(bo->trail_seg_len);  bo->trail_seg_len = NULL;
-    bo->trail_head  = 0;
-    bo->trail_count = 0;
-    bo->trail_accum = 0.0;
-    bo->trail_total_len = 0.0;
-    bo->trail_fade  = 1.0;
-    bo->trail_emitting = 1;
-    bo->trail_prev_pos[0] = bo->pos[0];
-    bo->trail_prev_pos[1] = bo->pos[1];
-    bo->trail_prev_pos[2] = bo->pos[2];
-    bo->trail_prev_vel[0] = bo->vel[0];
-    bo->trail_prev_vel[1] = bo->vel[1];
-    bo->trail_prev_vel[2] = bo->vel[2];
-    bo->trail_frame_accum = 0.0;
-    bo->trail_frame_head = 0;
-    bo->trail_frame_count = 0;
-    bo->trail_frame_total_len = 0.0;
-    bo->trail_frame_pos[0] = bo->pos[0];
-    bo->trail_frame_pos[1] = bo->pos[1];
-    bo->trail_frame_pos[2] = bo->pos[2];
-    bo->trail_frame_vel[0] = bo->vel[0];
-    bo->trail_frame_vel[1] = bo->vel[1];
-    bo->trail_frame_vel[2] = bo->vel[2];
-    bo->trail_frame_prev_pos[0] = bo->trail_prev_pos[0];
-    bo->trail_frame_prev_pos[1] = bo->trail_prev_pos[1];
-    bo->trail_frame_prev_pos[2] = bo->trail_prev_pos[2];
-    bo->trail_frame_prev_vel[0] = bo->trail_prev_vel[0];
-    bo->trail_frame_prev_vel[1] = bo->trail_prev_vel[1];
-    bo->trail_frame_prev_vel[2] = bo->trail_prev_vel[2];
-}
-
 /* O(n) linear search through g_bodies[0..n-1] by name.  Only called during
  * loading (Pass 2 and Pass 3), never in the hot path. */
 static int find_body_index(const char *name, int n)
@@ -531,10 +449,11 @@ static void load_snapshot(const JsonNode *bodies_arr)
         bo->name[31] = '\0';
         bo->is_star = (int)json_num(json_get(bn, "is_star"), 0.0);
         bo->is_black_hole = (int)json_num(json_get(bn, "is_black_hole"), 0.0);
-        bo->agn_activity  = (float)json_num(json_get(bn, "agn_activity"), 0.0);
-        bo->accretion_disk = (float)json_num(json_get(bn, "disk"),
-                                             bo->is_black_hole ? 1.0 : 0.0);
-        bo->dust_torus     = (float)json_num(json_get(bn, "torus"), 0.0);
+        body_set_agn(bo,
+                     (float)json_num(json_get(bn, "agn_activity"), 0.0),
+                     (float)json_num(json_get(bn, "disk"),
+                                     bo->is_black_hole ? 1.0 : 0.0),
+                     (float)json_num(json_get(bn, "torus"), 0.0));
         bo->mass    = fmax(0.0, json_num(json_get(bn, "mass"), 0.0));
         bo->radius  = fmax(0.0, json_num(json_get(bn, "radius_km"), 1.0)) * 1000.0;
         /* Snapshot restore: black-hole radius re-derived from mass, the same
@@ -571,7 +490,6 @@ static void load_snapshot(const JsonNode *bodies_arr)
         JsonNode *pi = json_get(bn, "parent_index");
         parent_idx[idx] = pi ? (int)json_num(pi, -1) : INT_MIN;  /* INT_MIN = absent */
 
-        alloc_trail(bo);
         g_nbodies++;
         if ((g_nbodies & (LOAD_REPORT_STRIDE - 1)) == 0)
             load_report("Loading bodies", g_nbodies, n, g_nbodies, n);
@@ -725,8 +643,8 @@ int universe_save(const char *path)
         fprintf(f, "    { \"name\": ");
         fput_json_str(f, b->name);
         fprintf(f, ", \"is_star\": %d, \"is_black_hole\": %d, \"agn_activity\": %.4f, \"disk\": %.4f, \"torus\": %.4f, \"parent_index\": %d, \"parent\": ",
-                b->is_star ? 1 : 0, b->is_black_hole ? 1 : 0, b->agn_activity,
-                b->accretion_disk, b->dust_torus, parent_slot);
+                b->is_star ? 1 : 0, b->is_black_hole ? 1 : 0, body_bh(b)->agn_activity,
+                body_bh(b)->accretion_disk, body_bh(b)->dust_torus, parent_slot);
         fput_json_str(f, parent);
         fprintf(f, ",\n");
         fprintf(f, "      \"mass\": %.10e, \"radius_km\": %.6f,\n",
@@ -823,9 +741,9 @@ int universe_export_body_catalog(const char *path)
         r.mass = b->mass; r.radius = b->radius;
         r.rotation_rate = b->rotation_rate; r.rotation_angle = b->rotation_angle;
         r.obliquity = (float)b->obliquity;
-        r.agn_activity = b->agn_activity;
-        r.accretion_disk = b->accretion_disk;
-        r.dust_torus = b->dust_torus;
+        r.agn_activity = body_bh(b)->agn_activity;
+        r.accretion_disk = body_bh(b)->accretion_disk;
+        r.dust_torus = body_bh(b)->dust_torus;
         r.flags = (b->is_star ? BODYBIN_IS_STAR : 0u)
                 | (b->is_black_hole ? BODYBIN_IS_BLACK_HOLE : 0u)
                 | (b->is_comet ? BODYBIN_IS_COMET : 0u);
@@ -1137,9 +1055,8 @@ static void load_body_catalog(const char *path)
                 bo->is_star       = (r->flags & BODYBIN_IS_STAR) ? 1 : 0;
                 bo->is_black_hole = (r->flags & BODYBIN_IS_BLACK_HOLE) ? 1 : 0;
                 bo->is_comet      = (r->flags & BODYBIN_IS_COMET) ? 1 : 0;
-                bo->agn_activity   = r->agn_activity;
-                bo->accretion_disk = r->accretion_disk;
-                bo->dust_torus     = r->dust_torus;
+                body_set_agn(bo, r->agn_activity, r->accretion_disk,
+                             r->dust_torus);
                 bo->obliquity      = r->obliquity;
                 bo->rotation_rate  = r->rotation_rate;
                 bo->rotation_angle = r->rotation_angle;
@@ -1149,7 +1066,6 @@ static void load_body_catalog(const char *path)
                     bo->radius = laws_schwarzschild_radius(bo->mass);
                 bo->parent = (r->parent >= 0) ? base + r->parent : -1;
                 accretion_init_body(bo);
-                alloc_trail(bo);
                 g_nbodies++;
                 added++;
             }
@@ -1324,16 +1240,17 @@ void universe_load(const char *path)
             bo->col[0]         = col[0]; bo->col[1] = col[1]; bo->col[2] = col[2];
             bo->is_star        = 1;
             bo->is_black_hole  = is_bh;
-            /* AGN activity: quasars default to 1.0; any BH may set "activity". */
-            bo->agn_activity   = (float)json_num(json_get(bn, "activity"),
-                                                 is_quasar ? 1.0 : 0.0);
-            /* Ring-like elements, decoupled from the body type: an accretion
+            /* AGN activity: quasars default to 1.0; any BH may set "activity".
+             * Ring-like elements, decoupled from the body type: an accretion
              * disk (default on for any black hole) and a dust torus (default on
              * for quasars). Either can be forced with "disk"/"torus". */
-            bo->accretion_disk = (float)json_num(json_get(bn, "disk"),
-                                                 is_bh ? 1.0 : 0.0);
-            bo->dust_torus     = (float)json_num(json_get(bn, "torus"),
-                                                 is_quasar ? 1.0 : 0.0);
+            body_set_agn(bo,
+                         (float)json_num(json_get(bn, "activity"),
+                                         is_quasar ? 1.0 : 0.0),
+                         (float)json_num(json_get(bn, "disk"),
+                                         is_bh ? 1.0 : 0.0),
+                         (float)json_num(json_get(bn, "torus"),
+                                         is_quasar ? 1.0 : 0.0));
             read_rotation(bn, bo);
             accretion_init_body(bo);   /* seed the gas reservoir from mass + activity */
 
@@ -1345,7 +1262,6 @@ void universe_load(const char *path)
                 bv[g_nbodies][2] = json_num(json_idx(vn, 2), 0.0) * 1000.0;
             }
 
-            alloc_trail(bo);
             g_nbodies++;
             done++; ks++;
             if ((ks & (LOAD_REPORT_STRIDE - 1)) == 0)
@@ -1463,7 +1379,6 @@ void universe_load(const char *path)
             bo->is_comet       = (strcmp(type, "comet") == 0);
             read_rotation(bn, bo);
             read_atmosphere(bn, bo);
-            alloc_trail(bo);
             namemap_insert(&nmap, (int)(bo - g_bodies));   /* so moons can find it */
             done++; kp++;
             if ((kp & (LOAD_REPORT_STRIDE - 1)) == 0)
@@ -1550,7 +1465,6 @@ void universe_load(const char *path)
             bo->parent         = par_idx;
             read_rotation(bn, bo);
             read_atmosphere(bn, bo);
-            alloc_trail(bo);
             namemap_insert(&nmap, (int)(bo - g_bodies));   /* moons can parent moons */
             done++; km++;
             if ((km & (LOAD_REPORT_STRIDE - 1)) == 0)
@@ -1690,8 +1604,6 @@ void universe_load(const char *path)
 int universe_add_body(const BodyCreateSpec *spec)
 {
     int idx, reused_slot;
-    double (*old_trail)[3] = NULL;
-    double *old_trail_seg_len = NULL;
     Body *bo;
 
     if (!spec) return -1;
@@ -1713,15 +1625,9 @@ int universe_add_body(const BodyCreateSpec *spec)
 
     bo = &g_bodies[idx];
     uint32_t gen = bo->generation;
-    if (reused_slot) {
-        old_trail = bo->trail;
-        old_trail_seg_len = bo->trail_seg_len;
-    }
+    if (reused_slot)
+        body_release(bo);   /* the previous tenant's trail / hole are not ours */
     body_defaults(bo);
-    if (reused_slot) {
-        bo->trail = old_trail;
-        bo->trail_seg_len = old_trail_seg_len;
-    }
     /* Bump past body_defaults(), which zeroes the struct. Every occupancy of a
      * slot gets a distinct generation, so a handle taken against the previous
      * tenant no longer resolves. Starts at 1 so a zeroed handle is never
@@ -1750,7 +1656,6 @@ int universe_add_body(const BodyCreateSpec *spec)
     bo->atm_color[2] = spec->atm_color[2];
     bo->atm_intensity = spec->atm_intensity;
     bo->atm_scale = spec->atm_scale > 0.0f ? spec->atm_scale : 1.0f;
-    alloc_trail(bo);
 
     /* Keep names unique so labels and name-keyed lookups stay unambiguous even
      * if the user names a new body the same as an existing one. */
@@ -1806,16 +1711,13 @@ void universe_rebind_to_nearest_stars(void)
     }
 }
 
-/* Free all trail buffers and the body array itself, then reset globals. */
+/* Free every body's out-of-line state and the body array itself, then reset globals. */
 void universe_shutdown(void)
 {
     field_store_reset();
     int i;
     for (i = 0; i < g_nbodies; i++) {
-        free(g_bodies[i].trail);
-        g_bodies[i].trail = NULL;
-        free(g_bodies[i].trail_seg_len);
-        g_bodies[i].trail_seg_len = NULL;
+        body_release(&g_bodies[i]);
     }
     free(g_bodies);
     g_bodies     = NULL;
@@ -1864,6 +1766,7 @@ void universe_field_pool_update(const double cam_m[3], double radius_m)
 
         const FieldStar *fs = &g_field_stars[fi];
         Body *bo = &g_bodies[g_field_star_begin + slot];
+        body_release(bo);
         body_defaults(bo);
         star_catalog_name(fs->source_id, bo->name, sizeof bo->name);
         if (!isnan(fs->abs_mag)) { bo->has_abs_mag = 1; bo->abs_mag = fs->abs_mag; }
@@ -1882,7 +1785,6 @@ void universe_field_pool_update(const double cam_m[3], double radius_m)
         bo->obliquity = 0.0;
         bo->rotation_rate = 2.0 * PI / (25.0 * DAY);   /* convert_gaia default */
         accretion_init_body(bo);
-        alloc_trail(bo);                               /* NULL for stars */
         bo->alive = 1;
         bo->generation++;                              /* handles stay honest */
         s_pool_rec[slot] = fi;

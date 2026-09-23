@@ -22,6 +22,7 @@
 #include "universe.h"   /* g_field_star_begin/end */
 #include "physics.h"    /* physics_active_bodies (near field stars) */
 #include <math.h>
+#include <stddef.h>    /* offsetof — Body layout guard */
 #include <strings.h>   /* strcasecmp — body_find_named */
 
 Body *g_bodies     = NULL;
@@ -290,6 +291,47 @@ int body_handle_resolve(BodyHandle h)
     return h.index;
 }
 
+const BlackHole g_bh_none;
+
+BlackHole *body_bh_mut(Body *b)
+{
+    if (!b->bh) {
+        b->bh = (BlackHole*)calloc(1, sizeof(BlackHole));
+        if (!b->bh) { fprintf(stderr, "[body] out of memory\n"); exit(1); }
+    }
+    return b->bh;
+}
+
+void body_set_agn(Body *b, float activity, float disk, float torus)
+{
+    if (!b->bh && activity == 0.0f && disk == 0.0f && torus == 0.0f) return;
+    BlackHole *h = body_bh_mut(b);
+    h->agn_activity   = activity;
+    h->accretion_disk = disk;
+    h->dust_torus     = torus;
+}
+
+void body_release(Body *b)
+{
+    free(b->trail);  b->trail = NULL;
+    free(b->bh);     b->bh = NULL;
+}
+
+Trail *trail_new(const double pos[3], const double vel[3])
+{
+    /* calloc zeroes the sample buffer and every counter; only the non-zero
+     * defaults and the Hermite anchors need setting. */
+    Trail *t = (Trail*)calloc(1, sizeof(Trail));
+    if (!t) return NULL;
+    t->fade = 1.0;
+    t->emitting = 1;
+    for (int k = 0; k < 3; k++) {
+        t->prev_pos[k] = t->frame_pos[k] = t->frame_prev_pos[k] = pos[k];
+        t->prev_vel[k] = t->frame_vel[k] = t->frame_prev_vel[k] = vel[k];
+    }
+    return t;
+}
+
 int body_root_star(int i)
 {
     int steps = 0;
@@ -370,3 +412,10 @@ void body_world_to_local_surface_dir(int body_idx, const double world_dir[3],
     out[1] /= flen;
     out[2] /= flen;
 }
+
+/* Compile-time guard for the cache-line split documented on Body: the gravity
+ * inner loop's fields fill line 0 exactly, the integrator's fill line 1. A
+ * field added above `vel` or `dyn_period` would silently push hot state onto
+ * another line, so fail the build instead. (C99: negative array size.) */
+typedef char body_hot_line0_is_64_bytes[(offsetof(Body, vel) == 64) ? 1 : -1];
+typedef char body_hot_line1_is_64_bytes[(offsetof(Body, dyn_period) == 128) ? 1 : -1];

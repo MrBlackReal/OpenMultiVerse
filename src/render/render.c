@@ -1271,7 +1271,7 @@ static void bh_scales(const Body *b, double *rs_m, double *a_star, double *isco_
               : laws_schwarzschild_radius(b->mass > 0.0 ? b->mass : 1.0);
     /* Spin magnitude comes from the evolved a* (accretion.c spins it up); fall
      * back to the raw rotation_rate only for a hole that never got seeded. */
-    double a  = fabs(b->spin_a);
+    double a  = fabs(body_bh(b)->spin_a);
     if (a == 0.0 && b->rotation_rate != 0.0) a = fabs(b->rotation_rate) * Rs / C;
     if (a > 0.998) a = 0.998;
     double z1 = 1.0 + cbrt(1.0 - a * a) * (cbrt(1.0 + a) + cbrt(1.0 - a));
@@ -3086,7 +3086,10 @@ dyn_ready:
             gal_h = s_vol_h[0];
         }
 
-        galaxy_render(vp_camrel, cam_right, cam_up, cam_fwd, g_cam.pos,
+        /* Regenerate the procedural galaxy set around the camera before anything
+     * reads galaxy_count(). No-op unless the camera has moved far enough. */
+    galaxy_proc_update(g_cam.pos);
+    galaxy_render(vp_camrel, cam_right, cam_up, cam_fwd, g_cam.pos,
                       tanf(FOV * 0.5f * (float)(PI / 180.0)), aspect,
                       gal_w, gal_h, (float)g_render_time,
                       use_halfres ? gal_depth : 0);
@@ -3841,9 +3844,9 @@ dyn_ready:
              * the beam stays visible from outside the host galaxy, without the
              * physical far horizon hiding it — yet still culls at cosmological
              * range so it never specks the distant sky. */
-            if (g_bodies[i].is_black_hole && g_bodies[i].agn_visual_scale > 1.0f) {
+            if (g_bodies[i].is_black_hole && body_bh(&g_bodies[i])->agn_visual_scale > 1.0f) {
                 double rs_au   = g_bodies[i].radius * RS;
-                double jet_len = rs_au * 58.0 * g_bodies[i].agn_visual_scale;
+                double jet_len = rs_au * 58.0 * body_bh(&g_bodies[i])->agn_visual_scale;
                 double h = 25.0 * jet_len;
                 if (h > horizon) horizon = h;
             }
@@ -3964,13 +3967,13 @@ dyn_ready:
                 double ob = g_bodies[i].obliquity * (PI / 180.0);
                 glUniform3f(s_bh_disk_n, 0.0f, (float)cos(ob), (float)sin(ob));
             }
-            glUniform1f(s_bh_activity, g_bodies[i].agn_activity);
+            glUniform1f(s_bh_activity, body_bh(&g_bodies[i])->agn_activity);
             {
-                double sp = g_bodies[i].spin_a != 0.0 ? g_bodies[i].spin_a
+                double sp = body_bh(&g_bodies[i])->spin_a != 0.0 ? body_bh(&g_bodies[i])->spin_a
                                                        : g_bodies[i].rotation_rate;
                 glUniform1f(s_bh_spin, sp < 0.0 ? -1.0f : 1.0f);
             }
-            glUniform1f(s_bh_disk, g_bodies[i].accretion_disk);
+            glUniform1f(s_bh_disk, body_bh(&g_bodies[i])->accretion_disk);
             /* Disk hotness. When the hole is actually accreting, use the real
              * Shakura-Sunyaev peak effective temperature from Ṁ:
              *   T_peak ≈ 0.488·(3·G·M·Ṁ / (8π·σ·r_in³))^¼,  r_in = ISCO,
@@ -3981,16 +3984,16 @@ dyn_ready:
             {
                 double msun = 1.989e30;
                 double hot;
-                if (g_bodies[i].mdot > 0.0) {
+                if (body_bh(&g_bodies[i])->mdot > 0.0) {
                     const double SIGMA = 5.670374e-8;   /* Stefan-Boltzmann */
                     double r_in = isco_rs * rs_m;       /* ISCO radius, metres */
-                    double T4 = 3.0 * 6.674e-11 * g_bodies[i].mass * g_bodies[i].mdot
+                    double T4 = 3.0 * 6.674e-11 * g_bodies[i].mass * body_bh(&g_bodies[i])->mdot
                                 / (8.0 * PI * SIGMA * r_in * r_in * r_in);
                     double Tpeak = 0.488 * pow(T4, 0.25);
                     /* log10(T): ~5.4 (cool AGN) → red, ~7.3 (stellar-mass) → blue. */
                     hot = (log10(Tpeak) - 5.37) / (7.30 - 5.37);
                 } else {
-                    double act = g_bodies[i].agn_activity > 0.05 ? g_bodies[i].agn_activity : 0.05;
+                    double act = body_bh(&g_bodies[i])->agn_activity > 0.05 ? body_bh(&g_bodies[i])->agn_activity : 0.05;
                     hot = 0.90 - 0.10 * log10(g_bodies[i].mass / msun) + 0.15 * log10(act);
                 }
                 hot = hot < 0.0 ? 0.0 : (hot > 1.0 ? 1.0 : hot);
@@ -4028,7 +4031,7 @@ dyn_ready:
 
         for (int bi = 0; bi < n_bh; bi++) {
             int i = s_bh_list[bi];
-            if (g_bodies[i].agn_activity <= 0.0f) continue;
+            if (body_bh(&g_bodies[i])->agn_activity <= 0.0f) continue;
 
             float rx = (float)(g_bodies[i].pos[0] * RS - g_cam.pos[0]);
             float ry = (float)(g_bodies[i].pos[1] * RS - g_cam.pos[1]);
@@ -4040,14 +4043,14 @@ dyn_ready:
             /* Blandford–Znajek: jets are powered by spin, so length and strength
              * scale with a* — a non-spinning hole barely jets even when accreting. */
             float spin  = (float)a_star;
-            float power = g_bodies[i].agn_activity * (0.15f + 0.85f * spin);
+            float power = body_bh(&g_bodies[i])->agn_activity * (0.15f + 0.85f * spin);
             if (power <= 0.0f) continue;
 
             /* Jets fire along the spin axis (= disk normal): an explicit 3-D
              * axis (a galaxy-hosted nucleus aligns to its disc axis) if set,
              * else derived from obliquity in the y-z plane. */
             float ax, ay, az;
-            const float *jaxis = g_bodies[i].agn_axis;
+            const float *jaxis = body_bh(&g_bodies[i])->agn_axis;
             float alen = sqrtf(jaxis[0]*jaxis[0] + jaxis[1]*jaxis[1] + jaxis[2]*jaxis[2]);
             if (alen > 1e-4f) {
                 ax = jaxis[0]/alen; ay = jaxis[1]/alen; az = jaxis[2]/alen;
@@ -4062,8 +4065,8 @@ dyn_ready:
             /* Artistic galaxy-scale multiplier: stretch the jet to a kpc beam for
              * hosted nuclei (1 = physical Rs). Aspect preserved (jet.frag keeps the
              * core collimated); the disk/torus stay Rs-sized. */
-            float vscale = g_bodies[i].agn_visual_scale > 0.0f
-                         ? g_bodies[i].agn_visual_scale : 1.0f;
+            float vscale = body_bh(&g_bodies[i])->agn_visual_scale > 0.0f
+                         ? body_bh(&g_bodies[i])->agn_visual_scale : 1.0f;
             glUniform3f(s_jet_center, rx, ry, rz);
             glUniform3f(s_jet_axis, ax, ay, az);
             glUniform1f(s_jet_len,   radius * (12.0f + 46.0f * spin) * vscale);
@@ -4101,7 +4104,7 @@ dyn_ready:
 
         for (int bi = 0; bi < n_bh; bi++) {
             int i = s_bh_list[bi];
-            if (g_bodies[i].dust_torus <= 0.0f) continue;
+            if (body_bh(&g_bodies[i])->dust_torus <= 0.0f) continue;
 
             float rx = (float)(g_bodies[i].pos[0] * RS - g_cam.pos[0]);
             float ry = (float)(g_bodies[i].pos[1] * RS - g_cam.pos[1]);
@@ -4112,7 +4115,7 @@ dyn_ready:
 
             /* Dust sublimation radius grows with luminosity (~accretion): a more
              * active nucleus pushes the torus outward and puffs it up. */
-            float lum   = g_bodies[i].agn_activity;
+            float lum   = body_bh(&g_bodies[i])->agn_activity;
             float rmaj  = RMAJ * (0.75f + 0.45f * lum);
             float rmin  = RMIN * (0.80f + 0.35f * lum);
 
@@ -4121,7 +4124,7 @@ dyn_ready:
              * spin sense as the disk, evaluated at the torus major radius. */
             double t_rate = 4.0 * pow(2.0e33 / (g_bodies[i].mass > 0.0 ? g_bodies[i].mass : 1.0), 0.12);
             t_rate = t_rate < 1.4 ? 1.4 : (t_rate > 9.0 ? 9.0 : t_rate);
-            double sp_t = g_bodies[i].spin_a != 0.0 ? g_bodies[i].spin_a
+            double sp_t = body_bh(&g_bodies[i])->spin_a != 0.0 ? body_bh(&g_bodies[i])->spin_a
                                                      : g_bodies[i].rotation_rate;
             float spin_sign = sp_t < 0.0 ? -1.0f : 1.0f;
             float t_omega   = spin_sign * (float)t_rate * powf(rmaj, -1.5f);
@@ -4159,7 +4162,7 @@ dyn_ready:
 
         for (int bi = 0; bi < n_bh; bi++) {
             int i = s_bh_list[bi];
-            if (g_bodies[i].agn_activity <= 0.0f) continue;
+            if (body_bh(&g_bodies[i])->agn_activity <= 0.0f) continue;
 
             float rx = (float)(g_bodies[i].pos[0] * RS - g_cam.pos[0]);
             float ry = (float)(g_bodies[i].pos[1] * RS - g_cam.pos[1]);
@@ -4174,7 +4177,7 @@ dyn_ready:
             float ax = 0.0f, ay = (float)cos(ob), az = (float)sin(ob);
             float align = fabsf((rx * ax + ry * ay + rz * az) / (dist > 1e-6f ? dist : 1.0f));
             float pole  = (float)smoothstepd(0.35, 0.92, align);
-            float inten = g_bodies[i].agn_activity * (float)a_star * pole * pole * 4.0f;
+            float inten = body_bh(&g_bodies[i])->agn_activity * (float)a_star * pole * pole * 4.0f;
             if (inten <= 0.001f) continue;
 
             glUniform3f(s_agncore_center, rx, ry, rz);

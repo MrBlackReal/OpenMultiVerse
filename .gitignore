@@ -112,3 +112,6 @@ assets/catalogs/*.fits
 
 # Local 4K master; the compressed showcase.mp4 is what ships
 showcase_4k.mp4
+
+# Scratch preview from tools/fetch_dustmap.py --preview
+dust.pgm
