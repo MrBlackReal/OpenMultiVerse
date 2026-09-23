@@ -18,6 +18,7 @@
  *     and appends the live planet position as the final vertex.
  */
 #include "trails.h"
+#include "frame.h"
 #include "profiler.h"
 #include "universe.h"   /* g_field_star_begin/end */
 #include "body.h"
@@ -55,8 +56,11 @@ static void trail_gl_alloc(int i);
 
 /* ---------------------------------------------------------------- public */
 
+static void trails_frame_shift(const double d_m[3]);   /* below */
+
 void trails_gl_init(void)
 {
+    frame_on_rebase(trails_frame_shift);
     s_shader = gl_shader_load("assets/shaders/solid.vert",
                               "assets/shaders/solid.frag");
     if (!s_shader) return;
@@ -183,6 +187,30 @@ typedef struct { int body; unsigned stamp; } TrailResident;
 static TrailResident *s_res = NULL;
 static int      s_res_n = 0, s_res_cap = 0;
 static unsigned s_res_frame = 0;
+
+/* Rebase (frame.h): a resident trail's samples, curve anchors and VBO
+ * reference all move with the frame. The VBO holds sample - ref, which the
+ * shift leaves unchanged, so nothing is re-uploaded. */
+static void trails_frame_shift(const double d_m[3])
+{
+    const double d_au[3] = { d_m[0] * RS, d_m[1] * RS, d_m[2] * RS };
+    for (int r = 0; r < s_res_n; r++) {
+        int i = s_res[r].body;
+        if (i < 0 || i >= g_nbodies || !g_bodies[i].trail) continue;
+        Trail *t = g_bodies[i].trail;
+        for (int k = 0; k < t->count; k++) {
+            int idx = (t->head - 1 - k + TRAIL_LEN) & TRAIL_MASK;
+            for (int q = 0; q < 3; q++) t->pts[idx][q] -= d_au[q];
+        }
+        for (int q = 0; q < 3; q++) {
+            t->prev_pos[q] -= d_m[q];        t->frame_pos[q] -= d_m[q];
+            t->frame_prev_pos[q] -= d_m[q];
+        }
+    }
+    for (int i = 0; i < s_n; i++)
+        for (int q = 0; q < 3; q++) s_ref_pos[i][q] -= d_au[q];
+}
+
 
 static void trail_free_body(int i)
 {

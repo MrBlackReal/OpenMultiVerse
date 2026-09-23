@@ -12,6 +12,7 @@
  *   +Z = ecliptic south-east (depth into the scene)
  */
 #include "camera.h"
+#include "frame.h"
 #include <math.h>
 
 Camera g_cam;
@@ -82,7 +83,19 @@ static float yaw_near(float from, float to) {
     return to;
 }
 
+/* A flight is interpolated between two local-frame points, which move with
+ * the frame (frame.h). */
+static void fly_frame_shift(const double d_m[3])
+{
+    for (int i = 0; i < 3; i++) {
+        s_fly_p0[i] -= d_m[i] / AU;
+        s_fly_p1[i] -= d_m[i] / AU;
+    }
+}
+
 void cam_fly_to(const double target_pos[3], float target_yaw, float target_pitch) {
+    static int registered = 0;
+    if (!registered) { frame_on_rebase(fly_frame_shift); registered = 1; }
     double dx, dy, dz, dist, horiz, turn;
     for (int i = 0; i < 3; i++) {
         s_fly_p0[i] = g_cam.pos[i];

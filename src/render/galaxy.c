@@ -11,6 +11,7 @@
  * Data: SIMBAD/NED J2000 positions, distances, major-axis sizes, inclinations.
  */
 #include "galaxy.h"
+#include "frame.h"
 #include "render.h"
 #include "cinematic.h"
 #include "starsys.h"     /* suppressed cells: promoted stars are real bodies */
@@ -1265,9 +1266,10 @@ void galaxy_spawn_agn(void)
         spec.name   = nm;
         spec.mass   = mass_kg;
         spec.radius = laws_schwarzschild_radius(mass_kg);
-        spec.pos[0] = pos_au[0] * AU;   /* AU → metres: Body state is SI */
-        spec.pos[1] = pos_au[1] * AU;
-        spec.pos[2] = pos_au[2] * AU;
+        {   /* galaxy positions are Sun frame; bodies live in the local one */
+            double sun_m[3] = { pos_au[0] * AU, pos_au[1] * AU, pos_au[2] * AU };
+            frame_sun_to_local_m(sun_m, spec.pos);
+        }
         spec.is_star = 1;               /* a hole is always a system root */
         spec.parent  = -1;
         spec.obliquity = 35.0;          /* tilt so both jet lobes frame nicely */

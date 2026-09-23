@@ -46,6 +46,7 @@
  */
 #include "universe.h"
 #include "dust_field.h"
+#include "frame.h"
 #include "cosmic_field.h"
 #include "body.h"
 #include "physics.h"
@@ -1134,6 +1135,9 @@ static void load_body_catalog(const char *path)
 void universe_load(const char *path)
 {
     int i, s;
+    /* Loaders place bodies in the Sun frame: start the new universe with the
+     * floating origin back at the Sun (frame.h). */
+    g_frame_origin_au[0] = g_frame_origin_au[1] = g_frame_origin_au[2] = 0.0;
     fprintf(stdout, "[Boot] Loading universe data from %s\n", path);
     fflush(stdout);
     snprintf(s_loaded_path, sizeof(s_loaded_path), "%s", path ? path : "");
@@ -1830,9 +1834,11 @@ void universe_field_pool_update(const double cam_m[3], double radius_m)
         }
         bo->mass   = fs->mass_kg;
         bo->radius = (double)fs->radius_km * 1000.0;
-        bo->pos[0] = (double)fs->pos_ly[0] * LY;
-        bo->pos[1] = (double)fs->pos_ly[1] * LY;
-        bo->pos[2] = (double)fs->pos_ly[2] * LY;
+        {   /* the store is Sun frame; the body joins the local frame */
+            double sun_m[3] = { (double)fs->pos_ly[0] * LY, (double)fs->pos_ly[1] * LY,
+                                (double)fs->pos_ly[2] * LY };
+            frame_sun_to_local_m(sun_m, bo->pos);
+        }
         bo->vel[0] = (double)fs->vel_kms[0] * 1000.0;
         bo->vel[1] = (double)fs->vel_kms[1] * 1000.0;
         bo->vel[2] = (double)fs->vel_kms[2] * 1000.0;

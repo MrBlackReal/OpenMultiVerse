@@ -31,6 +31,7 @@
 #include "profiler.h"
 #include "body.h"
 #include "universe.h"   /* g_field_star_begin/end */
+#include "frame.h"
 #include "physics.h"    /* physics_active_bodies (near field stars) */
 #include "camera.h"
 #include "nebula.h"
@@ -285,8 +286,22 @@ static void radiance_field_grid_build(void)
 
 /* ── public API ───────────────────────────────────────────────────────────── */
 
+/* Rebase (frame.h). Body-less emitters (supernovae, nebulae, galaxies) hold
+ * local-frame positions between rebuilds; body emitters are read live. The
+ * star grid is keyed by position, so it is rebuilt: left stale, a query in
+ * the new frame finds no star cells and the nearest star stops lighting
+ * anything -- the veil, the glare and the lens flare all vanished. */
+static void radiance_frame_shift(const double d_m[3])
+{
+    for (int i = 0; i < s_count; i++)
+        if (s_em[i].body < 0)
+            for (int q = 0; q < 3; q++) s_em[i].pos[q] -= d_m[q];
+    radiance_field_grid_build();
+}
+
 void radiance_field_init(void)
 {
+    frame_on_rebase(radiance_frame_shift);
     s_em = NULL; s_count = 0; s_cap = 0;
     s_body_lum = NULL; s_body_lum_cap = 0;
     s_since_rebuild = 0.0;
@@ -489,9 +504,10 @@ void radiance_field_rebuild(void)
             Emitter *e = emitters_push();
             e->body   = -1;
             e->lum    = NEB_L_REF * (r_m / NEB_R_REF_M) * (r_m / NEB_R_REF_M);
-            e->pos[0] = pos_au[0] * AU;
-            e->pos[1] = pos_au[1] * AU;
-            e->pos[2] = pos_au[2] * AU;
+            {   /* nebulae/galaxies are Sun frame; emitters are local */
+                double sun_m[3] = { pos_au[0] * AU, pos_au[1] * AU, pos_au[2] * AU };
+                frame_sun_to_local_m(sun_m, e->pos);
+            }
             e->rmin2  = r_m * r_m;
             nebula_color(i, e->col);
             float m = e->col[0] > e->col[1] ? e->col[0] : e->col[1];
@@ -518,9 +534,10 @@ void radiance_field_rebuild(void)
             Emitter *e = emitters_push();
             e->body   = -1;
             e->lum    = GAL_L_REF * (r_m / GAL_R_REF_M) * (r_m / GAL_R_REF_M);
-            e->pos[0] = pos_au[0] * AU;
-            e->pos[1] = pos_au[1] * AU;
-            e->pos[2] = pos_au[2] * AU;
+            {   /* nebulae/galaxies are Sun frame; emitters are local */
+                double sun_m[3] = { pos_au[0] * AU, pos_au[1] * AU, pos_au[2] * AU };
+                frame_sun_to_local_m(sun_m, e->pos);
+            }
             e->rmin2  = r_m * r_m;
             galaxy_color(i, e->col);
             float m = e->col[0] > e->col[1] ? e->col[0] : e->col[1];

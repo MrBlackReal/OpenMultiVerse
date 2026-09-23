@@ -2,6 +2,7 @@
  * cinema_cam.c — keyframed camera shots (see cinema_cam.h, docs/CINEMATIC.md §9).
  */
 #include "cinema_cam.h"
+#include "frame.h"
 #include "cinematic.h"
 #include "camera.h"
 #include "body.h"
@@ -108,7 +109,9 @@ static void key_position(const CineKey *k, double out[3])
         /* Anchor gone (absorbed, or a typo): fall through to the raw offset
          * rather than snapping the camera to the origin mid-shot. */
     }
-    out[0] = k->pos[0]; out[1] = k->pos[1]; out[2] = k->pos[2];
+    /* An absolute key is a Sun-frame position (frame.h), so a shot means the
+     * same place whatever the floating origin is doing. */
+    for (int q = 0; q < 3; q++) out[q] = k->pos[q] - g_frame_origin_au[q];
 }
 
 static void dir_from_yaw_pitch(float yaw, float pitch, double out[3])
@@ -630,9 +633,7 @@ int cinema_shot_add_key_here(double dt_after)
     CineKey *k = &s_keys[s_nkeys];
     memset(k, 0, sizeof *k);
     k->t        = s_nkeys == 0 ? 0.0 : s_keys[s_nkeys - 1].t + dt_after;
-    k->pos[0]   = g_cam.pos[0];
-    k->pos[1]   = g_cam.pos[1];
-    k->pos[2]   = g_cam.pos[2];
+    frame_cam_sun(k->pos);              /* absolute keys are Sun frame */
     k->yaw      = g_cam.yaw;
     k->pitch    = g_cam.pitch;
     k->fov      = g_settings.fov;

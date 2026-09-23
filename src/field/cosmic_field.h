@@ -53,7 +53,9 @@ void cosmic_field_rebuild(void);
  * throttle; cheap otherwise. */
 void cosmic_field_tick(double dt);
 
-/* Core query.  pos_m = world position (SI metres); radius_m = sample radius (m).
+/* Core query.  pos_m = SUN-FRAME position (SI metres; frame.h -- the field
+ * works in the Sun frame so catalogs and a rebase never disagree);
+ * radius_m = sample radius (m).
  * Zeroes *out first, then fills it.  Returns 1 if the field had anything to
  * sample, 0 if the field is empty/unbuilt or radius <= 0. */
 int  cosmic_field_sample(const double pos_m[3], double radius_m, CosmicSample *out);
@@ -74,7 +76,7 @@ const char *cosmic_field_class_name(CosmicClass c);
  * Extracted once per universe load (field stars never move), cached; zero
  * recurring per-frame cost — the consumer only projects the cached list. */
 typedef struct {
-    double pos_m[3];   /* member centroid, SI metres                          */
+    double pos_m[3];   /* member centroid, SI metres, Sun frame               */
     double radius_m;   /* RMS spatial extent of members, metres               */
     int    count;      /* member star count                                   */
     float  color[3];   /* mean member display colour                          */
@@ -84,7 +86,7 @@ typedef struct {
  * internal array valid until the next universe (re)load.  Main-thread only. */
 int cosmic_field_clusters(const CosmicCluster **out);
 
-/* Field-store record indices within `radius_m` of `centre_m` (frozen cell
+/* Field-store record indices within `radius_m` of `centre_m` (Sun frame; frozen cell
  * partition). The bulk catalog lives in g_field_stars, not g_bodies, so this
  * replaces scanning the old field body range. Returns the count written. */
 int cosmic_field_stars_near(const double centre_m[3], double radius_m,

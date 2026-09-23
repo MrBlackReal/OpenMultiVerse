@@ -11,6 +11,7 @@
  * keep magnitudes small and precise (radius ~ few ly, not ~1e16 m).
  */
 #include "cosmic_field.h"
+#include "frame.h"
 #include "body.h"
 #include "camera.h"
 #include "nebula.h"
@@ -186,9 +187,9 @@ static inline void entry_pos(int i, int from_field, double out[3])
         out[1] = (double)fs->pos_ly[1] * LY;
         out[2] = (double)fs->pos_ly[2] * LY;
     } else {
-        out[0] = g_bodies[i].pos[0];
-        out[1] = g_bodies[i].pos[1];
-        out[2] = g_bodies[i].pos[2];
+        /* The field works in the Sun frame (frame.h): catalogs live there,
+         * and a partition keyed in it survives a rebase. */
+        frame_local_to_sun_m(g_bodies[i].pos, out);
     }
 }
 
@@ -457,9 +458,11 @@ static inline void accum_body(int b, const double centre_m[3], double r2_ly,
                               double sum[3], double *sumsq)
 {
     if (!g_bodies[b].alive) return;   /* stable indices: slot may now be dead  */
-    double rx = (g_bodies[b].pos[0] - centre_m[0]) / LY;
-    double ry = (g_bodies[b].pos[1] - centre_m[1]) / LY;
-    double rz = (g_bodies[b].pos[2] - centre_m[2]) / LY;
+    double p[3];
+    frame_local_to_sun_m(g_bodies[b].pos, p);  /* centre_m is Sun frame */
+    double rx = (p[0] - centre_m[0]) / LY;
+    double ry = (p[1] - centre_m[1]) / LY;
+    double rz = (p[2] - centre_m[2]) / LY;
     double d2 = rx*rx + ry*ry + rz*rz;
     if (d2 > r2_ly) return;
     *N += 1.0;
@@ -607,7 +610,9 @@ int cosmic_field_sample(const double pos_m[3], double radius_m, CosmicSample *ou
 
 int cosmic_field_sample_camera(CosmicSample *out)
 {
-    double pos_m[3] = { g_cam.pos[0] * AU, g_cam.pos[1] * AU, g_cam.pos[2] * AU };
+    double cam[3];
+    frame_cam_sun(cam);
+    double pos_m[3] = { cam[0] * AU, cam[1] * AU, cam[2] * AU };
     return cosmic_field_sample(pos_m, COSMIC_HUD_RADIUS_LY * LY, out);
 }
 

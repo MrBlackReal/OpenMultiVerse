@@ -9,6 +9,7 @@
 #include "menu.h"
 #include "profiler.h"
 #include "gpu_timer.h"
+#include "frame.h"
 #include "presets.h"
 #include "laws.h"
 #include "settings.h"
@@ -248,10 +249,12 @@ static void teleport_to_nebula(int i)
     double dl = sqrt(dx*dx + dy*dy + dz*dz);
     dx /= dl; dy /= dl; dz /= dl;
 
+    /* Nebula and galaxy positions are Sun frame; the camera flies in the
+     * local one (frame.h). */
     double target[3] = {
-        pos[0] - dx * view_dist,
-        pos[1] - dy * view_dist,
-        pos[2] - dz * view_dist,
+        pos[0] - dx * view_dist - g_frame_origin_au[0],
+        pos[1] - dy * view_dist - g_frame_origin_au[1],
+        pos[2] - dz * view_dist - g_frame_origin_au[2],
     };
     float yaw   = (float)(atan2(dz, dx) * 180.0 / PI);
     float pitch = (float)(asin(dy) * 180.0 / PI);
@@ -270,10 +273,12 @@ static void teleport_to_galaxy(int i)
     double dl = sqrt(dx*dx + dy*dy + dz*dz);
     dx /= dl; dy /= dl; dz /= dl;
 
+    /* Nebula and galaxy positions are Sun frame; the camera flies in the
+     * local one (frame.h). */
     double target[3] = {
-        pos[0] - dx * view_dist,
-        pos[1] - dy * view_dist,
-        pos[2] - dz * view_dist,
+        pos[0] - dx * view_dist - g_frame_origin_au[0],
+        pos[1] - dy * view_dist - g_frame_origin_au[1],
+        pos[2] - dz * view_dist - g_frame_origin_au[2],
     };
     float yaw   = (float)(atan2(dz, dx) * 180.0 / PI);
     float pitch = (float)(asin(dy) * 180.0 / PI);
@@ -1217,9 +1222,7 @@ static void menu_render_settings(void)
                     if (igButton("Re-pin here", (ImVec2_c){ 120.0f, 0.0f })) {
                         /* Overwrite this key's pose with the live camera —
                          * the usual way to nudge a framing you did not like. */
-                        k->pos[0] = g_cam.pos[0];
-                        k->pos[1] = g_cam.pos[1];
-                        k->pos[2] = g_cam.pos[2];
+                        frame_cam_sun(k->pos);   /* absolute keys: Sun frame */
                         k->yaw    = g_cam.yaw;
                         k->pitch  = g_cam.pitch;
                         k->anchor[0] = 0;

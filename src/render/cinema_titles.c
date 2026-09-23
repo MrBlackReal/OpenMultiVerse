@@ -2,6 +2,7 @@
  * cinema_titles.c — --cinematic-info overlay (see cinema_titles.h, §11.1).
  */
 #include "cinema_titles.h"
+#include "frame.h"
 #include "cinema_cam.h"
 #include "cinema_tour.h"
 #include "cinematic.h"
@@ -153,7 +154,9 @@ static int subject_pos(const CineSubject *s, double out[3])
         return 1;
     }
     if (s->body >= 0) return 0;          /* was a body, now gone */
-    out[0] = s->pos_au[0]; out[1] = s->pos_au[1]; out[2] = s->pos_au[2];
+    /* Static subjects (galaxies, nebulae, events) are Sun frame; this
+     * returns the local frame the camera lives in (frame.h). */
+    for (int k = 0; k < 3; k++) out[k] = s->pos_au[k] - g_frame_origin_au[k];
     return 1;
 }
 

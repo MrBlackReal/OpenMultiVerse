@@ -2,6 +2,7 @@
  * cinema_tour.c — procedural tour + auto-director (see cinema_tour.h).
  */
 #include "cinema_tour.h"
+#include "frame.h"
 #include "cinema_cam.h"
 #include "cinematic.h"
 #include "body.h"
@@ -261,9 +262,13 @@ static void add_body_subject(int i, double score, SubCat cat)
         s->axis[1] = body_bh(b)->agn_axis[1];
         s->axis[2] = body_bh(b)->agn_axis[2];
     }
-    s->pos[0] = g_bodies[i].pos[0] * RS;
-    s->pos[1] = g_bodies[i].pos[1] * RS;
-    s->pos[2] = g_bodies[i].pos[2] * RS;
+    /* Tour subjects and the keys built from them are Sun frame (frame.h),
+     * like galaxies and nebulae, so the tour survives a rebase. */
+    double sun_m[3];
+    frame_local_to_sun_m(g_bodies[i].pos, sun_m);
+    s->pos[0] = sun_m[0] * RS;
+    s->pos[1] = sun_m[1] * RS;
+    s->pos[2] = sun_m[2] * RS;
 }
 
 static void add_static_subject(const char *name, const double pos[3],
@@ -754,9 +759,13 @@ static void build_cutaway(const FieldGraphEvent *e, CineKey *out)
     memset(&sub, 0, sizeof sub);
     sub.kind = SUB_STATIC;
     snprintf(sub.name, sizeof sub.name, "%s", e->a_name);
-    sub.pos[0] = e->pos[0] * RS;
-    sub.pos[1] = e->pos[1] * RS;
-    sub.pos[2] = e->pos[2] * RS;
+    {   /* event positions are local; tour subjects are Sun frame */
+        double sun_m[3];
+        frame_local_to_sun_m(e->pos, sun_m);
+        sub.pos[0] = sun_m[0] * RS;
+        sub.pos[1] = sun_m[1] * RS;
+        sub.pos[2] = sun_m[2] * RS;
+    }
     sub.radius_au = (e->type == FG_EVENT_SUPERNOVA) ? 3.0 : 0.6;
 
     /* If a participant is still alive, prefer anchoring to it: the event site
@@ -845,9 +854,13 @@ static void director_poll(void)
     snprintf(s_cut_sub.kind, sizeof s_cut_sub.kind, "%s", field_graph_event_name(best->type));
     if (s_cut_sub.kind[0] >= 'a' && s_cut_sub.kind[0] <= 'z') s_cut_sub.kind[0] -= 32;
     s_cut_sub.body = -1;
-    s_cut_sub.pos_au[0] = best->pos[0] * RS;
-    s_cut_sub.pos_au[1] = best->pos[1] * RS;
-    s_cut_sub.pos_au[2] = best->pos[2] * RS;
+    {   /* subjects' pos_au is Sun frame */
+        double sun_m[3];
+        frame_local_to_sun_m(best->pos, sun_m);
+        s_cut_sub.pos_au[0] = sun_m[0] * RS;
+        s_cut_sub.pos_au[1] = sun_m[1] * RS;
+        s_cut_sub.pos_au[2] = sun_m[2] * RS;
+    }
 
     s_tour_nkeys      = cinema_shot_get(s_tour_keys);   /* stash the spine */
     s_last_event_time = best->sim_time_s;

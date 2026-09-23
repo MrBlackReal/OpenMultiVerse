@@ -61,6 +61,7 @@
 #include "profiler.h"
 #include "gpu_timer.h"
 #include "dust_field.h"
+#include "frame.h"
 
 /* Active-system count, captured for profiler spike context only. */
 static int s_prof_active_systems = 0;
@@ -299,6 +300,15 @@ static void move_pause_menu_selection(int delta) {
  * are done. It must be called once, not once per system, to keep g_sim_time
  * consistent with all bodies' state.
  */
+/* Previous-frame camera for the relativistic-shift speed estimate: a local
+ * position kept across frames, so it moves with the frame (frame.h) -- or a
+ * rebase would read as an 8 AU jump in one frame. */
+static double rel_prev[3];
+static void rel_prev_frame_shift(const double d_m[3])
+{
+    for (int k = 0; k < 3; k++) rel_prev[k] -= d_m[k] / AU;
+}
+
 /* Camera position in world metres (g_cam.pos is in AU). */
 static void camera_world_m(double out[3]) {
     out[0] = g_cam.pos[0] * AU;
@@ -1079,12 +1089,14 @@ static void camera_move(float dt) {
          * down (their stars aren't bodies): distance to the volume's edge,
          * floored inside so intra-galaxy travel stays brisk (~2% of the
          * radius ≈ 1 kly for the Milky Way → ~150 ly/s). */
+        double cam_sun[3];
+        frame_cam_sun(cam_sun);                    /* galaxies are Sun frame */
         for (int i = 0; i < galaxy_count(); i++) {
             double gp[3], gr = galaxy_radius_au(i);
             galaxy_position(i, gp);
-            double dx = gp[0] - g_cam.pos[0];
-            double dy = gp[1] - g_cam.pos[1];
-            double dz = gp[2] - g_cam.pos[2];
+            double dx = gp[0] - cam_sun[0];
+            double dy = gp[1] - cam_sun[1];
+            double dz = gp[2] - cam_sun[2];
             double d  = sqrt(dx*dx + dy*dy + dz*dz) - 0.85 * gr;
             if (d < 0.02 * gr) d = 0.02 * gr;
             if (best_au < 0.0 || d < best_au) best_au = d;
@@ -1536,7 +1548,10 @@ static void print_usage(const char *prog)
 "\n"
 "Benchmark / tools:\n"
 "  --profile               Per-stage frame profiler; prints a report on exit.\n"
+"  --selftest-frame        Floating-origin precision test at M87 distance; exit.\n"
 "  --selftest-starsys      Run the procedural-system delta round-trip test; exit.\n"
+"  --frame-offset X,Y,Z    Displace the floating origin by X,Y,Z AU (test: the\n"
+"                          picture must not change beyond rounding).\n"
 "  --profile-gpu           --profile plus per-pass GPU times (timer queries).\n"
 "                          Serialises CPU and GPU, so fps under it is not real.\n"
 "  --benchmark             Scripted galaxy flythrough; prints an FPS report.\n"
@@ -1582,6 +1597,9 @@ int main(int argc, char **argv) {
     const char *cli_shot_script = NULL;
     const char *cli_shot_save   = NULL;
     int         cli_selftest_starsys = 0;
+    int         cli_selftest_frame = 0;
+    int         cli_frame_offset_set = 0;
+    double      cli_frame_offset[3] = { 0.0, 0.0, 0.0 };
     int         cli_tour_only = 0, cli_director_only = 0;
     int         cine_dur_set = 0;   /* --duration given explicitly? */
 
@@ -1670,6 +1688,14 @@ int main(int argc, char **argv) {
         /* Load --shot-script, write it back out canonicalised, and exit: a
          * validator for hand-written shots, and what makes the format's
          * round-trip testable without the GUI. */
+        else if (!strcmp(argv[a], "--frame-offset") && a + 1 < argc) {
+            cli_frame_offset_set = sscanf(argv[++a], "%lf,%lf,%lf", &cli_frame_offset[0],
+                                          &cli_frame_offset[1], &cli_frame_offset[2]) == 3;
+        }
+        else if (!strcmp(argv[a], "--selftest-frame")) {
+            cli_selftest_frame = 1;
+            headless = 1;
+        }
         else if (!strcmp(argv[a], "--selftest-starsys")) {
             cli_selftest_starsys = 1;
             headless = 1;
@@ -1845,11 +1871,24 @@ int main(int argc, char **argv) {
 
     /* Headless camera override (after the world load, which resets the camera). */
     if (cam_set) {
-        g_cam.pos[0] = cam_pos[0];
-        g_cam.pos[1] = cam_pos[1];
-        g_cam.pos[2] = cam_pos[2];
+        /* --cam is a Sun-frame position: place it through the floating
+         * origin, which rebases onto it (frame.h). */
+        frame_place_camera_sun(cam_pos);
         g_cam.yaw    = cam_yaw;
         g_cam.pitch  = cam_pitch;
+    }
+    /* --frame-offset: displace the local origin by that many AU (Sun frame)
+     * before the first frame. Nothing on screen may change beyond rounding:
+     * a subsystem that mixes local and Sun-frame positions shows up as
+     * something out of place. */
+    frame_on_rebase(rel_prev_frame_shift);
+    if (cli_frame_offset_set) frame_rebase(cli_frame_offset);
+
+    /* --selftest-frame: floating-origin precision far from home; exits. */
+    if (cli_selftest_frame) {
+        int ok = frame_selftest();
+        app_quit();
+        return ok ? 0 : 1;
     }
 
     /* --selftest-starsys: the procedural-system delta round trip; exits. */
@@ -2126,10 +2165,17 @@ int main(int argc, char **argv) {
         /* Star→system promotion (§0.1 final step): make the nearest
          * procedural galaxy stars real bodies before physics runs, so a
          * freshly promoted system integrates this same frame. */
+        /* Keep the local frame centred on the camera (frame.h): after the
+         * camera moved, before anything simulates or draws. */
+        frame_rebase_if_needed();
         profiler_stage_end(PROFILER_STAGE_INPUT);
 
         profiler_stage_begin(PROFILER_STAGE_STARSYS);
-        starsys_tick(g_cam.pos, (float)g_render_time);
+        {
+            double cam_sun[3];
+            frame_cam_sun(cam_sun);
+            starsys_tick(cam_sun, (float)g_render_time);
+        }
         profiler_stage_end(PROFILER_STAGE_STARSYS);
 
         /* A playing shot owns the timescale, so evaluate it before the sim
@@ -2236,7 +2282,6 @@ int main(int argc, char **argv) {
          * stylistic ramp across the warp range, not a literal v/c. Effect shows
          * only when actually moving fast; 0 below ~200 AU/s. */
         {
-            static double rel_prev[3];
             static int    rel_have = 0;
             static float  rel_beta = 0.0f;   /* time-eased, not instantaneous   */
             static float  rel_cx   = 0.5f;   /* heading point in UV (eased)      */

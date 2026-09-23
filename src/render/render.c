@@ -58,6 +58,7 @@
 #include "render.h"
 #include "profiler.h"
 #include "gpu_timer.h"
+#include "frame.h"
 #include "body.h"
 #include "camera.h"
 #include "cosmic_field.h"
@@ -746,9 +747,12 @@ static void field_stars_draw(const float vp_camrel[16])
         /* Camera relative to the same field reference: rel = a_pos - u_cam is
          * then evaluated on small offsets, free of the float32 cancellation that
          * subtracting two ~1e10 AU absolutes would suffer. */
-        glUniform3f(s_field_cam, (float)(g_cam.pos[0] - s_field_ref[0]),
-                    (float)(g_cam.pos[1] - s_field_ref[1]),
-                    (float)(g_cam.pos[2] - s_field_ref[2]));
+        /* The field store is Sun-frame data, so the camera is too (frame.h). */
+        double cam_sun[3];
+        frame_cam_sun(cam_sun);
+        glUniform3f(s_field_cam, (float)(cam_sun[0] - s_field_ref[0]),
+                    (float)(cam_sun[1] - s_field_ref[1]),
+                    (float)(cam_sun[2] - s_field_ref[2]));
         glUniform1f(s_field_near,    near_dist);
         glUniform1f(s_field_horizon, (float)g_settings.farfield_horizon_au);
         glUniform1f(s_field_time,    (float)g_render_time);
@@ -769,8 +773,8 @@ static void field_stars_draw(const float vp_camrel[16])
         const double AU_PER_PC = 206264.806;
         const double m_cut = STAR_FADE_MAG0 - 2.5 * log10(STAR_FADE_FLOOR);
         const double horizon = g_settings.farfield_horizon_au;
-        double cam[3] = { g_cam.pos[0] - s_field_ref[0], g_cam.pos[1] - s_field_ref[1],
-                          g_cam.pos[2] - s_field_ref[2] };
+        double cam[3] = { cam_sun[0] - s_field_ref[0], cam_sun[1] - s_field_ref[1],
+                          cam_sun[2] - s_field_ref[2] };
         int submitted = 0, ranges = 0;
         for (int b = 0; b < s_field_brick_n; b++) {
             const FieldBrick *fb = &s_field_brick[b];
@@ -821,7 +825,10 @@ static void clusters_render(const float vp_camrel[16])
         s_cluster_data = t; s_cluster_data_cap = c;
     }
 
-    const double cx = g_cam.pos[0], cy = g_cam.pos[1], cz = g_cam.pos[2];
+    /* Clusters are built from the field store: Sun frame (frame.h). */
+    double cam_sun[3];
+    frame_cam_sun(cam_sun);
+    const double cx = cam_sun[0], cy = cam_sun[1], cz = cam_sun[2];
     const float intensity = (float)g_settings.cluster_impostors;
     int count = 0;
 
@@ -884,8 +891,8 @@ static void clusters_render(const float vp_camrel[16])
     glUniform1f(s_cluster_twinkle, 0.0f);   /* no twinkle on aggregate glows */
     render_star_veil_uniforms(s_cluster_shader);  /* star_dot.vert veils */
     /* Cluster glows sum catalog magnitudes, which contain the Sun's column. */
-    render_dust_uniforms(s_cluster_shader, (float)-g_cam.pos[0],
-                         (float)-g_cam.pos[1], (float)-g_cam.pos[2]);
+    render_dust_uniforms(s_cluster_shader, (float)-cam_sun[0],
+                         (float)-cam_sun[1], (float)-cam_sun[2]);
     glUniform1f(glGetUniformLocation(s_cluster_shader, "u_dust_extend"), 0.0f);
     glUniform1f(glGetUniformLocation(s_cluster_shader, "u_dust_sun_corr"), 1.0f);
     glBindVertexArray(s_cluster_vao);
@@ -1011,7 +1018,9 @@ static void env_capture(float sf_fade)
         starfield_render(view_rot, proj, sf_fade);
         glDepthMask(GL_TRUE);
         glEnable(GL_DEPTH_TEST);
-        galaxy_render(vp, right, up, fwd, g_cam.pos, 1.0f, 1.0f,
+        double cam_sun[3];
+        frame_cam_sun(cam_sun);                /* galaxies/nebulae: Sun frame */
+        galaxy_render(vp, right, up, fwd, cam_sun, 1.0f, 1.0f,
                       ENV_SIZE, ENV_SIZE, (float)g_render_time, 0);
         galaxy_render_impostors(vp, (float)g_render_time, 1.0f);
         /* The galaxy's resolved stars: far from the Sun (e.g. at Sgr A*) they
@@ -1019,8 +1028,8 @@ static void env_capture(float sf_fade)
         /* Gain is no longer the skybox crossfade: the selection function in
          * galaxy_stars.vert decides per star whether the catalog already
          * covers it, so there is no radius to fade across. */
-        galaxy_render_stars(vp, g_cam.pos, 1.0f, (float)g_render_time);
-        nebula_render(vp, right, up, fwd, g_cam.pos, 1.0f, 1.0f, ENV_SIZE, ENV_SIZE);
+        galaxy_render_stars(vp, cam_sun, 1.0f, (float)g_render_time);
+        nebula_render(vp, right, up, fwd, cam_sun, 1.0f, 1.0f, ENV_SIZE, ENV_SIZE);
         field_stars_draw(vp);
         clusters_render(vp);
     }
@@ -2641,9 +2650,9 @@ void render_frame(const float view[16], const float proj[16],
      * where the Milky Way volume takes over as the unresolved-star glow. */
     float sf_fade = 1.0f;   /* also feeds the procedural-star crossfade */
     {
-        double cd_au = sqrt(g_cam.pos[0]*g_cam.pos[0] +
-                            g_cam.pos[1]*g_cam.pos[1] +
-                            g_cam.pos[2]*g_cam.pos[2]);
+        double cs[3];
+        frame_cam_sun(cs);                     /* distance from the Sun */
+        double cd_au = sqrt(cs[0]*cs[0] + cs[1]*cs[1] + cs[2]*cs[2]);
         if (cd_au > 3.0e6) {
             float t = (float)((log10(cd_au) - 6.477) / 2.0);  /* 3e6→3e8 AU */
             if (t < 0.0f) t = 0.0f;
@@ -2757,7 +2766,9 @@ void render_frame(const float view[16], const float proj[16],
          * NEAR_DOT_DIST into the reserved pool slots, then feed whichever of
          * those are live into the dynamic set. The query runs against the
          * frozen cell partition, so this is not a full scan. */
-        double cam_m[3] = { g_cam.pos[0] * AU, g_cam.pos[1] * AU, g_cam.pos[2] * AU };
+        double cs[3];
+        frame_cam_sun(cs);                     /* the store is Sun frame */
+        double cam_m[3] = { cs[0] * AU, cs[1] * AU, cs[2] * AU };
         double near_r_m = (double)g_settings.near_dot_dist_ly * LY;
         universe_field_pool_update(cam_m, near_r_m);
         for (int b = g_field_star_begin; b < g_field_star_end; b++)
@@ -3334,8 +3345,10 @@ dyn_ready:
 
         /* Regenerate the procedural galaxy set around the camera before anything
      * reads galaxy_count(). No-op unless the camera has moved far enough. */
-    galaxy_proc_update(g_cam.pos);
-    galaxy_render(vp_camrel, cam_right, cam_up, cam_fwd, g_cam.pos,
+    double gal_cam[3];
+    frame_cam_sun(gal_cam);                    /* galaxies are Sun frame */
+    galaxy_proc_update(gal_cam);
+    galaxy_render(vp_camrel, cam_right, cam_up, cam_fwd, gal_cam,
                       tanf(FOV * 0.5f * (float)(PI / 180.0)), aspect,
                       gal_w, gal_h, (float)g_render_time,
                       use_halfres ? gal_depth : 0);
@@ -3372,7 +3385,9 @@ dyn_ready:
      * following the same density model as the glow above, crossfaded in as
      * the painted neighbourhood skybox fades out. Always full-res (cheap
      * points, correct depth test against opaque geometry). */
-    galaxy_render_stars(vp_camrel, g_cam.pos, 1.0f,
+    double stars_cam[3];
+    frame_cam_sun(stars_cam);                  /* Sun frame, like galaxies */
+    galaxy_render_stars(vp_camrel, stars_cam, 1.0f,
                         (float)g_render_time);
 
     if (zt_name) profiler_zone_add(zt_name, profiler_now_ms() - zt0);
@@ -3380,7 +3395,7 @@ dyn_ready:
     /* ------------------------------------------------------------------ 2.7. Nebulae (volumetric) */
     /* Real-position volumetric clouds; depth-tested against opaque geometry so
      * planets/stars occlude or embed correctly. Drawn camera-relative. */
-    nebula_render(vp_camrel, cam_right, cam_up, cam_fwd, g_cam.pos,
+    nebula_render(vp_camrel, cam_right, cam_up, cam_fwd, stars_cam,
                   tanf(FOV * 0.5f * (float)(PI / 180.0)), aspect,
                   WIN_W, WIN_H);
 
@@ -3912,8 +3927,10 @@ dyn_ready:
         glUniformMatrix4fv(s_dot_vp, 1, GL_FALSE, vp_camrel);
         /* Body magnitudes are intrinsic (radius estimate, or a catalog one
          * made intrinsic at materialisation), so no Sun correction. */
-        render_dust_uniforms(s_dot_shader, (float)-g_cam.pos[0],
-                             (float)-g_cam.pos[1], (float)-g_cam.pos[2]);
+        double dsun[3];
+        frame_cam_sun(dsun);                   /* the dust cube is Sun-centred */
+        render_dust_uniforms(s_dot_shader, (float)-dsun[0],
+                             (float)-dsun[1], (float)-dsun[2]);
         glUniform1f(glGetUniformLocation(s_dot_shader, "u_dust_extend"), 0.0f);
         glUniform1f(glGetUniformLocation(s_dot_shader, "u_dust_sun_corr"), 0.0f);
         glUniform1f(s_dot_time,    (float)g_render_time);
@@ -4154,14 +4171,17 @@ dyn_ready:
             static double   env_pos[3];
             static double   env_veil  = 0.0;
             static unsigned env_gen   = 0;
-            double mx = g_cam.pos[0] - env_pos[0], my = g_cam.pos[1] - env_pos[1],
-                   mz = g_cam.pos[2] - env_pos[2];
+            /* Sun frame, so a rebase is not mistaken for camera travel. */
+            double ecam[3];
+            frame_cam_sun(ecam);
+            double mx = ecam[0] - env_pos[0], my = ecam[1] - env_pos[1],
+                   mz = ecam[2] - env_pos[2];
             double dv = fabs(s_veil_f - env_veil);
             if (!env_valid || mx*mx + my*my + mz*mz > 1.0 ||
                 dv > 0.10 * fmax(env_veil, 0.02) || env_gen != (unsigned)g_universe_generation) {
                 env_capture(sf_fade);
                 env_valid = 1;
-                env_pos[0] = g_cam.pos[0]; env_pos[1] = g_cam.pos[1]; env_pos[2] = g_cam.pos[2];
+                env_pos[0] = ecam[0]; env_pos[1] = ecam[1]; env_pos[2] = ecam[2];
                 env_veil = s_veil_f;
                 env_gen  = (unsigned)g_universe_generation;
             }

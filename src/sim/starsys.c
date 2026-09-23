@@ -20,6 +20,7 @@
 #include "trails.h"
 #include "labels.h"
 #include "collision.h"
+#include "frame.h"
 #include "common.h"
 #include <math.h>
 #include <stdio.h>
@@ -68,7 +69,7 @@ typedef struct {
     int    parent;               /* snapshot index; -1 for the star         */
     int    is_star, is_black_hole, is_comet;
     double mass, radius;
-    double pos[3], vel[3];       /* star: absolute; others: rel. to parent  */
+    double pos[3], vel[3];       /* star: Sun frame; others: rel. to parent */
     float  col[3];
     double obliquity, rotation_rate, rotation_angle;
     float  atm_color[3], atm_intensity, atm_scale;
@@ -233,9 +234,10 @@ static void delta_save(const Promoted *p, int star, const int *mem, int n)
         e->is_star = b->is_star;  e->is_black_hole = b->is_black_hole;
         e->is_comet = b->is_comet;
         e->mass = b->mass;  e->radius = b->radius;
+        if (e->parent < 0) frame_local_to_sun_m(b->pos, e->pos);   /* star: Sun frame */
         for (int q = 0; q < 3; q++) {
             const Body *pb = e->parent >= 0 ? &g_bodies[mem[e->parent]] : NULL;
-            e->pos[q] = b->pos[q] - (pb ? pb->pos[q] : 0.0);
+            if (pb) e->pos[q] = b->pos[q] - pb->pos[q];
             e->vel[q] = b->vel[q] - (pb ? pb->vel[q] : 0.0);
             e->col[q] = b->col[q];
             e->atm_color[q] = b->atm_color[q];
@@ -307,10 +309,12 @@ static void restore(Promoted *p, const SystemDelta *d)
         if (k == 0 || e->parent < 0) {
             /* The star drifts inertially; nothing in its own system is
              * massive enough to matter over the gap. */
+            double sun_m[3];
             for (int q = 0; q < 3; q++) {
-                ap[k][q] = e->pos[q] + e->vel[q] * dt;
+                sun_m[q] = e->pos[q] + e->vel[q] * dt;   /* saved in the Sun frame */
                 av[k][q] = e->vel[q];
             }
+            frame_sun_to_local_m(sun_m, ap[k]);
         } else {
             const DeltaBody *pe = &d->b[e->parent];
             double r[3], v[3];
@@ -401,9 +405,11 @@ static void promote(int gal, long cx, long cy, long cz, int sub,
     spec.name    = p->name;
     spec.mass    = msun * SOLAR_MASS_KG;
     spec.radius  = pow(msun, 0.8) * 6.957e8;
-    spec.pos[0]  = star_au[0] * AU;
-    spec.pos[1]  = star_au[1] * AU;
-    spec.pos[2]  = star_au[2] * AU;
+    {   /* lattice positions are Sun frame; the system is built in the local
+         * one, where its planets keep full precision (frame.h) */
+        double sun_m[3] = { star_au[0] * AU, star_au[1] * AU, star_au[2] * AU };
+        frame_sun_to_local_m(sun_m, spec.pos);
+    }
     spec.is_star = 1;
     spec.parent  = -1;
     spec.rotation_rate = 2.9e-6 * (0.5 + 1.5 * rng01());

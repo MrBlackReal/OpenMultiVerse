@@ -21,6 +21,7 @@
  * and shock timings continue to reference the original detonation point.
  */
 #include "supernova.h"
+#include "frame.h"
 #include "body.h"
 #include "accretion.h"
 #include "collision.h"
@@ -416,8 +417,16 @@ static void immediate_flash_effects(const SupernovaEvent *e)
     }
 }
 
+static void supernova_frame_shift(const double d_m[3])
+{
+    for (int i = 0; i < SUPERNOVA_MAX_EVENTS; i++)
+        if (s_events[i].active)
+            for (int q = 0; q < 3; q++) s_events[i].pos[q] -= d_m[q];
+}
+
 void supernova_reset(void)
 {
+    frame_on_rebase(supernova_frame_shift);
     for (int i = 0; i < SUPERNOVA_MAX_EVENTS; i++)
         supernova_event_release(&s_events[i]);
     memset(s_events, 0, sizeof(s_events));

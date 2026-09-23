@@ -3,6 +3,7 @@
  * for the design contract. Plain CPU state: no GL, no SDL, no ImGui.
  */
 #include "field_graph.h"
+#include "frame.h"
 #include "body.h"
 #include "universe.h"   /* g_field_star_begin/end */
 #include "physics.h"     /* g_sim_time                       */
@@ -54,8 +55,15 @@ static int body_valid_alive(int i)
 
 /* ── lifecycle ────────────────────────────────────────────────────────────── */
 
+static void field_graph_frame_shift(const double d_m[3])
+{
+    for (int i = 0; i < FG_LOG_LEN; i++)
+        for (int q = 0; q < 3; q++) s_log[i].pos[q] -= d_m[q];
+}
+
 void field_graph_init(void)
 {
+    frame_on_rebase(field_graph_frame_shift);
     s_edges = NULL; s_edge_count = 0; s_edge_cap = 0;
     memset(s_log, 0, sizeof(s_log));
     s_log_head = s_log_total = 0;

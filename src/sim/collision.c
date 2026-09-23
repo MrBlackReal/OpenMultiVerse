@@ -16,6 +16,7 @@
  *   § API       — public query functions
  */
 #include "collision.h"
+#include "frame.h"
 #include "paircache.h"
 #include "body.h"
 #include "field_graph.h"
@@ -512,8 +513,21 @@ static void mark_system_dirty(int root, double hot_duration)
     if (s_system_hot[root] > 0.0) live_add(&s_hot_live, root, cnb());
 }
 
+/* Rebase (frame.h): the pre-physics snapshot and live impact particles are
+ * local-frame positions. */
+static void collision_frame_shift(const double d_m[3])
+{
+    if (s_pos_before)
+        for (int i = 0; i < s_cap; i++)
+            for (int q = 0; q < 3; q++) s_pos_before[i][q] -= d_m[q];
+    for (int i = 0; i < MAX_COLLISION_PARTICLES; i++)
+        if (s_particles[i].active)
+            for (int q = 0; q < 3; q++) s_particles[i].pos[q] -= d_m[q];
+}
+
 void collision_reset(void)
 {
+    frame_on_rebase(collision_frame_shift);
     memset(s_impacts, 0, sizeof(s_impacts));
     memset(s_perm_scars, 0, sizeof(s_perm_scars));
     memset(s_merges, 0, sizeof(s_merges));

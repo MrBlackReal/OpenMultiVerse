@@ -24,6 +24,7 @@
  *      planet and an unsoftened 1/r^2 would produce a permanent NaN particle.
  */
 #include "asteroids.h"
+#include "frame.h"
 #include "body.h"
 #include "camera.h"
 #include "physics.h"
@@ -267,8 +268,16 @@ static int init_belt_gl(Belt *b)
 /* Parse asteroid belt descriptors from universe.json, bake particle
  * initial conditions, and allocate GPU resources.  Must be called after
  * g_bodies[] is populated so kepler_to_state() can read the Sun position. */
+static void asteroids_frame_shift(const double d_m[3])
+{
+    for (int b = 0; b < s_n_belts; b++)
+        for (int i = 0; i < s_belts[b].n; i++)
+            for (int q = 0; q < 3; q++) s_belts[b].p[i].pos[q] -= d_m[q];
+}
+
 void asteroids_init(const char *path)
 {
+    frame_on_rebase(asteroids_frame_shift);
     JsonNode *root = json_parse_file(path);
     if (!root) {
         fprintf(stderr, "[Asteroids] cannot parse '%s'\n", path);

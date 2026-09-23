@@ -9,6 +9,7 @@
  * interpolated focus point, so the target stays framed the whole way.
  */
 #include "benchmark.h"
+#include "frame.h"
 #include "camera.h"
 #include "galaxy.h"
 #include "body.h"
@@ -185,7 +186,9 @@ static void wp_push_body(int bi, double mult, const char *label,
                          float travel, float hold) {
     if (bi < 0) return;
     const Body *b = &g_bodies[bi];
-    double c[3] = { b->pos[0] * RS, b->pos[1] * RS, b->pos[2] * RS };
+    double sun_m[3];
+    frame_local_to_sun_m(b->pos, sun_m);      /* waypoints are Sun frame */
+    double c[3] = { sun_m[0] * RS, sun_m[1] * RS, sun_m[2] * RS };
     double r = b->radius * RS;
     if (r <= 0.0) r = 1.0;
 
@@ -419,6 +422,13 @@ static void mint_neutron_star(void) {
     s_ns_idx = remnant;
 }
 
+/* Waypoints are Sun-frame positions (galaxies, the Sun); the camera lives in
+ * the local frame (frame.h). */
+static void set_cam_sun(const double p[3])
+{
+    for (int i = 0; i < 3; i++) g_cam.pos[i] = p[i] - g_frame_origin_au[i];
+}
+
 void benchmark_start(void) {
     mint_neutron_star();
     build_tour(0);
@@ -436,7 +446,7 @@ void benchmark_start(void) {
     s_summary[0] = '\0';
 
     /* start pose = waypoint 0 */
-    for (int i = 0; i < 3; i++) g_cam.pos[i] = s_wp[0].pos[i];
+    set_cam_sun(s_wp[0].pos);
 
     fprintf(stdout,
             "[Benchmark] starting flythrough: %d stages x %d pass(es) "
@@ -609,7 +619,7 @@ void benchmark_update(float dt_real) {
     }
 
     if (s_seg >= s_nwp) {             /* current pass finished */
-        for (int i = 0; i < 3; i++) g_cam.pos[i] = s_wp[s_nwp-1].pos[i];
+        set_cam_sun(s_wp[s_nwp-1].pos);
         if (s_pass + 1 < s_passes) {
             /* Next pass: same tour, galaxies off, and its own SN progenitor —
              * so the tour is rebuilt (identical stage count, one moved
@@ -626,7 +636,7 @@ void benchmark_update(float dt_real) {
             }
             s_seg = 1; s_seg_t = 0.0; s_elapsed = 0.0; s_warmup = 2;
             s_phase = PH_TRANSIT; s_sn_fired = 0;
-            for (int i = 0; i < 3; i++) g_cam.pos[i] = s_wp[0].pos[i];
+            set_cam_sun(s_wp[0].pos);
             fprintf(stdout, "[Benchmark] pass %d/%d — %s\n",
                     s_pass + 1, s_passes, pass_name(s_pass));
             return;
@@ -642,13 +652,13 @@ void benchmark_update(float dt_real) {
     /* ---- pose ---------------------------------------------------------- */
     const Waypoint *a = &s_wp[s_seg - 1];
     const Waypoint *b = &s_wp[s_seg];
-    double look[3];
+    double look[3], cam[3];                   /* Sun frame, like the waypoints */
 
     if (s_phase == PH_TRANSIT) {
         double dur = b->travel_s > 1e-3f ? b->travel_s : 1e-3f;
         double u   = smoother(s_seg_t / dur);
         for (int i = 0; i < 3; i++)
-            g_cam.pos[i] = a->pos[i] + (b->pos[i] - a->pos[i]) * u;
+            cam[i] = a->pos[i] + (b->pos[i] - a->pos[i]) * u;
 
         /* Look where we are going: aim at the destination *camera* point, so
          * the gaze lies along the flight path instead of dragging sideways
@@ -679,14 +689,15 @@ void benchmark_update(float dt_real) {
         for (int i = 0; i < 3; i++) off[i] = b->pos[i] - b->focus[i];
         double rx =  off[0]*ca + off[2]*sa;
         double rz = -off[0]*sa + off[2]*ca;
-        g_cam.pos[0] = b->focus[0] + rx;
-        g_cam.pos[1] = b->focus[1] + off[1];
-        g_cam.pos[2] = b->focus[2] + rz;
+        cam[0] = b->focus[0] + rx;
+        cam[1] = b->focus[1] + off[1];
+        cam[2] = b->focus[2] + rz;
         for (int i = 0; i < 3; i++) look[i] = b->focus[i];
     }
 
     /* orient toward the look point (cam_get_dir convention) */
-    double d[3] = { look[0]-g_cam.pos[0], look[1]-g_cam.pos[1], look[2]-g_cam.pos[2] };
+    set_cam_sun(cam);
+    double d[3] = { look[0]-cam[0], look[1]-cam[1], look[2]-cam[2] };
     double len = v_len(d);
     if (len > 1e-9) {
         g_cam.yaw   = (float)(atan2(d[2], d[0]) * 180.0 / PI);
