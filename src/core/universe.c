@@ -868,7 +868,11 @@ static void load_star_catalog(const char *path)
     const double DEDUP_ARCSEC    = 3.0;
     const double DEDUP_DIST_FRAC = 0.25;
     const double ANG = DEDUP_ARCSEC * (PI / 180.0) / 3600.0;   /* radians */
-    int n_ex = 0;
+    /* Existing stars: bodies, and lone catalog stars the body catalog already
+     * put in the field store (load_body_catalog) -- a Gaia row repeating one
+     * of those is the same duplicate as before they moved. */
+    const int n_store0 = g_field_star_n;
+    int n_ex = n_store0;
     for (int i = 0; i < g_nbodies; i++)
         if (g_bodies[i].alive && g_bodies[i].is_star) n_ex++;
 
@@ -891,11 +895,17 @@ static void load_star_catalog(const char *path)
             for (int i = 0; i < cap; i++) ghead[i] = -1;
             gmask = (unsigned)cap - 1;
             int k = 0;
-            for (int i = 0; i < g_nbodies; i++) {
-                if (!(g_bodies[i].alive && g_bodies[i].is_star)) continue;
-                double px = g_bodies[i].pos[0] / LY;
-                double py = g_bodies[i].pos[1] / LY;
-                double pz = g_bodies[i].pos[2] / LY;
+            for (int i = 0; i < g_nbodies + n_store0; i++) {
+                double px, py, pz;
+                if (i < g_nbodies) {
+                    if (!(g_bodies[i].alive && g_bodies[i].is_star)) continue;
+                    px = g_bodies[i].pos[0] / LY;
+                    py = g_bodies[i].pos[1] / LY;
+                    pz = g_bodies[i].pos[2] / LY;
+                } else {
+                    const FieldStar *fs = &g_field_stars[i - g_nbodies];
+                    px = fs->pos_ly[0]; py = fs->pos_ly[1]; pz = fs->pos_ly[2];
+                }
                 double d  = sqrt(px*px + py*py + pz*pz);
                 if (d < 1e-9) continue;          /* the Sun: no direction */
                 ex[k][0] = px / d; ex[k][1] = py / d; ex[k][2] = pz / d; ex[k][3] = d;
@@ -1003,6 +1013,43 @@ static void load_star_catalog(const char *path)
  * velocity, or warm-up).  A missing file is not an error — the binary is
  * regenerated locally (build_known_universe.py) and gitignored.
  */
+/* A lone catalog star -- no planets, not a hole or comet, named by a bare
+ * catalog id -- is scenery exactly like a Gaia field star, so it belongs in
+ * the compact store, not in g_bodies. 199k of the 204k stars in the shipped
+ * body catalog are this, and as bodies they made every frame walk them all:
+ * projection, dots, glare, labels, proximity (the ~50 ms that stayed the same
+ * 8 Gly from anything). In the store they share the field stars' brick-culled
+ * VBO and materialise into the pool when approached, under the same name:
+ * the id must round-trip through star_catalog_name, or the star stays a body. */
+static int body_record_to_field(const BodyBinRecord *r, int has_children)
+{
+    if (has_children || !(r->flags & BODYBIN_IS_STAR) ||
+        (r->flags & (BODYBIN_IS_BLACK_HOLE | BODYBIN_IS_COMET))) return 0;
+    const char *n = r->name;
+    if (!n[0]) return 0;
+    for (const char *c = n; *c; c++) if (*c < '0' || *c > '9') return 0;
+    char *end = NULL;
+    unsigned long long id = strtoull(n, &end, 10);
+    char back[32];
+    star_catalog_name((uint64_t)id, back, sizeof back);
+    if (strcmp(back, n) != 0) return 0;
+
+    StarBinRecord s;
+    memset(&s, 0, sizeof s);
+    s.source_id  = id;
+    s.vel_kms[0] = (float)(r->vel[0] / 1000.0);
+    s.vel_kms[1] = (float)(r->vel[1] / 1000.0);
+    s.vel_kms[2] = (float)(r->vel[2] / 1000.0);
+    s.mass_kg    = (float)r->mass;
+    s.radius_km  = (float)(r->radius / 1000.0);
+    s.abs_mag    = NAN;               /* none: radius-based, as the body was */
+    for (int k = 0; k < 3; k++) {
+        float c = r->color[k] * 255.0f + 0.5f;
+        s.color[k] = (uint8_t)(c < 0.0f ? 0.0f : (c > 255.0f ? 255.0f : c));
+    }
+    return field_store_push(&s, r->pos[0] / LY, r->pos[1] / LY, r->pos[2] / LY);
+}
+
 static void load_body_catalog(const char *path)
 {
     if (!path || !path[0]) return;
@@ -1027,64 +1074,61 @@ static void load_body_catalog(const char *path)
     }
     if (h.count == 0) { fclose(f); return; }
 
-    /* Parent indices in the file are catalog-local; add this base so they point
-     * at the right g_bodies slot once appended after the manifest's bodies. */
-    const int base = g_nbodies;
-    if (h.count <= (uint32_t)(INT_MAX - g_nbodies))
-        ensure_capacity(g_nbodies + (int)h.count);
-
-    const size_t CHUNK = 8192;
-    BodyBinRecord *buf = (BodyBinRecord *)malloc(CHUNK * sizeof *buf);
-    unsigned added = 0;
-    if (buf) {
-        uint32_t remaining = h.count;
-        while (remaining > 0) {
-            size_t want = remaining < CHUNK ? remaining : CHUNK;
-            size_t got = fread(buf, sizeof *buf, want, f);
-            if (got == 0) break;
-            for (size_t j = 0; j < got; j++) {
-                BodyBinRecord *r = &buf[j];
-                ensure_capacity(g_nbodies + 1);
-                Body *bo = &g_bodies[g_nbodies];
-                body_defaults(bo);
-                snprintf(bo->name, sizeof bo->name, "%s", r->name);
-                bo->mass   = r->mass;
-                bo->radius = r->radius;
-                bo->pos[0] = r->pos[0]; bo->pos[1] = r->pos[1]; bo->pos[2] = r->pos[2];
-                bo->vel[0] = r->vel[0]; bo->vel[1] = r->vel[1]; bo->vel[2] = r->vel[2];
-                bo->col[0] = r->color[0]; bo->col[1] = r->color[1]; bo->col[2] = r->color[2];
-                bo->is_star       = (r->flags & BODYBIN_IS_STAR) ? 1 : 0;
-                bo->is_black_hole = (r->flags & BODYBIN_IS_BLACK_HOLE) ? 1 : 0;
-                bo->is_comet      = (r->flags & BODYBIN_IS_COMET) ? 1 : 0;
-                body_set_agn(bo, r->agn_activity, r->accretion_disk,
-                             r->dust_torus);
-                bo->obliquity      = r->obliquity;
-                bo->rotation_rate  = r->rotation_rate;
-                bo->rotation_angle = r->rotation_angle;
-                /* Black-hole radius is derived from mass (single root), matching
-                 * the JSON loader — never trust a stored horizon. */
-                if (bo->is_black_hole && bo->mass > 0.0)
-                    bo->radius = laws_schwarzschild_radius(bo->mass);
-                bo->parent = (r->parent >= 0) ? base + r->parent : -1;
-                accretion_init_body(bo);
-                g_nbodies++;
-                added++;
-            }
-            remaining -= (uint32_t)got;
-        }
-        free(buf);
+    /* Whole file at once: which records have children decides which go to
+     * the field store, and parent links need a local -> slot remap. */
+    BodyBinRecord *all = (BodyBinRecord *)malloc((size_t)h.count * sizeof *all);
+    int *kids  = (int *)calloc(h.count, sizeof(int));
+    int *slot  = (int *)malloc((size_t)h.count * sizeof(int));
+    unsigned added = 0, to_field = 0;
+    uint32_t n = 0;
+    if (all && kids && slot)
+        n = (uint32_t)fread(all, sizeof *all, h.count, f);
+    for (uint32_t j = 0; j < n; j++)
+        if (all[j].parent >= 0 && (uint32_t)all[j].parent < n) kids[all[j].parent]++;
+    for (uint32_t j = 0; j < n; j++) {
+        BodyBinRecord *r = &all[j];
+        slot[j] = -1;
+        if (body_record_to_field(r, kids[j] > 0)) { to_field++; continue; }
+        ensure_capacity(g_nbodies + 1);
+        Body *bo = &g_bodies[g_nbodies];
+        body_defaults(bo);
+        snprintf(bo->name, sizeof bo->name, "%s", r->name);
+        bo->mass   = r->mass;
+        bo->radius = r->radius;
+        bo->pos[0] = r->pos[0]; bo->pos[1] = r->pos[1]; bo->pos[2] = r->pos[2];
+        bo->vel[0] = r->vel[0]; bo->vel[1] = r->vel[1]; bo->vel[2] = r->vel[2];
+        bo->col[0] = r->color[0]; bo->col[1] = r->color[1]; bo->col[2] = r->color[2];
+        bo->is_star       = (r->flags & BODYBIN_IS_STAR) ? 1 : 0;
+        bo->is_black_hole = (r->flags & BODYBIN_IS_BLACK_HOLE) ? 1 : 0;
+        bo->is_comet      = (r->flags & BODYBIN_IS_COMET) ? 1 : 0;
+        body_set_agn(bo, r->agn_activity, r->accretion_disk, r->dust_torus);
+        bo->obliquity      = r->obliquity;
+        bo->rotation_rate  = r->rotation_rate;
+        bo->rotation_angle = r->rotation_angle;
+        /* Black-hole radius is derived from mass (single root), matching
+         * the JSON loader — never trust a stored horizon. */
+        if (bo->is_black_hole && bo->mass > 0.0)
+            bo->radius = laws_schwarzschild_radius(bo->mass);
+        accretion_init_body(bo);
+        slot[j] = g_nbodies++;
+        added++;
     }
 
-    /* Guard parent links against a malformed file (out-of-range / self / points
-     * before the catalog base into a manifest body is allowed; only reject the
-     * clearly invalid so body_root_star()'s chain walk can never loop). */
-    for (int i = base; i < g_nbodies; i++) {
-        int p = g_bodies[i].parent;
-        if (p >= g_nbodies || p == i) g_bodies[i].parent = -1;
+    /* Parent links: catalog-local index -> the slot it landed in. A parent is
+     * never moved to the field store (only childless stars are), so every
+     * valid link resolves; a malformed one (out of range, self) becomes a
+     * root so body_root_star()'s chain walk can never loop. */
+    for (uint32_t j = 0; j < n; j++) {
+        if (slot[j] < 0) continue;
+        int32_t p = all[j].parent;
+        g_bodies[slot[j]].parent = (p >= 0 && (uint32_t)p < n && p != (int32_t)j)
+                                 ? slot[p] : -1;
     }
+    free(all); free(kids); free(slot);
 
     fclose(f);
-    fprintf(stdout, "[universe] body_catalog '%s': +%u bodies\n", path, added);
+    fprintf(stdout, "[universe] body_catalog '%s': +%u bodies, %u lone stars "
+                    "to the field store\n", path, added, to_field);
 }
 
 void universe_load(const char *path)
@@ -1743,6 +1787,8 @@ void universe_field_pool_update(const double cam_m[3], double radius_m)
     static int near[FIELD_POOL_MAX];
     int n = cosmic_field_stars_near(cam_m, radius_m, near, FIELD_POOL_MAX);
 
+    int changed = 0;
+
     /* Release slots whose record is no longer in range. */
     for (int k = 0; k < FIELD_POOL_MAX; k++) {
         if (s_pool_rec[k] < 0) continue;
@@ -1751,6 +1797,7 @@ void universe_field_pool_update(const double cam_m[3], double radius_m)
         if (!still) {
             g_bodies[g_field_star_begin + k].alive = 0;
             s_pool_rec[k] = -1;
+            changed = 1;
         }
     }
 
@@ -1799,5 +1846,13 @@ void universe_field_pool_update(const double cam_m[3], double radius_m)
         bo->alive = 1;
         bo->generation++;                              /* handles stay honest */
         s_pool_rec[slot] = fi;
+        changed = 1;
     }
+
+    /* A materialised star has to join the physics system membership: the
+     * camera-proximity scan and the radiance field both find nearby field
+     * stars through physics_active_bodies(), which reads that membership. A
+     * slot filled here stayed invisible to both -- no HUD nearest star, no
+     * light -- until something else happened to rebuild it. */
+    if (changed) physics_mark_timestep_dirty();
 }
