@@ -59,6 +59,7 @@
 #include "radiance_field.h"
 #include "field_graph.h"
 #include "profiler.h"
+#include "gpu_timer.h"
 
 /* Active-system count, captured for profiler spike context only. */
 static int s_prof_active_systems = 0;
@@ -481,6 +482,7 @@ static void init_runtime_world(void) {
 static void shutdown_runtime_world(void) {
     asteroids_shutdown();
     rings_shutdown();
+    gpu_timer_shutdown();
     render_shutdown();
     labels_shutdown();
     orbit_predict_shutdown();
@@ -656,7 +658,7 @@ static void app_quit(void) {
     if (settings_dirty() && !cinematic_filming())
         settings_save();
     audio_shutdown();
-    if (profiler_enabled()) profiler_dump_stdout();
+    if (profiler_enabled()) { profiler_dump_stdout(); gpu_timer_dump(); }
     benchmark_shutdown();
     menu_shutdown();
     loading_shutdown();
@@ -1530,6 +1532,8 @@ static void print_usage(const char *prog)
 "\n"
 "Benchmark / tools:\n"
 "  --profile               Per-stage frame profiler; prints a report on exit.\n"
+"  --profile-gpu           --profile plus per-pass GPU times (timer queries).\n"
+"                          Serialises CPU and GPU, so fps under it is not real.\n"
 "  --benchmark             Scripted galaxy flythrough; prints an FPS report.\n"
 "  --benchmark-ab          Also fly a galaxies-OFF pass to price the galaxy\n"
 "                          layer (doubles the run time).\n"
@@ -1609,6 +1613,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[a], "--benchmark")) run_bench = 1;
         /* Per-stage frame profiler; report on exit. */
         else if (!strcmp(argv[a], "--profile")) profiler_set_enabled(1);
+        else if (!strcmp(argv[a], "--profile-gpu")) {
+            profiler_set_enabled(1);
+            gpu_timer_set_enabled(1);
+        }
         /* Add the galaxies-OFF pass that prices the galaxy layer (doubles the
          * run time; the per-stage fps numbers do not need it). */
         else if (!strcmp(argv[a], "--benchmark-ab")) { run_bench = 1; bench_ab = 1; }
@@ -2052,6 +2060,7 @@ int main(int argc, char **argv) {
 
         SDL_Event e;
         profiler_frame_begin();
+        gpu_timer_frame_begin();
         profiler_stage_begin(PROFILER_STAGE_INPUT);
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) running = 0;
@@ -2527,6 +2536,7 @@ int main(int argc, char **argv) {
             profiler_stage_end(PROFILER_STAGE_SWAP);
         }
 
+        gpu_timer_frame_end();
         profiler_stage_begin(PROFILER_STAGE_SWAP);
         SDL_GL_SwapWindow(s_win);
         profiler_stage_end(PROFILER_STAGE_SWAP);

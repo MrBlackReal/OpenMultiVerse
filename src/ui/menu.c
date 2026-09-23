@@ -8,6 +8,7 @@
 #include "earth_tex.h"
 #include "menu.h"
 #include "profiler.h"
+#include "gpu_timer.h"
 #include "presets.h"
 #include "laws.h"
 #include "settings.h"
@@ -858,6 +859,40 @@ static void menu_render_profiler(void)
                 igTableNextColumn(); igText("%.3f", zm);
             }
             igEndTable();
+        }
+        igTreePop();
+    }
+
+    /* ---- GPU: the same passes, timed on the GPU timeline ---- */
+    igSpacing();
+    if (igTreeNode_Str("GPU (timer queries)")) {
+        double ga = 0.0, gm = 0.0;
+        gpu_timer_frame_stats(&ga, &gm);
+        gpu_timer_sort();
+        int n = gpu_timer_count();
+        if (n == 0) {
+            igTextDisabled(gpu_timer_enabled() ? "No GPU samples yet."
+                                               : "Run with --profile-gpu.");
+        } else {
+            igText("GPU frame: avg %.2f ms, max %.2f ms", ga, gm);
+            if (igBeginTable("##prof_gpu", 3,
+                             ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                             ImGuiTableFlags_SizingStretchProp, (ImVec2_c){0, 0}, 0.0f)) {
+                igTableSetupColumn("Pass", ImGuiTableColumnFlags_WidthStretch, 2.0f, 0);
+                igTableSetupColumn("Avg",  ImGuiTableColumnFlags_WidthFixed, 60.0f, 0);
+                igTableSetupColumn("Max",  ImGuiTableColumnFlags_WidthFixed, 60.0f, 0);
+                igTableHeadersRow();
+                for (int i = 0; i < n; i++) {
+                    const char *zn = NULL; double za = 0.0, zm = 0.0;
+                    if (!gpu_timer_get(i, &zn, &za, &zm)) continue;
+                    if (za < 0.005 && zm < 0.05) continue;
+                    igTableNextRow(0, 0.0f);
+                    igTableNextColumn(); igTextUnformatted(zn, NULL);
+                    igTableNextColumn(); igText("%.3f", za);
+                    igTableNextColumn(); igText("%.3f", zm);
+                }
+                igEndTable();
+            }
         }
         igTreePop();
     }

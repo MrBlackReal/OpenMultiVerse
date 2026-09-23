@@ -57,6 +57,7 @@
  */
 #include "render.h"
 #include "profiler.h"
+#include "gpu_timer.h"
 #include "body.h"
 #include "camera.h"
 #include "cosmic_field.h"
@@ -2387,7 +2388,7 @@ void render_frame(const float view[16], const float proj[16],
     float sun_wz = (float)(g_bodies[0].pos[2] * RS);
 
     if (zt_name) profiler_zone_add(zt_name, profiler_now_ms() - zt0);
-    zt_name = "Starfield"; zt0 = profiler_now_ms();
+    gpu_timer_mark("Starfield"); zt_name = "Starfield"; zt0 = profiler_now_ms();
     /* ------------------------------------------------------------------ 1. Starfield */
     /* Stars are on the unit sphere (depth ~= far plane).  Depth test would
      * Z-fight with the cleared depth buffer, so it is disabled for the skybox.
@@ -2413,7 +2414,7 @@ void render_frame(const float view[16], const float proj[16],
     }
 
     if (zt_name) profiler_zone_add(zt_name, profiler_now_ms() - zt0);
-    zt_name = "Spheres"; zt0 = profiler_now_ms();
+    gpu_timer_mark("Spheres"); zt_name = "Spheres"; zt0 = profiler_now_ms();
     /* ------------------------------------------------------------------ 2. Spheres */
     glEnable(GL_DEPTH_TEST);
     glDepthMask(GL_TRUE);
@@ -2896,7 +2897,7 @@ dyn_ready:
     inspect_pick_center(vp_camrel, info);
 
     if (zt_name) profiler_zone_add(zt_name, profiler_now_ms() - zt0);
-    zt_name = "Atmospheres"; zt0 = profiler_now_ms();
+    gpu_timer_mark("Atmospheres"); zt_name = "Atmospheres"; zt0 = profiler_now_ms();
     /* ------------------------------------------------------------------ 2.5. Atmosphere glow
      * Separate additive pass: GL_SRC_ALPHA / GL_ONE, depth-tested but no depth write.
      * The glow billboard radius is planet_radius × atm_scale.
@@ -3054,7 +3055,7 @@ dyn_ready:
     }
 
     if (zt_name) profiler_zone_add(zt_name, profiler_now_ms() - zt0);
-    zt_name = "Galaxies (vol)"; zt0 = profiler_now_ms();
+    gpu_timer_mark("Galaxies (vol)"); zt_name = "Galaxies (vol)"; zt0 = profiler_now_ms();
     /* ------------------------------------------------------------------ 2.65. Galaxies (volumetric) */
     /* Real-position volumetric galaxies (Layer 4.2). Drawn before the nebulae:
      * both blend "over" without depth writes, and galaxies are the more
@@ -3131,7 +3132,7 @@ dyn_ready:
                         (float)g_render_time);
 
     if (zt_name) profiler_zone_add(zt_name, profiler_now_ms() - zt0);
-    zt_name = "Nebulae (vol)"; zt0 = profiler_now_ms();
+    gpu_timer_mark("Nebulae (vol)"); zt_name = "Nebulae (vol)"; zt0 = profiler_now_ms();
     /* ------------------------------------------------------------------ 2.7. Nebulae (volumetric) */
     /* Real-position volumetric clouds; depth-tested against opaque geometry so
      * planets/stars occlude or embed correctly. Drawn camera-relative. */
@@ -3140,7 +3141,7 @@ dyn_ready:
                   WIN_W, WIN_H);
 
     if (zt_name) profiler_zone_add(zt_name, profiler_now_ms() - zt0);
-    zt_name = "Supernova cloud"; zt0 = profiler_now_ms();
+    gpu_timer_mark("Supernova cloud"); zt_name = "Supernova cloud"; zt0 = profiler_now_ms();
     /* ------------------------------------------------------------------ 2.75. Supernova cloud */
     /* The cloud raymarch is fragment-bound and fills the screen when the camera
      * is near the blast. Render it into a half-res target (¼ the fragments) and
@@ -3374,7 +3375,7 @@ dyn_ready:
     }
 
     if (zt_name) profiler_zone_add(zt_name, profiler_now_ms() - zt0);
-    zt_name = "Collision particles"; zt0 = profiler_now_ms();
+    gpu_timer_mark("Collision particles"); zt_name = "Collision particles"; zt0 = profiler_now_ms();
     /* ------------------------------------------------------------------ 3. Collision particles */
     {
         CollisionParticle particles[RENDER_MAX_COLLISION_PARTICLES];
@@ -3414,7 +3415,7 @@ dyn_ready:
     }
 
     if (zt_name) profiler_zone_add(zt_name, profiler_now_ms() - zt0);
-    zt_name = "Center dots"; zt0 = profiler_now_ms();
+    gpu_timer_mark("Center dots"); zt_name = "Center dots"; zt0 = profiler_now_ms();
     /* ------------------------------------------------------------------ 3. Center dots
      *
      * Priority order for overlap resolution: stars first, then planets (sorted
@@ -3698,7 +3699,7 @@ dyn_ready:
     }
 
     if (zt_name) profiler_zone_add(zt_name, profiler_now_ms() - zt0);
-    zt_name = "Field-star dots"; zt0 = profiler_now_ms();
+    gpu_timer_mark("Field-star dots"); zt_name = "Field-star dots"; zt0 = profiler_now_ms();
     /* ---- Static field-star dots (bulk Gaia field): one draw call, GPU-side
      * camera-relative transform + sizing (star_field.vert), zero per-star CPU.
      * Same blend/depth state as the dynamic dots, and the shader culls stars
@@ -3713,13 +3714,13 @@ dyn_ready:
     clusters_render(vp_camrel);
 
     if (zt_name) profiler_zone_add(zt_name, profiler_now_ms() - zt0);
-    zt_name = "Rings + belts"; zt0 = profiler_now_ms();
+    gpu_timer_mark("Rings + belts"); zt_name = "Rings + belts"; zt0 = profiler_now_ms();
     /* ------------------------------------------------------------------ 4. Rings + Asteroid belts */
     rings_render(vp_camrel);
     asteroids_render(vp_camrel);
 
     if (zt_name) profiler_zone_add(zt_name, profiler_now_ms() - zt0);
-    zt_name = "Trails"; zt0 = profiler_now_ms();
+    gpu_timer_mark("Trails"); zt_name = "Trails"; zt0 = profiler_now_ms();
     /* ------------------------------------------------------------------ 5. Trails */
     trails_render(vp_camrel);
 
@@ -3727,7 +3728,7 @@ dyn_ready:
     orbit_predict_render(vp_camrel);
 
     if (zt_name) profiler_zone_add(zt_name, profiler_now_ms() - zt0);
-    zt_name = "Star glare"; zt0 = profiler_now_ms();
+    gpu_timer_mark("Star glare"); zt_name = "Star glare"; zt0 = profiler_now_ms();
     /* ------------------------------------------------------------------ 6. Star glare
      * Drawn after trails so stellar corona covers orbit lines inside the glow disc.
      * Additive blend (GL_ONE / GL_ONE) accumulates glow from multiple stars.
@@ -3813,7 +3814,7 @@ dyn_ready:
     }
 
     if (zt_name) profiler_zone_add(zt_name, profiler_now_ms() - zt0);
-    zt_name = "Comets"; zt0 = profiler_now_ms();
+    gpu_timer_mark("Comets"); zt_name = "Comets"; zt0 = profiler_now_ms();
     /* ------------------------------------------------------------------ 6.35. Comets
      * Coma + ion/dust tails, additive over the scene like the star glare.
      * comet.c owns the pass; activity comes from the RadianceField, so this
@@ -3822,7 +3823,7 @@ dyn_ready:
                  (float)g_render_time);
 
     if (zt_name) profiler_zone_add(zt_name, profiler_now_ms() - zt0);
-    zt_name = "Black holes"; zt0 = profiler_now_ms();
+    gpu_timer_mark("Black holes"); zt_name = "Black holes"; zt0 = profiler_now_ms();
     /* ------------------------------------------------------------------ 6.4. Black holes
      * Shadow + accretion disk billboards, alpha-blended (the shadow is opaque
      * so it occludes the background; the disk/ring write HDR-bright colour that
@@ -4022,7 +4023,7 @@ dyn_ready:
     }
 
     if (zt_name) profiler_zone_add(zt_name, profiler_now_ms() - zt0);
-    zt_name = "AGN jets"; zt0 = profiler_now_ms();
+    gpu_timer_mark("AGN jets"); zt_name = "AGN jets"; zt0 = profiler_now_ms();
     /* ---------------------------------- 6.4b. AGN relativistic jets (additive) */
     if (s_jet_shader) {
         glUseProgram(s_jet_shader);
@@ -4090,7 +4091,7 @@ dyn_ready:
     }
 
     if (zt_name) profiler_zone_add(zt_name, profiler_now_ms() - zt0);
-    zt_name = "AGN torus"; zt0 = profiler_now_ms();
+    gpu_timer_mark("AGN torus"); zt_name = "AGN torus"; zt0 = profiler_now_ms();
     /* -------------------------------------- 6.4c. AGN dust torus (alpha-over) */
     if (s_torus_shader) {
         const float RMAJ = 14.0f, RMIN = 6.0f;   /* in Rs units */
@@ -4201,7 +4202,7 @@ dyn_ready:
     }
 
     if (zt_name) profiler_zone_add(zt_name, profiler_now_ms() - zt0);
-    zt_name = "Build preview"; zt0 = profiler_now_ms();
+    gpu_timer_mark("Build preview"); zt_name = "Build preview"; zt0 = profiler_now_ms();
     /* ------------------------------------------------------------------ 6.5. Build preview */
     render_build_preview(vp_camrel);
 
@@ -4213,7 +4214,7 @@ dyn_ready:
     }
 
     if (zt_name) profiler_zone_add(zt_name, profiler_now_ms() - zt0);
-    zt_name = "Lens flare"; zt0 = profiler_now_ms();
+    gpu_timer_mark("Lens flare"); zt_name = "Lens flare"; zt0 = profiler_now_ms();
     /* ------------------------------------------------------------------ 6.7. Lens flare feed
      *
      * Project the dominant emitter at the camera into NDC for the post-pass
@@ -4276,6 +4277,7 @@ dyn_ready:
      */
 
     if (zt_name) profiler_zone_add(zt_name, profiler_now_ms() - zt0);
+    gpu_timer_mark("(post + UI)");
 }
 
 /* ------------------------------------------------------------------ shutdown */
