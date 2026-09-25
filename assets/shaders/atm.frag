@@ -283,12 +283,11 @@ void main() {
      * back face (t_atm_back) is always behind any solid object that sits
      * inside the atmosphere shell, so the depth test correctly rejects the
      * glow at pixels occupied by a closer solid body.                    */
-    const float FAR = DEPTH_FAR;
     /* Aurora-only fragments sit against the planet's own surface, which is
      * BEHIND the shell back face in depth terms — use the shell entry instead
      * so the depth test against the sphere passes. */
     float eye_depth  = (aur_only ? t0 : t_atm_back) * dot(ray_dir, u_cam_fwd);
-    gl_FragDepth = log2(eye_depth + 1.0) / log2(FAR + 1.0);
+    gl_FragDepth = log_depth(eye_depth);
 
     /* Radiance out, alpha 1: under GL_SRC_ALPHA/GL_ONE this adds L exactly
      * once (the old path multiplied colour by alpha and then blended by it —

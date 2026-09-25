@@ -91,6 +91,6 @@ void main() {
     /* Logarithmic depth for the depth TEST (mask is off, so this doesn't write):
      * keeps the additive glow consistent with the log-depth scene, else standard
      * depth saturates at the far plane and the jets fail the test. */
-    gl_FragDepth = log2(1.0 / gl_FragCoord.w + 1.0) / log2(DEPTH_FAR + 1.0);
+    gl_FragDepth = log_depth(1.0 / gl_FragCoord.w);
     frag_color = vec4(col * I, I);
 }

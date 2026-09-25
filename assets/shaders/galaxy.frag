@@ -100,7 +100,7 @@ void main() {
     if (u_use_scene_depth > 0.5) {
         float sd = texture(u_scene_depth, gl_FragCoord.xy / u_screen).r;
         if (sd < 1.0) {                              /* 1.0 = cleared (sky) */
-            float scene_eye = exp2(sd * log2(FAR + 1.0)) - 1.0;
+            float scene_eye = log_depth_eye(sd);
             float ray_cos   = max(dot(rd, u_cam_fwd), 1e-4);
             tExit = min(tExit, scene_eye / ray_cos / radius);
             if (tExit <= tEnter) discard;
@@ -148,7 +148,7 @@ void main() {
 
     float eye_depth = (tEnter * radius) * dot(rd, u_cam_fwd);
     eye_depth = clamp(eye_depth, 0.0, FAR * 0.9995);
-    gl_FragDepth = log2(eye_depth + 1.0) / log2(FAR + 1.0);
+    gl_FragDepth = log_depth(eye_depth);
 
     /* Star veil (render.c): emission drowns in a nearby star's glare, as in
      * nebula.frag. Applied here rather than in the half-res composite so the

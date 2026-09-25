@@ -15,7 +15,7 @@
 #include "frame.h"
 #include <math.h>
 
-Camera g_cam;
+Camera g_cam = { .basis = { 1, 0, 0,  0, 1, 0,  0, 0, 1 } };
 
 /* ---------------------------------------------------------------- public */
 
@@ -30,15 +30,15 @@ void cam_reset(void) {
     g_cam.yaw    = -90.0f;
     g_cam.pitch  = -26.565f;
     g_cam.speed  =   0.5f;
+    static const double identity[9] = { 1, 0, 0,  0, 1, 0,  0, 0, 1 };
+    memcpy(g_cam.basis, identity, sizeof identity);
 }
 
 /* Compute the unit forward vector from yaw and pitch (spherical coordinates).
  *
- * Yaw rotates around the Y axis (left/right), pitch tilts up/down.
- * The derivation is standard spherical-to-Cartesian:
- *   dx = cos(pitch) * cos(yaw)
- *   dy = sin(pitch)
- *   dz = cos(pitch) * sin(yaw)
+ * Yaw rotates around the basis up (world Y in free flight), pitch tilts
+ * up/down. The derivation is standard spherical-to-Cartesian in the basis:
+ *   d = cos(pitch)·cos(yaw)·b0 + sin(pitch)·b1 + cos(pitch)·sin(yaw)·b2
  *
  * Pitch is clamped to ±89° in the event handler so cp never reaches zero,
  * avoiding a degenerate forward vector parallel to world-up. */
@@ -47,9 +47,15 @@ void cam_get_dir(float *dx, float *dy, float *dz) {
     float sy = sinf(g_cam.yaw   * (float)(PI / 180.0));
     float cp = cosf(g_cam.pitch * (float)(PI / 180.0));
     float sp = sinf(g_cam.pitch * (float)(PI / 180.0));
-    *dx = cy * cp;
-    *dy = sp;
-    *dz = sy * cp;
+    const double *b = g_cam.basis;
+    float l0 = cy * cp, l1 = sp, l2 = sy * cp;
+    *dx = (float)(l0 * b[0] + l1 * b[3] + l2 * b[6]);
+    *dy = (float)(l0 * b[1] + l1 * b[4] + l2 * b[7]);
+    *dz = (float)(l0 * b[2] + l1 * b[5] + l2 * b[8]);
+}
+
+void cam_get_up(float up[3]) {
+    for (int k = 0; k < 3; k++) up[k] = (float)g_cam.basis[3 + k];
 }
 
 /* ---------------------------------------------------------------- fly-to */

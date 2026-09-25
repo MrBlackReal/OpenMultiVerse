@@ -8,12 +8,11 @@ in float v_size;
 out vec4 frag_color;
 
 void main() {
-    const float FAR = DEPTH_FAR;
     vec2 uv = gl_PointCoord * 2.0 - 1.0;
     float r = length(uv);
     if (r > 1.0) discard;
 
-    gl_FragDepth = log2(1.0 / gl_FragCoord.w + 1.0) / log2(FAR + 1.0);
+    gl_FragDepth = log_depth(1.0 / gl_FragCoord.w);
 
     float compact_r = r * max(v_size, 1.0);
     float glow = exp(-compact_r * 4.6);

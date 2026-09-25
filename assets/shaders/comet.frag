@@ -37,9 +37,8 @@ float noise1(float p) {
 
 void main() {
     /* Log depth from the true fragment position (DEPTH_FAR prelude). */
-    const float FAR = DEPTH_FAR;
     float eye_depth = max(dot(v_pos, u_cam_fwd), 1e-6);
-    gl_FragDepth = log2(eye_depth + 1.0) / log2(FAR + 1.0);
+    gl_FragDepth = log_depth(eye_depth);
 
     vec3 col;
     if (u_kind == 0) {

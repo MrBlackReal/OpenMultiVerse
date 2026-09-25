@@ -87,9 +87,18 @@ static char *inject_prelude(const char *src) {
     /* Also the star veil (star_veil.h): the same glare test as the C side,
      * so every background layer drowns in a nearby star's glare identically.
      * Shaders that never call veil_vis() compile the uniforms away. */
-    char prelude[4096];
+    char prelude[8192];
     int plen = snprintf(prelude, sizeof(prelude),
         "#define DEPTH_FAR %.8e\n"
+        "#define DEPTH_UNIT %.8e\n"
+        /* The one log-depth mapping (RENDER_DEPTH_UNIT in common.h) and its
+         * inverse, for every pass that writes or reads scene depth. */
+        "float log_depth(float eye) {\n"
+        "    return log2(1.0 + eye / DEPTH_UNIT) / log2(1.0 + DEPTH_FAR / DEPTH_UNIT);\n"
+        "}\n"
+        "float log_depth_eye(float d) {\n"
+        "    return (exp2(d * log2(1.0 + DEPTH_FAR / DEPTH_UNIT)) - 1.0) * DEPTH_UNIT;\n"
+        "}\n"
         "#define STAR_FADE_MAG0 %.6f\n"
         "#define STAR_FADE_FLOOR %.6f\n"
         "#define VEIL_DIFFUSE %.6f\n"
@@ -149,7 +158,7 @@ static char *inject_prelude(const char *src) {
         "    vec3 k = DUST_K;\n"
         "    return pow(vec3(10.0), -0.4 * av * (k - (k.r + k.g + k.b) / 3.0));\n"
         "}\n",
-        (double)RENDER_DEPTH_FAR, STAR_FADE_MAG0, STAR_FADE_FLOOR, VEIL_DIFFUSE, VEIL_PSF, VEIL_FLOOR, VEIL_CORE_DEG, VEIL_CORE_DEG, VEIL_PSF, VEIL_FLOOR,
+        (double)RENDER_DEPTH_FAR, (double)RENDER_DEPTH_UNIT, STAR_FADE_MAG0, STAR_FADE_FLOOR, VEIL_DIFFUSE, VEIL_PSF, VEIL_FLOOR, VEIL_CORE_DEG, VEIL_CORE_DEG, VEIL_PSF, VEIL_FLOOR,
         VEIL_LO, VEIL_HI,
         DUST_AG_PER_AV, DUST_KR, DUST_KG, DUST_KB, DUST_AV_PER_ZGR);
     if (plen < 0 || plen >= (int)sizeof(prelude)) plen = 0;  /* fall back to plain copy */

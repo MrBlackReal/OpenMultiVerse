@@ -41,7 +41,7 @@
 
 /* A hand-authored shot rarely needs more than a dozen keys; a generated tour
  * (cinema_tour.c) emits ~3 per subject and can run for minutes. */
-#define CINE_MAX_KEYS   192
+#define CINE_MAX_KEYS   2048
 #define CINE_NAME_LEN   32
 
 typedef enum {

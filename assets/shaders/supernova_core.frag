@@ -170,6 +170,6 @@ void main() {
     if (accumAlpha < 0.0008) discard;
 
     eye_depth = min(eye_depth, FAR * 0.9995);
-    gl_FragDepth = log2(eye_depth + 1.0) / log2(FAR + 1.0);
+    gl_FragDepth = log_depth(eye_depth);
     frag_color = vec4(accumColor, accumAlpha);
 }

@@ -9,6 +9,10 @@ typedef struct {
     float yaw;      /* degrees, horizontal */
     float pitch;    /* degrees, vertical   */
     float speed;    /* AU/second           */
+    /* Frame yaw/pitch are measured in, rows: yaw-0 heading, up, yaw-90
+     * heading. The identity for free flight (up = +Y); walking on a planet
+     * sets the local horizon (walk.c), so the same look controls apply. */
+    double basis[9];
 } Camera;
 
 extern Camera g_cam;
@@ -19,6 +23,7 @@ void cam_reset(void);
 
 /* Compute forward direction vector from current yaw/pitch */
 void cam_get_dir(float *dx, float *dy, float *dz);
+void cam_get_up(float up[3]);   /* the view's up: the basis up row */
 
 /* ---- smooth fly-to (Navigate teleport) ----------------------------------
  * Animate the camera from its current pose to (target_pos, yaw, pitch):

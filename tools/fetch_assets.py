@@ -15,6 +15,7 @@ assets/textures against the URL lists in tools/links/ (prograde-data, PDS SBN),
 by path mapping first and basename+size second, and hashes it. Files with no
 known source are listed and left out of the manifest.
 """
+
 import argparse, concurrent.futures as cf, csv, hashlib, os, subprocess, sys, urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -23,6 +24,7 @@ MANIFEST = os.path.join(ASSETS, "manifest.tsv")
 LINKS = os.path.join(ROOT, "tools", "links")
 UA = {"User-Agent": "OpenMultiVerse-fetch-assets/1"}
 
+
 def sha256(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -30,13 +32,19 @@ def sha256(path):
             h.update(b)
     return h.hexdigest()
 
+
 def read_manifest():
     with open(MANIFEST, newline="") as f:
         return list(csv.DictReader(f, delimiter="\t"))
 
+
 def ok(dst, row):
-    return (os.path.isfile(dst) and os.path.getsize(dst) == int(row["bytes"])
-            and sha256(dst) == row["sha256"])
+    return (
+        os.path.isfile(dst)
+        and os.path.getsize(dst) == int(row["bytes"])
+        and sha256(dst) == row["sha256"]
+    )
+
 
 def download(row):
     dst = os.path.join(ASSETS, row["path"])
@@ -45,8 +53,12 @@ def download(row):
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     tmp = dst + ".part"
     try:
-        with urllib.request.urlopen(urllib.request.Request(row["url"], headers=UA), timeout=60) as r, \
-                open(tmp, "wb") as f:
+        with (
+            urllib.request.urlopen(
+                urllib.request.Request(row["url"], headers=UA), timeout=60
+            ) as r,
+            open(tmp, "wb") as f,
+        ):
             while b := r.read(1 << 20):
                 f.write(b)
         if sha256(tmp) != row["sha256"]:
@@ -58,6 +70,7 @@ def download(row):
         if os.path.exists(tmp):
             os.remove(tmp)
         return row["path"], f"FAILED: {e}"
+
 
 def fetch(args):
     rows = read_manifest()
@@ -79,11 +92,14 @@ def fetch(args):
     print(f"done, {failed} failed" if failed else "done")
     return 1 if failed else 0
 
+
 # ---- maintainer side ------------------------------------------------------
+
 
 def tsv(name):
     with open(os.path.join(LINKS, name), newline="") as f:
         return list(csv.DictReader(f, delimiter="\t"))
+
 
 def build():
     # candidate sources: (url, bytes) keyed by expected local path and by (basename, bytes)
@@ -94,8 +110,10 @@ def build():
             _, body, rest = p.split("/", 2)
             local = f"textures/{body.lower()}/{rest}"
         elif p.startswith("models/"):
-            rest = p[len("models/"):]
-            local = ("models/spacecraft/" if "/" in rest else "models/small_bodies/") + rest
+            rest = p[len("models/") :]
+            local = (
+                "models/spacecraft/" if "/" in rest else "models/small_bodies/"
+            ) + rest
             # per-model LICENSE for the small-body PLYs sits at models/LICENSE
             if rest == "LICENSE":
                 local = "models/small_bodies/LICENSE"
@@ -103,17 +121,29 @@ def build():
             continue
         by_path[local] = (r["url"], b)
     for r in tsv("sbn_links.tsv"):
-        by_name.setdefault((r["url"].rsplit("/", 1)[-1], int(r["bytes"] or 0)), r["url"])
+        by_name.setdefault(
+            (r["url"].rsplit("/", 1)[-1], int(r["bytes"] or 0)), r["url"]
+        )
 
-    tracked = set(subprocess.run(["git", "-C", ROOT, "ls-files", "assets/models", "assets/textures"],
-                                 capture_output=True, text=True, check=True).stdout.splitlines())
+    tracked = set(
+        subprocess.run(
+            ["git", "-C", ROOT, "ls-files", "assets/models", "assets/textures"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.splitlines()
+    )
     junk = {".directory", ".DS_Store", "flip.xsh"}
     files = []
     for top in ("models", "textures"):
         for d, _, names in os.walk(os.path.join(ASSETS, top)):
             for n in names:
                 rel = os.path.relpath(os.path.join(d, n), ASSETS)
-                if f"assets/{rel}" not in tracked and n not in junk and not n.endswith((".bc7.dds", ".part")):
+                if (
+                    f"assets/{rel}" not in tracked
+                    and n not in junk
+                    and not n.endswith((".bc7.dds", ".part"))
+                ):
                     files.append(rel)
     files.sort()
     rows, unknown = [], []
@@ -137,8 +167,11 @@ def build():
     for u in unknown:
         print("  ", u)
 
+
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--only")
     ap.add_argument("--jobs", type=int, default=4)
@@ -149,6 +182,7 @@ def main():
     if not os.path.exists(MANIFEST):
         sys.exit("assets/manifest.tsv missing")
     return fetch(a)
+
 
 if __name__ == "__main__":
     sys.exit(main() or 0)

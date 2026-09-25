@@ -92,6 +92,8 @@ OpenMultiVerse/
 │   ├── window_icon.bmp
 │   └── shaders/
 │       ├── phong.vert / phong.frag
+│       ├── planet_noise.glsl          (surface noise + relief, shared with terrain)
+│       ├── terrain*.vert/frag/glsl    (cube-sphere mesh terrain, see §10)
 │       ├── atm.vert / atm.frag
 │       ├── color.vert / color.frag
 │       ├── solid.vert / solid.frag
@@ -1511,8 +1513,13 @@ Depth and blending:
 
 - Spheres and all world passes use logarithmic depth in shaders, normalised
   against a single shared range: `RENDER_DEPTH_FAR` (`src/core/common.h`, currently
-  1e10 AU ≈ 158 kly). `gl_shader_load()` (`src/render/gl_utils.c`) splices `#define
-  DEPTH_FAR <value>` after each shader's `#version` line, so every depth-writing
+  1e10 AU ≈ 158 kly). `gl_shader_load()` (`src/render/gl_utils.c`) splices a
+  prelude after each shader's `#version` line with `DEPTH_FAR` and the one mapping,
+  `log_depth(eye) = log2(1 + eye/UNIT) / log2(1 + FAR/UNIT)` (and its inverse
+  `log_depth_eye`), with `RENDER_DEPTH_UNIT` = 1e-12 AU (15 cm): 24 bits then
+  resolve 3e-6 of the eye distance at every scale, which mesh terrain metres from
+  the camera needs (the older `log2(1 + eye)` could not separate anything within
+  ~200 km). `render_log_depth()` is the CPU twin. Every depth-writing
   pass — including `bh.frag`/`torus.frag` (now log, previously standard
   `0.5+0.5·z/w`) and the additive `jet.frag`/`agncore.frag` depth *tests* —
   sorts on the identical metric. The CPU perspective far plane (`main.c`) uses
@@ -1527,6 +1534,59 @@ Depth and blending:
 - Some overlays disable depth testing by design.
 - `GL_DEPTH_CLAMP` is enabled so nearby billboard spheres do not clip through
   the near plane.
+
+Close-up planets (mesh terrain, `src/render/terrain.c`):
+
+- A solid world is a ray-traced sphere until its relief would show: once the
+  tallest terrain moves the silhouette by a pixel (relief amplitude over the
+  distance to it, in pixels — so a rugged small moon switches from farther out
+  than a smooth planet, and gas giants, stars and imagery Earth never do), it
+  is drawn as six quadtrees on a cube-sphere. Relief amplitude per recipe is
+  `terrain_relief_amp()`.
+- Tiles (65×65 vertices) are baked on the GPU into an R32F texture array
+  (`terrain_gen.frag`: `relief_shape()` from `planet_noise.glsl`, the same noise
+  the sphere paints with, plus fractal gradient-noise detail evaluated around the
+  tile centre on an integer lattice so it stays exact to any depth). The tree is
+  walked from the roots each frame, splitting while quads exceed a few pixels and
+  all four children are baked; missing children are requested and the parent
+  drawn meanwhile, coarse first, within a per-frame bake budget. Layers are
+  recycled least-recently-used. Each tile's height range is reduced on the GPU and
+  read back asynchronously (fenced PBOs) to bound it for horizon/frustum culling
+  and the LOD distance. Skirts hide cracks between levels.
+- Precision: the tile centre on the sphere, relative to the camera, is formed in
+  double on the CPU; shaders only add offsets from it (`terrain_tile.glsl`), so
+  a surface far from the floating origin is as exact as one at it.
+- Shading is deferred: the mesh is rasterised into a depth + normal buffer
+  (`terrain.vert` + `terrain_gbuf.frag`), and `phong.frag` shades it in its
+  normal fullscreen pass with `u_terrain = 1`, taking the hit from that buffer
+  instead of the ray-sphere intersection. One surface model; and at one fragment
+  per pixel the mesh costs about what the sphere does (shading the small
+  triangles directly cost 2–3×). The mesh's own slope (normal tilt and a Lambert
+  term the sphere's flat day ramp leaves out) fades in over 1–4 px of relief, so
+  the switch from the sphere does not change the image.
+- Ground: `terrain_ground()` answers the height of the surface *as drawn* —
+  each frame a 32×32 texel patch of the finest tile under the camera is read
+  back (fenced PBO), and heights are interpolated across the mesh's own
+  triangle diagonal. Deep tiles take the continent-scale relief from a
+  quadratic fit over nine exact samples (a float direction resolves only
+  ~1e-7, which stair-stepped it below ~0.1 m). When the cache cannot hold the
+  selection, the split threshold rises until it can.
+
+Walking (`src/ui/walk.c`, key G):
+
+- The walker lives in the body-local frame (direction, radius, velocities in
+  metres) and is carried into the world each frame by the body's current
+  centre and spin, after the simulation step: it rides the rotation and orbit
+  at any sim speed, and the floating origin never touches its state.
+- The camera's look frame is `g_cam.basis` (identity in free flight); walking
+  sets it to the local horizon, so mouse look and every consumer of
+  `cam_get_dir()`/`cam_get_up()` work unchanged.
+- WASD walk (1.5 m/s), Shift run (6 m/s), E jump (2.7 m/s take-off); the fall
+  is the body's surface gravity GM/R². A drop is a ledge (the walker falls)
+  only on the same detail level: when the tile below refines, the feet follow
+  the drawn ground.
+- Free flight never goes below an eye height (1.7 m) over the drawn ground of
+  the nearest body.
 
 Small-body rendering (continuous LOD):
 
@@ -1565,7 +1625,11 @@ Small-body rendering (continuous LOD):
 
 | Shader | Purpose |
 |---|---|
-| `phong.vert/frag` | Billboard ray-sphere planets/stars, procedural surfaces, collision scars |
+| `phong.vert/frag` | Billboard ray-sphere planets/stars, procedural surfaces, collision scars; also shades mesh terrain from its depth + normal buffer |
+| `planet_noise.glsl` | Surface noise, `moon_height`/`terrain_height`, `relief_shape` (shared by `phong.frag` and the terrain baker) |
+| `terrain_gen.vert` + `terrain_gen.frag` | Bake one terrain tile's heights into the tile cache |
+| `terrain_gen.vert` + `terrain_minmax.frag` | Reduce a baked tile to its height range |
+| `terrain.vert` + `terrain_gbuf.frag` | Rasterise terrain tiles into the depth + normal buffer |
 | `atm.vert/frag` | Ray-shell atmospheric and collision heat glow |
 | `color.vert/frag` | Starfield and body/dot GL points |
 | `star_dot.vert` + `color.frag` | Per-point-sized star dots (`gl_PointSize` from magnitude) |

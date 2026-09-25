@@ -19,8 +19,7 @@ void main() {
     if (u_fade <= 0.001) discard;
 
     /* Logarithmic depth — consistent with phong.frag. */
-    const float FAR = DEPTH_FAR;
-    gl_FragDepth = log2(1.0 / gl_FragCoord.w + 1.0) / log2(FAR + 1.0);
+    gl_FragDepth = log_depth(1.0 / gl_FragCoord.w);
 
     float d = length(gl_PointCoord - vec2(0.5));
     if (d > 0.5) discard;

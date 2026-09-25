@@ -510,6 +510,124 @@ static void menu_render_navigate(void)
         igTextDisabled("%d object%s.", nmatch, nmatch == 1 ? "" : "s");
 }
 
+/* Editable mass/radius plus the quantities derivable from them and from the
+ * body's own state (all cheap, computed per frame for the one inspected body).
+ * Values commit on Enter so a half-typed number never reaches the integrator. */
+static void inspect_edit_physical(Body *b)
+{
+    static const char  *mass_units  = "kg\0Mearth\0Mjup\0Msun\0";
+    static const double mass_kg[]   = { 1.0, M_EARTH_KG, M_JUP_KG, SOLAR_MASS_KG };
+    static const char  *rad_units   = "km\0Rearth\0Rjup\0Rsun\0";
+    static const double rad_m[]     = { 1000.0, R_EARTH_M, R_JUP_M, R_SUN_M };
+    static int s_mu = 3, s_ru = 3, s_last = -1;
+    int self = (int)(b - g_bodies);
+    if (self != s_last) {              /* pick sensible units for the new target */
+        s_last = self;
+        s_mu = b->is_star ? 3 : b->mass >= 0.05 * M_JUP_KG ? 2 : 1;
+        s_ru = b->is_star ? 3 : b->radius >= 0.1 * R_JUP_M ? 2 : 1;
+    }
+
+    igText("Mass");
+    igSameLine(70.0f, -1.0f);
+    igPushItemWidth(150.0f);
+    double m = b->mass / mass_kg[s_mu];
+    if (igInputDouble("##mass", &m, 0.0, 0.0, "%.6g", ImGuiInputTextFlags_EnterReturnsTrue) &&
+        m > 0.0) {
+        b->mass = m * mass_kg[s_mu];
+        b->ms_lifetime_yr = 0.0;       /* lifetime derives from mass: recompute */
+    }
+    igSameLine(0.0f, 6.0f);
+    igPushItemWidth(80.0f);
+    igCombo_Str("##massu", &s_mu, mass_units, -1);
+    igPopItemWidth();
+    igPopItemWidth();
+
+    igText("Radius");
+    igSameLine(70.0f, -1.0f);
+    igPushItemWidth(150.0f);
+    double r = b->radius / rad_m[s_ru];
+    if (igInputDouble("##rad", &r, 0.0, 0.0, "%.6g", ImGuiInputTextFlags_EnterReturnsTrue) &&
+        r > 0.0) {
+        double nr = r * rad_m[s_ru];
+        if (b->base_radius > 0.0)      /* keep lifecycle phase scaling in step */
+            b->base_radius *= nr / b->radius;
+        b->radius = nr;
+    }
+    igSameLine(0.0f, 6.0f);
+    igPushItemWidth(80.0f);
+    igCombo_Str("##radu", &s_ru, rad_units, -1);
+    igPopItemWidth();
+    igPopItemWidth();
+
+    if (igButton("Mass x0.5", (ImVec2_c){ 0.0f, 0.0f }))  { b->mass *= 0.5; b->ms_lifetime_yr = 0.0; }
+    igSameLine(0.0f, 4.0f);
+    if (igButton("Mass x2", (ImVec2_c){ 0.0f, 0.0f }))    { b->mass *= 2.0; b->ms_lifetime_yr = 0.0; }
+    igSameLine(0.0f, 12.0f);
+    if (igButton("Radius x0.5", (ImVec2_c){ 0.0f, 0.0f })) {
+        if (b->base_radius > 0.0) b->base_radius *= 0.5;
+        b->radius *= 0.5;
+    }
+    igSameLine(0.0f, 4.0f);
+    if (igButton("Radius x2", (ImVec2_c){ 0.0f, 0.0f })) {
+        if (b->base_radius > 0.0) b->base_radius *= 2.0;
+        b->radius *= 2.0;
+    }
+    igSpacing();
+
+    /* Derived from mass + radius. */
+    if (b->mass > 0.0 && b->radius > 0.0) {
+        double g    = G_CONST * b->mass / (b->radius * b->radius);
+        double vesc = sqrt(2.0 * G_CONST * b->mass / b->radius);
+        double rho  = b->mass / (4.0 / 3.0 * PI * b->radius * b->radius * b->radius);
+        double rs   = laws_schwarzschild_radius(b->mass);
+        igText("Surface gravity  %.3g m/s2  (%.3g g)", g, g / 9.80665);
+        igText("Escape velocity  %.3g km/s", vesc / 1000.0);
+        igText("Mean density     %.3g kg/m3", rho);
+        igText("Schwarzschild r  %.3g m%s", rs,
+               rs >= b->radius ? "  (inside its horizon!)" : "");
+    }
+
+    /* Motion and orbit relative to the parent (or the origin for roots). */
+    {
+        double sp = sqrt(b->vel[0]*b->vel[0] + b->vel[1]*b->vel[1] + b->vel[2]*b->vel[2]);
+        igText("Speed            %.4g km/s", sp / 1000.0);
+        int p = b->parent;
+        if (p >= 0 && p < g_nbodies && g_bodies[p].alive) {
+            const Body *pb = &g_bodies[p];
+            double dx = b->pos[0]-pb->pos[0], dy = b->pos[1]-pb->pos[1], dz = b->pos[2]-pb->pos[2];
+            double d  = sqrt(dx*dx + dy*dy + dz*dz);
+            double rvx = b->vel[0]-pb->vel[0], rvy = b->vel[1]-pb->vel[1], rvz = b->vel[2]-pb->vel[2];
+            double rv  = sqrt(rvx*rvx + rvy*rvy + rvz*rvz);
+            igText("Distance to %s  %.4g AU", pb->name, d / AU);
+            igText("Relative speed   %.4g km/s", rv / 1000.0);
+            double mu = G_CONST * (pb->mass + b->mass);
+            double en = 0.5*rv*rv - mu / d;                 /* specific energy */
+            if (en < 0.0) {
+                double a = -mu / (2.0 * en);
+                igText("Semi-major axis  %.4g AU", a / AU);
+                igText("Orbital period   %.4g yr",
+                       2.0 * PI * sqrt(a*a*a / mu) / 3.15576e7);
+            } else {
+                igTextDisabled("Unbound relative to its parent.");
+            }
+        }
+    }
+    if (b->rotation_rate != 0.0)
+        igText("Rotation period  %.4g h   tilt %.1f deg",
+               2.0 * PI / fabs(b->rotation_rate) / 3600.0, b->obliquity);
+    else
+        igText("Rotation         none   tilt %.1f deg", b->obliquity);
+
+    /* Appearance. */
+    igColorEdit3("Colour", b->col, 0);
+    if (b->atm_intensity > 0.0f) {
+        igColorEdit3("Atmosphere", b->atm_color, 0);
+        igSliderFloat("Atm glow", &b->atm_intensity, 0.0f, 4.0f, "%.2f", 0);
+        igSliderFloat("Atm height", &b->atm_scale, 1.0f, 1.5f, "%.3f", 0);
+    }
+    igSpacing();
+}
+
 /* Render the "Inspect" tab: details of the currently inspected body, plus
  * stellar-lifecycle controls when it is a star. */
 static void menu_render_inspect(void)
@@ -521,13 +639,13 @@ static void menu_render_inspect(void)
         return;
     }
     Body *b = &g_bodies[t];
-    igText("%s", b->name);
+    igPushItemWidth(-1.0f);
+    igInputText("##bname", b->name, sizeof(b->name), 0, NULL, NULL);
+    igPopItemWidth();
     igTextDisabled("%s", b->is_black_hole ? "Black hole" :
                          b->is_star ? "Star" : "Planet / moon");
     igSpacing();
-    igText("Mass    %.3g Msun", b->mass / SOLAR_MASS_KG);
-    igText("Radius  %.3g Rsun", b->radius / 6.9634e8);
-    igSpacing();
+    inspect_edit_physical(b);
 
     if (b->is_black_hole) {
         igSeparator();

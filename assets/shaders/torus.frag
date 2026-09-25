@@ -119,9 +119,9 @@ void main() {
      * clip.w is the eye-forward distance, same quantity as 1/gl_FragCoord.w. */
     if (thit) {
         vec4 clip = u_vp * vec4(u_center + thit_p * u_rs, 1.0);
-        gl_FragDepth = log2(max(clip.w, 0.0) + 1.0) / log2(DEPTH_FAR + 1.0);
+        gl_FragDepth = log_depth(max(clip.w, 0.0));
     } else {
-        gl_FragDepth = log2(1.0 / gl_FragCoord.w + 1.0) / log2(DEPTH_FAR + 1.0);
+        gl_FragDepth = log_depth(1.0 / gl_FragCoord.w);
     }
     frag_color = vec4(col, alpha);
 }

@@ -66,6 +66,7 @@
 #include "radiance_field.h"
 #include "star_veil.h"
 #include "earth_tex.h"
+#include "terrain.h"
 #include "starfield.h"
 #include "nebula.h"
 #include "galaxy.h"
@@ -144,6 +145,8 @@ static GLint  s_sp_stretch_along = -1;
 static GLint  s_sp_stretch_perp  = -1;
 static GLint  s_sp_tidal_glow    = -1;
 static GLint  s_sp_opacity       = -1;  /* continuous-LOD dot→sphere fade-in */
+static GLint  s_sp_terrain       = -1;  /* 1: shade the mesh terrain buffer (terrain.h) */
+static GLint  s_sp_terrain_slope = -1;
 
 /*
  * get_planet_type — map body name to a procedural texture variant index.
@@ -1770,6 +1773,9 @@ void render_init(void) {
     s_sp_stretch_perp   = glGetUniformLocation(s_sphere_shader, "u_stretch_perp");
     s_sp_tidal_glow     = glGetUniformLocation(s_sphere_shader, "u_tidal_glow");
     s_sp_opacity        = glGetUniformLocation(s_sphere_shader, "u_opacity");
+    s_sp_terrain        = glGetUniformLocation(s_sphere_shader, "u_terrain");
+    s_sp_terrain_slope  = glGetUniformLocation(s_sphere_shader, "u_terrain_slope");
+    terrain_init();     /* close-up planets as mesh terrain; else spheres only */
 
     /* Seed fov_tan/aspect/screen; all three are re-uploaded per frame in the
      * draw path since FOV (slider) and the window size can change at runtime. */
@@ -2698,6 +2704,7 @@ void render_frame(const float view[16], const float proj[16],
     glUniform3f(s_sp_cam_up,     cam_up[0],    cam_up[1],    cam_up[2]);
     glUniform3f(s_sp_cam_fwd,    cam_fwd[0],   cam_fwd[1],   cam_fwd[2]);
     glUniform1f(s_sp_time,       (float)g_render_time);
+    terrain_frame_begin();
 
     glBindVertexArray(s_sphere_vao);
 
@@ -2903,6 +2910,41 @@ dyn_ready:
             s_rs_light_valid[i] = 1;
         }
 
+        /* Sphere or mesh: a solid world whose relief spans a pixel or more
+         * on screen is drawn as terrain (terrain.h). The test is the
+         * silhouette error the sphere would make — the tallest relief over
+         * the distance to it, in pixels — so a rugged small moon switches
+         * from farther out than a smooth giant, and one without relief
+         * never does. */
+        int ptype = get_planet_type(b->name);
+        /* Satellite imagery for the real Earth only, by name: Earth-like
+         * exoplanets share recipe 1 and must not become copies of Earth. */
+        int earth_img = ptype == 1 && strcmp(b->name, "Earth") == 0;
+        int mesh = 0;
+        double relief_px = 0.0;
+        TerrainBody tb;
+        if (!b->is_star && b->tidal_frac <= 0.0f && s_rs_sphere_alpha[i] >= 1.0f) {
+            tb.amp = terrain_relief_amp(ptype, earth_img && earth_tex_ready());
+            if (tb.amp > 0.0) {
+                tb.body = i;
+                tb.name_hash = terrain_name_hash(b->name);
+                tb.ptype  = ptype;
+                tb.radius = collision_visual_radius(i, b->radius) * RS;
+                tb.center_rel[0] = dxd;
+                tb.center_rel[1] = dyd;
+                tb.center_rel[2] = dzd;
+                terrain_local_to_world(b->rotation_angle, b->obliquity, tb.l2w);
+                tb.vp = vp_camrel;
+                for (int k = 0; k < 3; k++) tb.cam_fwd[k] = cam_fwd[k];
+                tb.px_per_rad = (WIN_H / 2.0) / half_fov_tan();
+                double dist = sqrt(dxd*dxd + dyd*dyd + dzd*dzd);
+                double alt  = dist - tb.radius * (1.0 + tb.amp * TERRAIN_HMAX);
+                if (alt < tb.radius * 1e-7) alt = tb.radius * 1e-7;
+                relief_px = tb.amp * tb.radius / alt * tb.px_per_rad;
+                mesh = terrain_update(&tb, relief_px);
+            }
+        }
+
         glUniform3f(s_sp_center,  -oc_x, -oc_y, -oc_z);
         glUniform1f(s_sp_radius,   dr);
         glUniform3f(s_sp_oc,       oc_x, oc_y, oc_z);
@@ -2917,11 +2959,8 @@ dyn_ready:
         glUniform1f(s_sp_rotation,        (float)fmod(b->rotation_angle, 2.0 * PI));
         glUniform1f(s_sp_cloud_rotation,  (float)b->cloud_rotation);
         glUniform1f(s_sp_obliquity, (float)(b->obliquity * (PI / 180.0)));
-        int ptype = get_planet_type(b->name);
         glUniform1i(s_sp_ptype,     ptype);
-        /* Satellite imagery for the real Earth only, by name: Earth-like
-         * exoplanets share recipe 1 and must not become copies of Earth. */
-        earth_tex_bind(s_sphere_shader, ptype == 1 && strcmp(b->name, "Earth") == 0);
+        earth_tex_bind(s_sphere_shader, earth_img);
         /* Cloud coverage is data-driven: solid worlds with an authored
          * atmosphere get a procedural deck scaled by its intensity.  Gas
          * giants / Venus / Titan already ARE cloud recipes — excluded. */
@@ -3065,7 +3104,12 @@ dyn_ready:
             }
         }
 
-        glUniform1i(s_sp_use_fullscreen, use_fullscreen);
+        /* A mesh body is shaded by a fullscreen pass over its depth + normal
+         * buffer (nothing to shade if every tile was culled). */
+        if (mesh) mesh = terrain_render(&tb, s_sphere_shader);
+        glUniform1i(s_sp_terrain, mesh);
+        if (mesh) glUniform1f(s_sp_terrain_slope, (float)terrain_slope_weight(relief_px));
+        glUniform1i(s_sp_use_fullscreen, use_fullscreen || mesh);
 
         /* Tidal disruption: stretch the body into a strand pointing at the hole
          * (elongate along the radial line, squash across it) and add a hot glow. */
@@ -4537,8 +4581,7 @@ dyn_ready:
                         fl_x = cx / cw;
                         fl_y = cy / cw;
                         double dist_au = sqrt(rx*rx + ry*ry + rz*rz);
-                        fl_d = (float)(log2(dist_au + 1.0) /
-                                       log2((double)RENDER_DEPTH_FAR + 1.0));
+                        fl_d = (float)render_log_depth(dist_au);
                         double t = (log10(fl_top[0].irr / 1361.0) + 4.0) / 4.0;
                         if (t < 0.0) t = 0.0;
                         if (t > 1.0) t = 1.0;

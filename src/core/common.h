@@ -93,14 +93,29 @@ extern double g_render_time;
 /* ------------------------------------------------------------------ render depth
  * RENDER_DEPTH_FAR is the single source of truth for the logarithmic depth range:
  * both the CPU perspective far plane (main.c) and every depth-writing shader's
- * `gl_FragDepth = log2(eye+1)/log2(FAR+1)` normalisation (injected as DEPTH_FAR by
- * gl_shader_load) use it. Log depth keeps near-field precision even with a huge far
+ * `gl_FragDepth = log_depth(eye)` normalisation (the prelude gl_shader_load
+ * injects) use it. Log depth keeps near-field precision even with a huge far
  * plane, so this can span planet → interstellar scale in one continuous transform.
  * Units: GL units (= AU, since RS = 1/AU). ~1.6e5 ly. Distant catalog stars can sit
  * light-years out (millions of AU) and still be inside this range.
  * NOTE: shader-side floats can't represent 1e10 exactly, but the log() of it is fine;
  * keep it a round power-friendly magnitude. */
 #define RENDER_DEPTH_FAR  1.0e10f
+
+/* Depth unit of the log mapping: depth = log2(1 + eye/UNIT) / log2(1 + FAR/UNIT).
+ * With 24 bits that resolves 3e-6 of the eye distance at every scale, from 15 cm
+ * to FAR — a mesh-terrain surface metres from the camera sorts against itself as
+ * well as a planet does against its rings at 1 AU. (A unit of 1 AU, the old
+ * mapping, could not tell apart anything within ~200 km of the camera, and float
+ * rounded 1 + eye to 1 below ~9 km.) In AU; 1e-12 AU = 0.15 m. */
+#define RENDER_DEPTH_UNIT 1.0e-12
+
+/* The same mapping on the CPU, for values compared against the depth buffer. */
+static inline double render_log_depth(double eye_au)
+{
+    return log2(1.0 + eye_au / RENDER_DEPTH_UNIT)
+         / log2(1.0 + (double)RENDER_DEPTH_FAR / RENDER_DEPTH_UNIT);
+}
 
 /* Star-dot visibility by apparent magnitude, shared by every star tier (and
  * injected into GLSL by the gl_utils prelude): alpha = 10^(-0.4 (m - MAG0)),

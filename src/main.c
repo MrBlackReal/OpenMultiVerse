@@ -17,6 +17,8 @@
  *   R          - reset camera
  *   +/-        - simulation speed up / down
  *   T          - toggle warp mode (interstellar camera speed)
+ *   G          - walk on the ground below / fly again (walk.h;
+ *                WASD walk, Shift run, E jump)
  *   B          - toggle build mode
  *   F11/Alt+↵  - toggle fullscreen
  *
@@ -51,6 +53,7 @@
 #include "ui.h"
 #include "build.h"
 #include "inspect.h"
+#include "walk.h"
 #include "collision.h"
 #include "supernova.h"
 #include "lifecycle.h"
@@ -935,6 +938,10 @@ static void handle_event(const SDL_Event *e, float dt, int *running) {
         case SDLK_TAB:
             build_set_tab_held(1);
             break;
+        case SDLK_g:
+            /* Step out onto the ground below, or back into flight (walk.h). */
+            walk_toggle();
+            break;
         case SDLK_t:
             /* Toggle warp mode, clamping speed into the appropriate range. */
             s_warp = !s_warp;
@@ -1504,6 +1511,7 @@ static void print_usage(const char *prog)
 "  --fov DEG               Field of view in degrees (telephoto compression).\n"
 "  --exposure V            Fix exposure V (disables auto-exposure).\n"
 "  --timescale V           Override the universe time_scale (0 freezes the sim).\n"
+"  --walk                  Start walking on the ground below the camera (= key G).\n"
 "  --stellar-rate YRS      Years of stellar evolution per real second (aging,\n"
 "                          supernovae, accretion) — testable headless.\n"
 "\n"
@@ -1594,6 +1602,7 @@ int main(int argc, char **argv) {
     float       cam_yaw = 0.0f, cam_pitch = 0.0f;
     float       cli_fov = -1.0f, cli_exposure = -1.0f;   /* <0 = leave default */
     int         cli_ts_set = 0;    double cli_ts = 0.0;   /* --timescale override */
+    int         cli_walk = 0;                             /* --walk: start on the ground */
     int         cine_film = 0, cine_draft = 0;  /* presets, applied before flags */
     float       cli_shutter = -1.0f, cli_aperture = -1.0f;   /* <0 = untouched */
     float       cli_grain = -1.0f, cli_letterbox = -1.0f, cli_rel = -1.0f;
@@ -1664,6 +1673,7 @@ int main(int argc, char **argv) {
          * stays exactly where it was queried, keeping close-range shot framing
          * reproducible (warmup still runs, so orbits are settled first). */
         else if (!strcmp(argv[a], "--timescale") && a + 1 < argc) { cli_ts = atof(argv[++a]); cli_ts_set = 1; }
+        else if (!strcmp(argv[a], "--walk")) cli_walk = 1;
         /* ---- cinematic renderer / film-out (docs/CINEMATIC.md §3) -------------- */
         else if (!strcmp(argv[a], "--cinematic")) g_cine.enabled = 1;
         else if (!strcmp(argv[a], "--output") && a + 1 < argc) {
@@ -1884,6 +1894,7 @@ int main(int argc, char **argv) {
         g_cam.yaw    = cam_yaw;
         g_cam.pitch  = cam_pitch;
     }
+    if (cli_walk) walk_toggle();
     /* --frame-offset: displace the local origin by that many AU (Sun frame)
      * before the first frame. Nothing on screen may change beyond rounding:
      * a subsystem that mixes local and Sun-frame positions shows up as
@@ -2170,7 +2181,8 @@ int main(int argc, char **argv) {
              * floor every heavy frame at exactly 10 fps). */
             benchmark_update(dt_raw);
             if (!benchmark_active()) running = 0;   /* tour + summary done */
-        } else if (!cam_fly_active() && !s_pause_menu_open && !g_inspect_orbit_mode) {
+        } else if (!cam_fly_active() && !s_pause_menu_open && !g_inspect_orbit_mode &&
+                   !walk_active()) {
             camera_move(dt);
         }
 
@@ -2233,6 +2245,18 @@ int main(int argc, char **argv) {
         if (!s_pause_menu_open && g_inspect_orbit_mode)
             inspect_orbit_update(dt);
 
+        /* Walking rides the body the simulation just moved; free flight is
+         * kept above the ground (walk.h). A fly-to or the orbit camera takes
+         * the camera back. */
+        if (walk_active() && (cam_fly_active() || g_inspect_orbit_mode)) walk_exit();
+        if (!benchmark_active()) {
+            int live = !s_pause_menu_open;
+            WalkInput win = { live && s_key_w, live && s_key_s, live && s_key_a,
+                              live && s_key_d, live && s_key_e,
+                              live && (SDL_GetModState() & KMOD_SHIFT) != 0 };
+            walk_update(dt, &win);
+        }
+
         /* Refresh the cosmic density field (throttled; rebuilds on body-set
          * change). Queried by the HUD and, later, continuous LOD. */
         profiler_stage_begin(PROFILER_STAGE_FIELDS);
@@ -2283,7 +2307,8 @@ int main(int argc, char **argv) {
         profiler_stage_begin(PROFILER_STAGE_CAMPREP);
         cam_get_dir(&fdx, &fdy, &fdz);
 
-        float up[3] = { 0.0f, 1.0f, 0.0f };
+        float up[3];
+        cam_get_up(up);
         float dir[3]  = { fdx, fdy, fdz };
         float zero3[3] = { 0.0f, 0.0f, 0.0f };
         mat4_lookAt(view_rot, zero3, dir, up);
@@ -2423,7 +2448,8 @@ int main(int argc, char **argv) {
                 float sfx, sfy, sfz;
                 cam_get_dir(&sfx, &sfy, &sfz);
                 base_fwd[0] = sfx; base_fwd[1] = sfy; base_fwd[2] = sfz;
-                float zf[3] = { 0.0f, 0.0f, 0.0f }, uw[3] = { 0.0f, 1.0f, 0.0f };
+                float zf[3] = { 0.0f, 0.0f, 0.0f }, uw[3];
+                cam_get_up(uw);
                 float df[3] = { sfx, sfy, sfz };
                 mat4_lookAt(view_rot, zf, df, uw);
                 Vec3 r1, u1;
@@ -2475,7 +2501,8 @@ int main(int argc, char **argv) {
                  * shaders orient their reconstructed rays with); view carries
                  * the float eye and is used for rings. */
                 float dirf[3] = { (float)aim[0], (float)aim[1], (float)aim[2] };
-                float upw[3]  = { 0.0f, 1.0f, 0.0f };
+                float upw[3];
+                cam_get_up(upw);
                 float zerof[3] = { 0.0f, 0.0f, 0.0f };
                 mat4_lookAt(view_rot, zerof, dirf, upw);
                 float eye[3] = { (float)g_cam.pos[0], (float)g_cam.pos[1],

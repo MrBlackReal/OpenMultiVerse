@@ -17,7 +17,7 @@ out vec4 frag_color;
 
 uniform sampler2D u_depth;       /* scene depth (log-encoded, see below)     */
 uniform vec2      u_light_uv;    /* light position in screen UV              */
-uniform float     u_light_depth; /* light's log depth: log2(d+1)/log2(FAR+1) */
+uniform float     u_light_depth; /* light's log depth: log_depth(d)           */
 uniform float     u_intensity;   /* setting × flux ramp (0 = skipped on CPU) */
 uniform vec3      u_color;       /* light chromaticity                       */
 uniform float     u_aspect;      /* WIN_W / WIN_H                            */

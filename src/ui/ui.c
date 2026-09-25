@@ -73,7 +73,7 @@
 #define CONTROLS_PAD         14.0f   /* horizontal padding from panel edges */
 #define CONTROLS_PAD_BOTTOM  10.0f   /* extra space below last row */
 #define CONTROLS_RETURN_H    42.0f
-#define CONTROLS_COUNT       14
+#define CONTROLS_COUNT       15
 /* content height = title area + rows + bottom padding */
 #define CONTROLS_CONTENT_H  (CONTROLS_TITLE_AREA \
                              + (float)CONTROLS_COUNT * CONTROLS_ITEM_H \
@@ -964,14 +964,15 @@ static void draw_controls_page(float W, float H)
 {
     static const char *KEYS[CONTROLS_COUNT] = {
         "W / S", "A / D", "Q / E", "Mouse", "Scroll",
-        "T", "+ / -", "Space",
+        "T", "G", "+ / -", "Space",
         "B", "Tab + Scroll", "I",
         "R", "Escape", "F11 / Alt+Enter"
     };
     static const char *DESCS[CONTROLS_COUNT] = {
         "Move forward / backward", "Strafe left / right", "Move down / up",
         "Look around", "Adjust camera speed",
-        "Toggle warp mode", "Sim speed up / down", "Pause / resume",
+        "Toggle warp mode", "Walk on the ground (Shift run, E jump)",
+        "Sim speed up / down", "Pause / resume",
         "Toggle build mode", "Cycle build presets", "Toggle inspection mode",
         "Reset camera", "Open menu / exit modes", "Fullscreen"
     };

@@ -89,35 +89,22 @@ uniform float u_tidal_glow;     /* 0..1 hot shredding glow                    */
  * the representation handoff never pops. */
 uniform float u_opacity;
 
+/* Mesh terrain (terrain.h): 1 when this body is drawn as a mesh. The mesh is
+ * rasterised into a depth + normal buffer first, and this pass shades it at
+ * one fragment per pixel, like the sphere: the per-pixel ray meets the mesh
+ * at the stored depth instead of at the sphere. Everything after the hit —
+ * colour, clouds, lighting — is shared. */
+uniform int       u_terrain;
+uniform float     u_terrain_slope;   /* 0..1: how much of the mesh's slope
+                                      * shows in the shading. 0 at the switch
+                                      * from the sphere (so it cannot pop), 1
+                                      * a few pixels of relief closer in.   */
+uniform sampler2D u_terrain_depth;   /* log depth (log_depth), 1 = no mesh */
+uniform sampler2D u_terrain_nrm;     /* mesh normal, world frame           */
+
 out vec4 frag_color;
 
-/* ======================================================================
- * 3-D value noise — no seams, rotation-aware
- * ====================================================================== */
-
-float hash3(vec3 p) {
-    p  = fract(p * vec3(127.1, 311.7, 74.7));
-    p += dot(p, p.yzx + 19.19);
-    return fract((p.x + p.y) * p.z);
-}
-
-float vnoise(vec3 p) {
-    vec3 i = floor(p);
-    vec3 f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);          /* smooth-step */
-    return mix(
-        mix(mix(hash3(i),               hash3(i + vec3(1,0,0)), f.x),
-            mix(hash3(i + vec3(0,1,0)), hash3(i + vec3(1,1,0)), f.x), f.y),
-        mix(mix(hash3(i + vec3(0,0,1)), hash3(i + vec3(1,0,1)), f.x),
-            mix(hash3(i + vec3(0,1,1)), hash3(i + vec3(1,1,1)), f.x), f.y),
-        f.z);
-}
-
-/* 2-octave FBM — deliberately blurry (rough and washy, as requested) */
-float fbm(vec3 p) {
-    return vnoise(p)               * 0.65
-         + vnoise(p * 2.1 + vec3(7.3, 2.1, 5.8)) * 0.35;
-}
+#include "planet_noise.glsl"
 
 vec3 lava_color(float heat)
 {
@@ -154,35 +141,6 @@ vec3 local_surface_dir_to_world(vec3 local_dir)
                           tz));
 }
 
-float moon_height(vec3 NL)
-{
-    float n = fbm(NL * 3.5);
-    float n2 = fbm(NL * 6.0 + vec3(2.7, 5.4, 1.8));
-    float n3 = fbm(NL * 12.0 + vec3(6.8, 1.7, 4.9));
-    float maria = smoothstep(0.34, 0.72, 1.0 - n2)
-                * smoothstep(0.22, 0.86, n3);
-    float highland = smoothstep(0.50, 0.88, n2);
-    float crater_noise = vnoise(NL * 22.0 + vec3(3.1, 7.4, 1.6));
-    float crater_soft = smoothstep(0.76, 0.94, crater_noise)
-                      * smoothstep(0.28, 0.90, n3);
-    float crater_cell = vnoise(NL * 34.0 + vec3(8.6, 2.2, 5.4));
-    float crater_rim = smoothstep(0.56, 0.72, crater_cell)
-                     * (1.0 - smoothstep(0.72, 0.88, crater_cell))
-                     * smoothstep(0.30, 0.86, n3);
-    float crater_floor = smoothstep(0.78, 0.96, crater_cell)
-                       * smoothstep(0.24, 0.80, 1.0 - n2);
-    float fine = smoothstep(0.92, 0.99,
-                            vnoise(NL * 28.0 + vec3(8.3, 2.1, 5.6)));
-
-    return n * 0.05
-         + highland * 0.10
-         - maria * 0.08
-         - crater_soft * 0.055
-         - crater_floor * 0.090
-         + crater_rim * 0.095
-         + fine * 0.010;
-}
-
 vec3 moon_normal(vec3 NL)
 {
     vec3 up = abs(NL.y) < 0.98 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
@@ -210,17 +168,6 @@ vec3 world_to_local(vec3 v, float rot)
     float cr = cos(-rot);
     float sr = sin(-rot);
     return vec3(tx * cr - tz * sr, ty, tx * sr + tz * cr);
-}
-
-/* Generic terrain relief for solid worlds: continent-scale undulation (keyed
- * on the same fbm(NL·3.5) the colour recipes use, so relief follows the
- * painted landforms), ridged mountain chains, and fine roughness. */
-float terrain_height(vec3 NL)
-{
-    float base  = fbm(NL * 3.5);
-    float ridge = 1.0 - abs(2.0 * fbm(NL * 8.0 + vec3(4.4, 8.8, 2.2)) - 1.0);
-    float fine  = fbm(NL * 24.0 + vec3(9.1, 3.3, 6.6));
-    return base * 0.45 + ridge * ridge * 0.40 + fine * 0.15;
 }
 
 vec3 terrain_normal(vec3 NL, float strength)
@@ -628,7 +575,17 @@ void main() {
     vec3  hit_rel;
     vec3  N;
     float t;
-    if (u_stretch_along > 1.001 || u_stretch_perp < 0.999) {
+    vec3  mesh_N = vec3(0.0);
+    float mesh_depth = 1.0;
+    if (u_terrain == 1) {
+        ivec2 px   = ivec2(gl_FragCoord.xy);
+        mesh_depth = texelFetch(u_terrain_depth, px, 0).r;
+        if (mesh_depth >= 1.0) discard;
+        t       = log_depth_eye(mesh_depth) / dot(ray_dir, u_cam_fwd);
+        hit_rel = u_oc + t * ray_dir;
+        N       = normalize(hit_rel);    /* sphere direction through the hit */
+        mesh_N  = normalize(texelFetch(u_terrain_nrm, px, 0).xyz);
+    } else if (u_stretch_along > 1.001 || u_stretch_perp < 0.999) {
         /* Prolate ellipsoid (tidal spaghettification): semi-axis A along
          * u_stretch_dir, B perpendicular.  Solve the quadratic for the ray in
          * the ellipsoid's principal frame; reduces exactly to the sphere when
@@ -673,9 +630,8 @@ void main() {
      *
      * eye_depth = t * dot(ray_dir, u_cam_fwd)  [= t * cos(θ) off-axis]
      * This equals 1/gl_FragCoord.w for all non-raycast geometry.         */
-    const float FAR  = DEPTH_FAR;
     float eye_depth  = t * dot(ray_dir, u_cam_fwd);
-    gl_FragDepth = log2(eye_depth + 1.0) / log2(FAR + 1.0);
+    gl_FragDepth = (u_terrain == 1) ? mesh_depth : log_depth(eye_depth);
 
     /* ---- emissive (stars) --------------------------------------------- */
     if (u_emission > 0.5) {
@@ -764,6 +720,9 @@ void main() {
             shade_N = local_surface_dir_to_world(normalize(mix(NL, tn, gate)));
         }
     }
+    /* A mesh adds its own slope to the bump above: the tilt of its normal
+     * from the sphere's. */
+    if (u_terrain == 1) shade_N = normalize(shade_N + (mesh_N - N) * u_terrain_slope);
 
     /* Mountain snow: high ridged terrain whitens, more readily at latitude.
      * (The imagery already shows the real snow.) */
@@ -1173,6 +1132,14 @@ void main() {
      * top, so neither is affected.                                            */
     float ndl = dot(shade_N, L);
     float day = smoothstep(-0.12, 0.22, ndl);          /* soft terminator   */
+    /* A mesh also gets the Lambert slope term the flat day ramp leaves out,
+     * as the ratio of its sun cosine to the sphere's: large-scale shading
+     * stays the sphere's (the ratio is 1 where the mesh is level), while up
+     * close slopes brighten toward the sun and fall off away from it, and
+     * peaks past the terminator still catch the light. */
+    if (u_terrain == 1)
+        day *= mix(1.0, clamp(max(dot(mesh_N, L), 0.0) / max(dot(N, L), 0.08), 0.0, 2.0),
+                   u_terrain_slope);
 
     /* ---- Ring shadow: the ring plane stripes the globe ------------------ */
     /* Cast the sun ray from this surface point; where it crosses the ring

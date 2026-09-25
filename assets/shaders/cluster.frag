@@ -18,8 +18,7 @@ out vec4 frag_color;
 
 void main() {
     /* Logarithmic depth — consistent with color.frag / phong.frag. */
-    const float FAR = DEPTH_FAR;
-    gl_FragDepth = log2(1.0 / gl_FragCoord.w + 1.0) / log2(FAR + 1.0);
+    gl_FragDepth = log_depth(1.0 / gl_FragCoord.w);
 
     vec2  pc = gl_PointCoord - vec2(0.5);
     float d2 = dot(pc, pc);

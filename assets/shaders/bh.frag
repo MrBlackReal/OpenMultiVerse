@@ -470,7 +470,7 @@ void main() {
      * the same quantity the rasterised passes feed through 1/gl_FragCoord.w. */
     if (swallowed || (hit && disk_a > 0.5)) {
         vec4 clip = u_vp * vec4(u_center + hit_p * Rs, 1.0);
-        gl_FragDepth = log2(max(clip.w, 0.0) + 1.0) / log2(DEPTH_FAR + 1.0);
+        gl_FragDepth = log_depth(max(clip.w, 0.0));
     } else {
         gl_FragDepth = 1.0;                 /* transparent: never occlude behind */
     }
