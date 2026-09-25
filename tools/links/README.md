@@ -30,3 +30,12 @@ Licences: each prograde asset has a `LICENSE-*` file next to it (listed as kind
 Not scraped: **3d-asteroids.space** sits behind a Cloudflare bot challenge,
 so scripts get HTTP 403. Most of its lightcurve models come from DAMIT, and
 its radar and spacecraft models from the PDS SBN, both covered above.
+
+## Fetching into `assets/`
+
+`tools/fetch_assets.py` is the supported way to populate `assets/models` and
+`assets/textures`. It reads the committed `assets/manifest.tsv` (path, bytes,
+sha256, source URL), skips files that already verify, and downloads the rest.
+`--check` verifies without downloading, `--only textures/mars,models/spacecraft`
+limits it, and `--build` regenerates the manifest from the files on disk using
+the lists in this folder.

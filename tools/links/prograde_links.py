@@ -35,7 +35,7 @@ def tree():
 
 def raw_url(path):
     return (f"https://gitlab.com/{PROJECT}/-/raw/{REF}/" +
-            urllib.parse.quote(path) + "?inline=false")
+            urllib.parse.quote(path))
 
 def kind(path):
     name = path.lower().rsplit("/", 1)[-1]

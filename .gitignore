@@ -122,3 +122,13 @@ assets/catalogs/sdss/*.fits.gz
 
 # Baked GPU texture caches (src/render/texpack.c regenerates them)
 *.bc7.dds
+assets/models/shapes/dsk/*.BDS
+
+# Bulk model/texture data is fetched, not stored: `tools/fetch_assets.py`
+# downloads whatever assets/manifest.tsv lists (rebuild it with --build).
+assets/models/
+assets/textures/*/
+!assets/textures/earth/
+assets/textures/earth/*
+!assets/textures/earth/README.md
+!assets/textures/earth/earth_*.jpg
